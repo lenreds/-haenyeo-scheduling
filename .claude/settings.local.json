@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(winget install OpenJS.NodeJS.LTS --accept-package-agreements --accept-source-agreements --silent)",
+      "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\); node --version; npm --version; npm install)",
+      "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\); npm approve-scripts esbuild; npm rebuild esbuild; node -e \"console.log\\(require\\('esbuild'\\).version\\)\")",
+      "PowerShell($headers = @{ \"apikey\" = \"sb_publishable_6643hWCKC93dC0tMaAA_yg_HLrr1JJI\" }; try { $r = Invoke-WebRequest -Uri \"https://uasylyslmlxfjxwfsosf.supabase.co/rest/v1/\" -Headers $headers -UseBasicParsing -ErrorAction Stop; Write-Output \"STATUS: $\\($r.StatusCode\\)\"; $r.Content.Substring\\(0, [Math]::Min\\(300, $r.Content.Length\\)\\) } catch { Write-Output \"FAILED: $\\($_.Exception.Message\\)\" })",
+      "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\); cd \"C:\\\\Users\\\\Lenre\\\\OneDrive\\\\Desktop\\\\HaenyeoMNG\"; git --version; if \\(-not \\(Test-Path \".git\"\\)\\) { git init -b main | Out-Null; git add -A; git -c user.name=\"HaenyeoMNG\" -c user.email=\"lenreds1016@gmail.com\" commit -m \"Haenyeo Scheduling Hub: Vite app, Supabase data layer + auth, wired from prototype\" | Out-Null; Write-Output \"repo initialized\" } else { Write-Output \"repo already exists\" }; git status --short | Select-Object -First 5; Write-Output \"--- tracked file count ---\"; \\(git ls-files | Measure-Object -Line\\).Lines)"
+    ]
+  }
+}
