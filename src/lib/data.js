@@ -9,6 +9,13 @@ import { supabase } from "./supabase.js";
 
 /* ------------------------------------------------------------------ staff -- */
 
+// The live DB stores section in mixed casings ('foh' vs 'FOH') — normalize to
+// the canonical forms the UI compares against. Unknown/blank values → FOH.
+const SECTION_CANON = { foh: "FOH", boh: "BOH", kitchen: "Kitchen", management: "Management" };
+function canonSection(section) {
+  return SECTION_CANON[String(section || "").trim().toLowerCase()] || "FOH";
+}
+
 export async function fetchStaff() {
   // section was added in migration 0002 — fall back to the old shape if the
   // column doesn't exist yet so the app keeps working pre-migration.
@@ -22,9 +29,8 @@ export async function fetchStaff() {
       .select("id, name, role, active")
       .order("created_at", { ascending: true }));
     if (error) throw error;
-    data = (data || []).map((s) => ({ ...s, section: "FOH" }));
   }
-  return data || [];
+  return (data || []).map((s) => ({ ...s, section: canonSection(s.section) }));
 }
 
 export async function insertStaff({ name, role, section }) {

@@ -11,7 +11,18 @@
       "PowerShell($i=0; Get-Content \"C:\\\\Users\\\\Lenre\\\\OneDrive\\\\Desktop\\\\HaenyeoMNG\\\\src\\\\App.jsx\" | ForEach-Object { $i++; if \\($_.Length -gt 2000\\) { \"{0}: {1} chars\" -f $i, $_.Length } })",
       "PowerShell(npm run build)",
       "PowerShell(git add src/App.jsx src/AuthGate.jsx src/lib/data.js UPDATE-BRIEF-schedule-redesign.md supabase/migrations/0002_roles_and_shift_options.sql .claude/settings.local.json)",
-      "PowerShell(git add .claude/settings.local.json; $env:GIT_EDITOR='true'; git rebase --continue; git log --oneline -3)"
+      "PowerShell(git add .claude/settings.local.json; $env:GIT_EDITOR='true'; git rebase --continue; git log --oneline -3)",
+      "PowerShell(git commit -F \"C:\\\\Users\\\\Lenre\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-Lenre-OneDrive-Desktop-HaenyeoMNG\\\\c53558a1-3103-4dd4-8e6a-19be591b6dca\\\\scratchpad\\\\commit-msg.txt\")",
+      "PowerShell(git config user.name)",
+      "PowerShell(git config user.email)",
+      "PowerShell(git config user.name \"HaenyeoMNG\")",
+      "PowerShell(git config user.email \"lenreds1016@gmail.com\")",
+      "PowerShell(git push)",
+      "PowerShell(git fetch origin)",
+      "PowerShell(git rebase origin/main)",
+      "PowerShell(git rebase origin/main --autostash)",
+      "PowerShell(git stash drop)",
+      "PowerShell(git add .claude/settings.local.json)"
     ]
   }
 }
