@@ -7,6 +7,9 @@ import {
   updateRailStatus,
   fetchTipSheet,
   upsertTipSheet,
+  insertStaff,
+  updateStaff,
+  replaceStaffRoles,
 } from "./lib/data.js";
 
 // "" / undefined -> null so numeric columns don't choke; otherwise Number().
@@ -56,25 +59,45 @@ function timeNow() {
   return new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 
-// fixed-date US holidays worth flagging on the 7-day strip — covers 2025-2027
-const HOLIDAYS = [
-  { date: "2025-01-01", name: "New Year's Day" },
-  { date: "2025-07-04", name: "Independence Day" },
-  { date: "2025-11-27", name: "Thanksgiving" },
-  { date: "2025-12-25", name: "Christmas" },
-  { date: "2026-01-01", name: "New Year's Day" },
-  { date: "2026-01-19", name: "MLK Day" },
-  { date: "2026-02-16", name: "Presidents Day" },
-  { date: "2026-05-25", name: "Memorial Day" },
-  { date: "2026-06-19", name: "Juneteenth" },
-  { date: "2026-07-04", name: "Independence Day" },
-  { date: "2026-09-07", name: "Labor Day" },
-  { date: "2026-10-31", name: "Halloween" },
-  { date: "2026-11-11", name: "Veterans Day" },
-  { date: "2026-11-26", name: "Thanksgiving" },
-  { date: "2026-12-25", name: "Christmas" },
-  { date: "2027-01-01", name: "New Year's Day" },
-];
+// Recurring holidays, computed per year: US federal + the restaurant's own big
+// nights (Valentine's, Mother's Day, Halloween, NYE). Fixed rules — no admin UI.
+function nthWeekdayOfMonth(year, month, weekday, n) {
+  const first = new Date(year, month, 1);
+  const offset = (weekday - first.getDay() + 7) % 7;
+  return new Date(year, month, 1 + offset + (n - 1) * 7);
+}
+function lastWeekdayOfMonth(year, month, weekday) {
+  const last = new Date(year, month + 1, 0);
+  const offset = (last.getDay() - weekday + 7) % 7;
+  return new Date(year, month, last.getDate() - offset);
+}
+const _holidayCache = {};
+function holidaysForYear(year) {
+  if (_holidayCache[year]) return _holidayCache[year];
+  const entries = [
+    [new Date(year, 0, 1), "New Year's Day"],
+    [nthWeekdayOfMonth(year, 0, 1, 3), "MLK Day"],
+    [new Date(year, 1, 14), "Valentine's Day"],
+    [nthWeekdayOfMonth(year, 1, 1, 3), "Presidents Day"],
+    [nthWeekdayOfMonth(year, 4, 0, 2), "Mother's Day"],
+    [lastWeekdayOfMonth(year, 4, 1), "Memorial Day"],
+    [new Date(year, 6, 4), "Independence Day"],
+    [nthWeekdayOfMonth(year, 8, 1, 1), "Labor Day"],
+    [nthWeekdayOfMonth(year, 9, 1, 2), "Columbus Day"],
+    [new Date(year, 9, 31), "Halloween"],
+    [new Date(year, 10, 11), "Veterans Day"],
+    [nthWeekdayOfMonth(year, 10, 4, 4), "Thanksgiving"],
+    [new Date(year, 11, 25), "Christmas"],
+    [new Date(year, 11, 31), "New Year's Eve"],
+  ];
+  const byIso = {};
+  entries.forEach(([d, name]) => { byIso[iso(d)] = name; });
+  _holidayCache[year] = byIso;
+  return byIso;
+}
+function holidayFor(isoStr) {
+  return holidaysForYear(Number(isoStr.slice(0, 4)))[isoStr] || null;
+}
 
 // always the real current date going forward — not tied to the app's demo date
 function getWeekStrip() {
@@ -83,7 +106,7 @@ function getWeekStrip() {
   for (let i = 0; i < 7; i++) {
     const d = new Date(today);
     d.setDate(today.getDate() + i);
-    days.push({ date: d, iso: d.toISOString().slice(0, 10), label: JS_WEEKDAY_NAMES[d.getDay()].slice(0, 3), num: d.getDate() });
+    days.push({ date: d, iso: iso(d), label: JS_WEEKDAY_NAMES[d.getDay()].slice(0, 3), num: d.getDate() });
   }
   return days;
 }
@@ -97,19 +120,15 @@ const ROLES = ["Bar", "Host", "Servers", "Busser/Runner"];
 // other schedules on the Set Schedule tab, not staffed yet — placeholder slots only
 const PLACEHOLDER_GROUPS = { boh: 4, kitchen: 5, management: 2 };
 const PLACEHOLDER_LABELS = { boh: "Back of House", kitchen: "Kitchen", management: "Management" };
+// row order here mirrors staff_roles.sort_order — keep them in sync
 const PLACEHOLDER_NAMES = {
   boh: ["Hector", "Freddy", "Temo", "Oryan"],
-  kitchen: ["Jenny — Head Chef", "Ajuma", "Kelvin", "Jason", "Freddy — also BOH"],
+  kitchen: ["Jenny", "Ajuma", "Kelvin", "Jason", "Freddy"],
   management: ["Lenis", "Jon"],
 };
 
-// BOH and Kitchen run on different hours than the floor, so they get their own
-// shift vocabulary instead of Opener/Swing/Closer
-const PLACEHOLDER_CYCLES = {
-  boh: ["OFF", "BOH_STD", "BOH_AM", "MID_12_8"],
-  kitchen: ["OFF", "KITCHEN", "MID_12_8"],
-  management: ["OFF", "OPENER", "SWING", "CLOSER"],
-};
+// staff_roles rows use these role names for the non-FOH grids
+const GROUP_ROLE = { boh: "BOH", kitchen: "Kitchen", management: "Management" };
 
 // Note for reference: kitchen actually closes at 10p Thu/Fri/Sat (staff out ~11:30)
 // and 9p Sun-Wed (staff out ~10:30) — simplified on the schedule to just "3p – Close".
@@ -159,20 +178,99 @@ const PERSON_PATTERNS = {
   Akira:    ["OPENER", "OFF",    "OFF",    "SWING",  "OFF",    "EXPO",   "BAR6"],
 };
 
-const BASE_CYCLE = ["OFF", "OPENER", "SWING", "CLOSER"];
-const BUSSER_CYCLE = ["OFF", "OPENER", "SWING", "CLOSER", "EXPO"];
-// a few people don't follow the standard role cycle at all
-const PERSON_CYCLE_OVERRIDES = {
-  Akira: ["OFF", "OPENER", "SWING", "CLOSER", "EXPO", "BAR4", "BAR6"],
-  David: ["OFF", "BUSRUN4", "BUSRUN6", "EXPO", "HOST"],
-  Daniel: ["OFF", "BUSRUN4", "BUSRUN6", "EXPO"],
-  Angel: ["OFF", "OPENER", "SWING", "CLOSER", "FIVE_CLOSE"],
+/* --------------------------- ROLES & SHIFT OPTIONS ---------------------------- */
+// Shift codes are role-prefixed (SV_/BR_/HOST/EXPO/BAR_) so a stored cell value
+// carries both the role worked that day and the shift. The DB versions of these
+// two structures (staff_roles, role_shift_options — migration 0002) win when
+// present; these are the fallbacks so the app never renders blank pre-migration.
+
+// which role(s) each FOH person can work; first entry = primary/default
+const DEFAULT_STAFF_ROLES = {
+  Bernie: ["Bar"], Isabella: ["Bar"], Abraham: ["Bar"],
+  Angel: ["Bar", "Servers"],
+  Juliette: ["Host"], Halle: ["Host"],
+  Ivy: ["Servers"], Mia: ["Servers"], Reiko: ["Servers"],
+  David: ["Servers", "Busser/Runner", "Expo", "Host"],
+  Daniel: ["Servers", "Busser/Runner", "Expo"],
+  Akira: ["Busser/Runner", "Bar", "Expo"],
+  Emilio: ["Busser/Runner"], Miguel: ["Busser/Runner"], Kevin: ["Busser/Runner"], Dennis: ["Busser/Runner"],
 };
-function nextInCycle(type, role, name) {
-  const cycle = PERSON_CYCLE_OVERRIDES[name] || (role === "Busser/Runner" ? BUSSER_CYCLE : BASE_CYCLE);
-  const idx = cycle.indexOf(type);
-  return cycle[(idx + 1) % cycle.length];
+
+// dropdown options per role (FC = first cut, CL = close, SC = second cut)
+const DEFAULT_ROLE_OPTIONS = {
+  Servers: [
+    { code: "OFF", label: "Off" }, { code: "SV_4FC", label: "4pm-FC" }, { code: "SV_5CL", label: "5pm-CL" },
+    { code: "SV_5SC", label: "5pm-SC" }, { code: "SV_6CL", label: "6pm-CL" },
+  ],
+  "Busser/Runner": [
+    { code: "OFF", label: "Off" }, { code: "BR_4FC", label: "4pm-FC" }, { code: "BR_5CL", label: "5pm-CL" },
+    { code: "BR_6CL", label: "6pm-CL" },
+  ],
+  Host: [{ code: "OFF", label: "Off" }, { code: "HOST_4", label: "Host 4pm" }],
+  Expo: [{ code: "OFF", label: "Off" }, { code: "EXPO_5", label: "Expo 5pm" }, { code: "EXPO_6", label: "Expo 6pm" }],
+  Bar: [
+    { code: "OFF", label: "Off" }, { code: "BAR_4FC", label: "4pm-FC" }, { code: "BAR_4CL", label: "4pm-CL" },
+    { code: "BAR_5CL", label: "5pm-CL" }, { code: "BAR_5FC", label: "5pm-FC" }, { code: "BAR_6CL", label: "6pm-CL" },
+  ],
+  BOH: [
+    { code: "OFF", label: "Off" }, { code: "BOH_STD", label: "3p – Close" }, { code: "BOH_AM", label: "9a – 5p" },
+    { code: "MID_12_8", label: "12p – 8p" },
+  ],
+  Kitchen: [
+    { code: "OFF", label: "Off" }, { code: "KITCHEN", label: "3p – Close" }, { code: "MID_12_8", label: "12p – 8p" },
+  ],
+  Management: [{ code: "OFF", label: "Off" }, { code: "FM", label: "FM" }],
+};
+
+// short role names for the compact in-cell role picker
+const ROLE_SHORT = { Bar: "Bar", Host: "Host", Servers: "Server", "Busser/Runner": "Bus/Run", Expo: "Expo" };
+
+// which roles the Staff screen offers per section
+const SECTION_ROLES = {
+  FOH: ["Bar", "Host", "Servers", "Busser/Runner", "Expo"],
+  BOH: ["BOH", "Kitchen"],
+  Kitchen: ["Kitchen", "BOH"],
+  Management: ["Management"],
+};
+const SECTIONS = ["FOH", "BOH", "Kitchen", "Management"];
+
+// which role a stored shift code belongs to (null for OFF/GAP)
+function roleFromCode(code) {
+  if (!code) return null;
+  if (code.startsWith("SV_")) return "Servers";
+  if (code.startsWith("BR_")) return "Busser/Runner";
+  if (code.startsWith("HOST")) return "Host";
+  if (code.startsWith("EXPO")) return "Expo";
+  if (code.startsWith("BAR_")) return "Bar";
+  return null;
 }
+
+// pre-redesign codes still in the DB (or the seed constants) — mapped to the
+// new vocabulary using the person's primary role where the old code was generic
+const LEGACY_BY_ROLE = {
+  Bar: { OPENER: "BAR_4FC", SWING: "BAR_5CL", CLOSER: "BAR_6CL", FIVE_CLOSE: "BAR_5CL" },
+  Host: { OPENER: "HOST_4", SWING: "HOST_4", CLOSER: "HOST_4" },
+  Servers: { OPENER: "SV_4FC", SWING: "SV_5SC", CLOSER: "SV_6CL", FIVE_CLOSE: "SV_5CL" },
+  "Busser/Runner": { OPENER: "BR_4FC", SWING: "BR_5CL", CLOSER: "BR_6CL" },
+};
+const LEGACY_ANY_ROLE = { BUSRUN4: "BR_4FC", BUSRUN6: "BR_6CL", EXPO: "EXPO_5", BAR4: "BAR_4FC", BAR6: "BAR_6CL", HOST: "HOST_4" };
+function normalizeShiftCode(code, primaryRole) {
+  if (!code) return "OFF";
+  if (LEGACY_ANY_ROLE[code]) return LEGACY_ANY_ROLE[code];
+  const roleMap = LEGACY_BY_ROLE[primaryRole];
+  if (roleMap && roleMap[code]) return roleMap[code];
+  return code;
+}
+function normalizePatterns(patterns, roleByName) {
+  const out = {};
+  Object.entries(patterns).forEach(([name, week]) => {
+    out[name] = week.map((c) => normalizeShiftCode(c, roleByName[name]));
+  });
+  return out;
+}
+const DEFAULT_PRIMARY_ROLE = {};
+PERSON_ROSTER.forEach((p) => { DEFAULT_PRIMARY_ROLE[p.name] = p.role; });
+const ALL_OFF_WEEK = ["OFF", "OFF", "OFF", "OFF", "OFF", "OFF", "OFF"];
 
 /* -------------------------------- TIP OUT DATA -------------------------------- */
 
@@ -201,16 +299,24 @@ const POINT_REFERENCE = [
   "SWING BARTENDER .3",
 ];
 
-// drawer denominations, $100 bills down to nickels
+// drawer denominations, $100 bills down to nickels. Each row takes a DOLLAR
+// AMOUNT (2 twenties = "40"), not a bill count — totals are a straight sum.
 const DENOMS = [100, 50, 20, 10, 5, 1, 0.25, 0.1, 0.05];
 function denomLabel(d) {
   return d >= 1 ? `$${d}` : `${Math.round(d * 100)}¢`;
 }
-function denomTotal(counts) {
-  return DENOMS.reduce((sum, d) => sum + (parseFloat(counts[d]) || 0) * d, 0);
+function denomTotal(amounts) {
+  return DENOMS.reduce((sum, d) => sum + (parseFloat(amounts[d]) || 0), 0);
 }
 
-const SHIFT_RANK = { OPENER: 2, CLOSER: 2, SWING: 1, BUSRUN4: 2, BUSRUN6: 2 };
+// slot-fill priority within a role: higher rank fills the full-point slots
+// first. Second-cut servers take the Server (Swing) slot; the latest-starting
+// bartender takes the Bartender (Swing) slot.
+function slotRankForCode(code) {
+  if (code === "SV_5SC") return 1;
+  if (code.startsWith("BAR_")) return code.includes("_4") ? 3 : code.includes("_5") ? 2 : 1;
+  return 2;
+}
 
 function dateInfoFromIso(isoStr) {
   const [y, m, d] = isoStr.split("-").map(Number);
@@ -258,7 +364,39 @@ const OVERRIDES = {
   "Reiko|2026-07-12": { swap: true },
 };
 
+// colors keyed by start time: 4pm = green, 5pm = amber, 6pm = blue; Bar = teal,
+// Expo = purple, Host = pink. Labels here are display fallbacks — the dropdowns
+// read labels from role_shift_options so wording stays a data edit.
 const SHIFT_META = {
+  // Servers
+  SV_4FC: { label: "4pm-FC", fg: "#3f6b42", border: "#6E9B72", bg: "#E9F1E9" },
+  SV_5CL: { label: "5pm-CL", fg: "#8a5a20", border: "#C98A3E", bg: "#FBF0DE" },
+  SV_5SC: { label: "5pm-SC", fg: "#8a5a1f", border: "#c2934a", bg: "#F7EEDD" },
+  SV_6CL: { label: "6pm-CL", fg: "#33425C", border: "#4A5C7A", bg: "#E7EAF2" },
+  // Busser/Runner
+  BR_4FC: { label: "4pm-FC", fg: "#3f6b42", border: "#6E9B72", bg: "#E9F1E9" },
+  BR_5CL: { label: "5pm-CL", fg: "#8a5a20", border: "#C98A3E", bg: "#FBF0DE" },
+  BR_6CL: { label: "6pm-CL", fg: "#33425C", border: "#4A5C7A", bg: "#E7EAF2" },
+  // Host / Expo
+  HOST_4: { label: "Host 4pm", fg: "#8a4a5c", border: "#b8768a", bg: "#F5E7EC" },
+  EXPO_5: { label: "Expo 5pm", fg: "#5b3a8a", border: "#8a63b8", bg: "#EFE7F5" },
+  EXPO_6: { label: "Expo 6pm", fg: "#5b3a8a", border: "#8a63b8", bg: "#E7DCF0" },
+  // Bar
+  BAR_4FC: { label: "4pm-FC", fg: "#1f6f78", border: "#3fa8b3", bg: "#E5F3F4" },
+  BAR_4CL: { label: "4pm-CL", fg: "#1f6f78", border: "#3fa8b3", bg: "#E5F3F4" },
+  BAR_5CL: { label: "5pm-CL", fg: "#1f6f78", border: "#3fa8b3", bg: "#DCEFF0" },
+  BAR_5FC: { label: "5pm-FC", fg: "#1f6f78", border: "#3fa8b3", bg: "#DCEFF0" },
+  BAR_6CL: { label: "6pm-CL", fg: "#17555c", border: "#2f8a94", bg: "#D2E9EB" },
+  // Management
+  FM: { label: "FM", fg: "#33425C", border: "#4A5C7A", bg: "#E7EAF2" },
+  // BOH / Kitchen (wording unchanged for now)
+  BOH_STD: { label: "3p – Close", fg: "#5c4a2e", border: "#9c7d4a", bg: "#F1EAD9" },
+  BOH_AM: { label: "9a – 5p", fg: "#3f6b42", border: "#6E9B72", bg: "#E9F1E9" },
+  KITCHEN: { label: "3p – Close", fg: "#5c4a2e", border: "#9c7d4a", bg: "#F1EAD9" },
+  MID_12_8: { label: "12p – 8p", fg: "#7a5c99", border: "#a889c2", bg: "#F0E9F5" },
+  OFF: { label: "Off", fg: "#8c8574", border: "#d6cfbb", bg: "transparent" },
+  GAP: { label: "Open — needs coverage", fg: "#B23A2F", border: "#B23A2F", bg: "#fff" },
+  // retired pre-redesign codes — kept so unmigrated data still renders
   OPENER: { label: "4p – 1st cut", fg: "#3f6b42", border: "#6E9B72", bg: "#E9F1E9" },
   SWING: { label: "5p – 2nd cut", fg: "#8a5a20", border: "#C98A3E", bg: "#FBF0DE" },
   CLOSER: { label: "6p – close", fg: "#33425C", border: "#4A5C7A", bg: "#E7EAF2" },
@@ -268,53 +406,34 @@ const SHIFT_META = {
   BUSRUN4: { label: "Bus/Run 4pm", fg: "#3f6b42", border: "#6E9B72", bg: "#E9F1E9" },
   BUSRUN6: { label: "Bus/Run 6pm", fg: "#33425C", border: "#4A5C7A", bg: "#E7EAF2" },
   HOST: { label: "Host", fg: "#8a4a5c", border: "#b8768a", bg: "#F5E7EC" },
-  BOH_STD: { label: "3p – Close", fg: "#5c4a2e", border: "#9c7d4a", bg: "#F1EAD9" },
-  BOH_AM: { label: "9a – 5p", fg: "#3f6b42", border: "#6E9B72", bg: "#E9F1E9" },
-  KITCHEN: { label: "3p – Close", fg: "#5c4a2e", border: "#9c7d4a", bg: "#F1EAD9" },
-  MID_12_8: { label: "12p – 8p", fg: "#7a5c99", border: "#a889c2", bg: "#F0E9F5" },
   FIVE_CLOSE: { label: "5p – Close", fg: "#8a5a1f", border: "#c2934a", bg: "#F7EEDD" },
-  OFF: { label: "Off", fg: "#8c8574", border: "#d6cfbb", bg: "transparent" },
-  GAP: { label: "Open — needs coverage", fg: "#B23A2F", border: "#B23A2F", bg: "#fff" },
 };
 
+// local-date ISO (yyyy-mm-dd) — toISOString() would shift the day in non-UTC zones
 function iso(d) {
-  return d.toISOString().slice(0, 10);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 function personShiftFor(name, dateObj, patterns, overrides) {
   const key = `${name}|${dateObj.iso}`;
   const ov = overrides[key];
   if (ov?.type) return { type: ov.type, swap: false };
-  return { type: patterns[name][dateObj.weekday], swap: !!ov?.swap };
+  return { type: (patterns[name] || ALL_OFF_WEEK)[dateObj.weekday], swap: !!ov?.swap };
 }
 
-// figures out, per role, who's actually working that day and slots the
-// higher-ranked shift into the "full point" slots first. Anyone on EXPO that
-// day fills the Expo slot instead of their usual Busser/Runner slot. Anyone on
-// BAR4/BAR6 (a Busser/Runner cross-covering the bar) fills a Bar slot instead,
-// so they're paid at the Bar rate for that shift, not their usual rate.
-function autoAssignSlots(dateInfo, patterns, overrides) {
+// Routes everyone working that day into a point slot by the ROLE their shift
+// code carries (SV_/BR_/HOST/EXPO/BAR_ prefix) — so the role picked in the
+// schedule determines the slot they fill, whatever their usual section. Within
+// a role, higher rank fills the full-point slots first (see slotRankForCode).
+function autoAssignSlots(dateInfo, patterns, overrides, roster) {
   const byRole = {};
-  PERSON_ROSTER.forEach((p) => {
+  roster.forEach((p) => {
     const shift = personShiftFor(p.name, dateInfo, patterns, overrides);
     if (shift.type === "OFF" || shift.type === "GAP") return;
-    if (shift.type === "EXPO") {
-      (byRole["Expo (Fri–Sun)"] = byRole["Expo (Fri–Sun)"] || []).push({ name: p.name, rank: 2 });
-      return;
-    }
-    if (shift.type === "BAR4" || shift.type === "BAR6") {
-      (byRole["Bar"] = byRole["Bar"] || []).push({ name: p.name, rank: shift.type === "BAR4" ? 2 : 1 });
-      return;
-    }
-    if (shift.type === "BUSRUN4" || shift.type === "BUSRUN6") {
-      (byRole["Busser/Runner"] = byRole["Busser/Runner"] || []).push({ name: p.name, rank: 2 });
-      return;
-    }
-    if (shift.type === "HOST") {
-      (byRole["Host"] = byRole["Host"] || []).push({ name: p.name, rank: 2 });
-      return;
-    }
-    const rank = SHIFT_RANK[shift.type] ?? 0;
-    (byRole[p.role] = byRole[p.role] || []).push({ name: p.name, rank });
+    const code = normalizeShiftCode(shift.type, p.role);
+    const role = roleFromCode(code);
+    if (!role) return;
+    const slotRole = role === "Expo" ? "Expo (Fri–Sun)" : role;
+    (byRole[slotRole] = byRole[slotRole] || []).push({ name: p.name, rank: slotRankForCode(code) });
   });
   Object.keys(byRole).forEach((r) => byRole[r].sort((a, b) => b.rank - a.rank));
   const used = {};
@@ -361,15 +480,27 @@ function formatWeekRange(week) {
   return `${fmt(week[0].date)}-${fmt(week[6].date)}/${yy}`;
 }
 
-function daySummary(dateObj, patterns, overrides) {
+function daySummary(dateObj, patterns, overrides, roster) {
   let scheduled = 0, off = 0, gap = false;
-  PERSON_ROSTER.forEach((p) => {
+  roster.forEach((p) => {
     const shift = personShiftFor(p.name, dateObj, patterns, overrides);
     if (shift.type === "OFF") off++;
     else if (shift.type === "GAP") gap = true;
     else scheduled++;
   });
   return { scheduled, off, gap };
+}
+
+// pull every m/d token out of a Rail "dates" display string ("07/16", "07/12 & 07/13")
+function railDatesMatch(datesStr, isoStr) {
+  if (!datesStr) return false;
+  const month = Number(isoStr.slice(5, 7));
+  const day = Number(isoStr.slice(8, 10));
+  const tokens = String(datesStr).match(/(\d{1,2})\/(\d{1,2})/g) || [];
+  return tokens.some((t) => {
+    const [tm, td] = t.split("/").map(Number);
+    return tm === month && td === day;
+  });
 }
 
 /* ------------------------------------ APP ------------------------------------- */
@@ -381,8 +512,21 @@ export default function SchedulingHub({ session, onSignOut }) {
   const [nameToId, setNameToId] = useState({});
   const [calView, setCalView] = useState("month"); // 'month' | 'week'
   const [weekIndex, setWeekIndex] = useState(0);
-  const [patterns, setPatterns] = useState(PERSON_PATTERNS);
+  const [patterns, setPatterns] = useState(() => normalizePatterns(PERSON_PATTERNS, DEFAULT_PRIMARY_ROLE));
   const [overrides, setOverrides] = useState(OVERRIDES);
+  const [staffList, setStaffList] = useState(() =>
+    PERSON_ROSTER.map((p) => ({ id: null, name: p.name, role: p.role, section: "FOH", active: true }))
+  );
+  const [staffRolesMap, setStaffRolesMap] = useState(DEFAULT_STAFF_ROLES); // { name: [roles], first = primary
+  const [groupRosters, setGroupRosters] = useState(PLACEHOLDER_NAMES); // { boh/kitchen/management: [names] }
+  const [roleOptions, setRoleOptions] = useState(DEFAULT_ROLE_OPTIONS);
+  const [rolesTableReady, setRolesTableReady] = useState(false); // migration 0002 applied?
+  const [resolvedReqs, setResolvedReqs] = useState([]); // raw approved/denied rail rows
+  const [dayPopup, setDayPopup] = useState(null); // { day, weekIdx } | null
+  const [cellRoleSel, setCellRoleSel] = useState({}); // "name|weekday" -> role picked but shift not chosen yet
+  const [newStaff, setNewStaff] = useState({ name: "", section: "FOH", roles: [], primary: "" });
+  const [staffDrafts, setStaffDrafts] = useState({}); // staff id -> edited { name, active, roles, primary }
+  const [staffMsg, setStaffMsg] = useState("");
   const [publishedWeeks, setPublishedWeeks] = useState(new Set());
   const [tipDateIso, setTipDateIso] = useState("2026-07-02");
   const [floorCash, setFloorCash] = useState("");
@@ -403,7 +547,28 @@ export default function SchedulingHub({ session, onSignOut }) {
   const tipDateInfo = dateInfoFromIso(tipDateIso);
   const coversNum = parseFloat(covers) || 0;
 
-  const autoSlots = useMemo(() => autoAssignSlots(tipDateInfo, patterns, overrides), [tipDateIso, patterns]);
+  // FOH roster: DB staff (active, FOH section) with their primary role; falls
+  // back to the seed roster before the first load completes. The known-role
+  // check keeps pre-migration DB rows (BOH/Kitchen/Mgmt staff with section
+  // defaulted to FOH and role '') out of the FOH grid.
+  const fohRoster = useMemo(
+    () =>
+      staffList
+        .filter((s) => s.active !== false && (s.section || "FOH") === "FOH")
+        .map((s) => ({ name: s.name, role: (staffRolesMap[s.name] || [])[0] || s.role }))
+        .filter((p) => ROLES.includes(p.role) || (staffRolesMap[p.name] || []).length > 0),
+    [staffList, staffRolesMap]
+  );
+  const fohRoleGroups = useMemo(() => {
+    const order = [...ROLES];
+    fohRoster.forEach((p) => { if (!order.includes(p.role)) order.push(p.role); });
+    return order.filter((r) => fohRoster.some((p) => p.role === r));
+  }, [fohRoster]);
+
+  const autoSlots = useMemo(
+    () => autoAssignSlots(tipDateInfo, patterns, overrides, fohRoster),
+    [tipDateIso, patterns, overrides, fohRoster]
+  );
 
   function toggleCustomMode() {
     if (!customMode) {
@@ -502,7 +667,15 @@ export default function SchedulingHub({ session, onSignOut }) {
     return { ...p, barShare: 0, final: p.raw }; // Host — flat, only earns if covers > 80
   });
   const totalDistributed = finalSlots.reduce((s, p) => s + (p.final || 0), 0);
-  const floorCheckTotal = finalSlots.reduce((s, p) => s + ((p.final || 0) - (p.barShare || 0)), 0);
+  // Floor check: only money that ORIGINATED from the floor pool. Busser/Runner
+  // and Expo bar-tip-out slices are subtracted (that money came from bar), and
+  // bartenders count only their floor-pool point share — bar's own cash/CC tips
+  // never enter this calculation. Should equal floor cash + CC within ~10¢.
+  const floorCheckTotal = finalSlots.reduce((s, p) => {
+    if (!p.name) return s;
+    if (p.role === "Bar") return s + (p.raw || 0);
+    return s + ((p.final || 0) - (p.barShare || 0));
+  }, 0);
   const floorCheckMatches = Math.abs(floorCheckTotal - floorPool) < 0.1;
 
   const tipMM = String(tipDateInfo.dateObj.getMonth() + 1).padStart(2, "0");
@@ -562,10 +735,52 @@ export default function SchedulingHub({ session, onSignOut }) {
       .then((d) => {
         if (cancelled) return;
         setNameToId(d.nameToId);
-        if (Object.keys(d.patterns).length) setPatterns((prev) => ({ ...prev, ...d.patterns }));
-        if (Object.keys(d.placeholders).length) setPlaceholderPatterns((prev) => ({ ...prev, ...d.placeholders }));
+        if (d.staff.length) setStaffList(d.staff);
+
+        // roles + options from the DB when migration 0002 has been applied
+        let rolesByName = DEFAULT_STAFF_ROLES;
+        if (d.staffRoles && d.staffRoles.length) {
+          setRolesTableReady(true);
+          const byName = {};
+          const rosters = { boh: [], kitchen: [], management: [] };
+          d.staffRoles.forEach((r) => {
+            const name = d.idToName[r.staff_id];
+            if (!name) return;
+            if (!byName[name]) byName[name] = [];
+            if (r.is_primary) byName[name].unshift(r.role);
+            else byName[name].push(r.role);
+            Object.entries(GROUP_ROLE).forEach(([gk, roleName]) => {
+              if (r.role === roleName) rosters[gk].push({ name, sort: r.sort_order });
+            });
+          });
+          rolesByName = byName;
+          setStaffRolesMap(byName);
+          const rosterNames = {};
+          Object.entries(rosters).forEach(([gk, list]) => {
+            rosterNames[gk] = list.sort((a, b) => a.sort - b.sort).map((x) => x.name);
+          });
+          if (rosterNames.boh.length) setGroupRosters(rosterNames);
+        }
+        if (d.roleOptions) setRoleOptions((prev) => ({ ...prev, ...d.roleOptions }));
+
+        // primary role per name, for normalizing any pre-redesign shift codes
+        const primaryByName = { ...DEFAULT_PRIMARY_ROLE };
+        d.staff.forEach((s) => { primaryByName[s.name] = (rolesByName[s.name] || [])[0] || s.role; });
+
+        if (Object.keys(d.patterns).length) {
+          setPatterns((prev) => ({ ...prev, ...normalizePatterns(d.patterns, primaryByName) }));
+        }
+        if (Object.keys(d.placeholders).length) {
+          const ph = { ...d.placeholders };
+          // Management simplified to Off <-> FM: any legacy scheduled value = FM
+          if (ph.management) {
+            ph.management = ph.management.map((row) => row.map((c) => (c === "OFF" ? "OFF" : "FM")));
+          }
+          setPlaceholderPatterns((prev) => ({ ...prev, ...ph }));
+        }
         setOverrides(d.overrides);
         setPending(d.rail.pending);
+        setResolvedReqs(d.rail.resolved);
         setLog(
           d.rail.resolved.map((r) => ({
             id: r.id,
@@ -607,23 +822,26 @@ export default function SchedulingHub({ session, onSignOut }) {
       .catch((e) => console.error("Tip sheet load failed:", e));
     return () => { cancelled = true; };
   }, [tipDateIso]);
-  function cyclePlaceholderCell(groupKey, slotIdx, weekday) {
+  // BOH / Kitchen dropdown cells write straight through; Management keeps the
+  // click interaction but toggles Off <-> FM only.
+  function setPlaceholderShift(groupKey, slotIdx, weekday, newType) {
     if (scheduleLocked) return;
-    let newType;
     setPlaceholderPatterns((prev) => {
-      const next = { ...prev, [groupKey]: prev[groupKey].map((row) => [...row]) };
-      const cycle = PLACEHOLDER_CYCLES[groupKey];
-      const current = next[groupKey][slotIdx][weekday];
-      const idx = cycle.indexOf(current);
-      newType = cycle[(idx + 1) % cycle.length];
-      next[groupKey][slotIdx][weekday] = newType;
-      return next;
+      const rows = (prev[groupKey] || []).map((row) => [...row]);
+      while (rows.length <= slotIdx) rows.push([...ALL_OFF_WEEK]);
+      rows[slotIdx][weekday] = newType;
+      return { ...prev, [groupKey]: rows };
     });
-    if (newType !== undefined) {
-      upsertPlaceholder(groupKey, slotIdx, weekday, newType).catch((e) => console.error("Save placeholder failed:", e));
-    }
+    upsertPlaceholder(groupKey, slotIdx, weekday, newType).catch((e) => console.error("Save placeholder failed:", e));
   }
-  const holidaysThisWeek = weekStrip.map((d) => HOLIDAYS.find((h) => h.date === d.iso)).filter(Boolean);
+  function toggleManagementCell(slotIdx, weekday) {
+    if (scheduleLocked) return;
+    const current = placeholderPatterns.management?.[slotIdx]?.[weekday] || "OFF";
+    setPlaceholderShift("management", slotIdx, weekday, current === "OFF" ? "FM" : "OFF");
+  }
+  const holidaysThisWeek = weekStrip
+    .map((d) => { const name = holidayFor(d.iso); return name ? { date: d.iso, name } : null; })
+    .filter(Boolean);
 
   function resolve(item, approved) {
     setPending((p) => p.filter((r) => r.id !== item.id));
@@ -639,25 +857,189 @@ export default function SchedulingHub({ session, onSignOut }) {
     setCalView("week");
   }
 
-  function cycleCell(name, weekday, role) {
+  /* ---- staff & role management ---- */
+
+  function staffRolesToRows(name, roles, primary, section) {
+    // sort_order matters for the BOH/Kitchen/Management grids (row alignment
+    // with the slot-indexed schedule data): keep an existing position, else append
+    return roles.map((r) => {
+      let sort = 0;
+      const gk = Object.keys(GROUP_ROLE).find((k) => GROUP_ROLE[k] === r);
+      if (gk) {
+        const idx = (groupRosters[gk] || []).indexOf(name);
+        sort = idx >= 0 ? idx : (groupRosters[gk] || []).length;
+      }
+      return { role: r, is_primary: r === primary, sort_order: sort };
+    });
+  }
+
+  function applyStaffLocal(row, roles, primary, prevName) {
+    const orderedRoles = [primary, ...roles.filter((r) => r !== primary)];
+    setStaffList((l) => {
+      const existing = l.some((s) => s.id === row.id && row.id != null) || l.some((s) => s.name === (prevName || row.name));
+      if (!existing) return [...l, row];
+      return l.map((s) => ((row.id != null && s.id === row.id) || s.name === prevName ? { ...s, ...row } : s));
+    });
+    if (row.id != null) setNameToId((m) => {
+      const next = { ...m };
+      if (prevName && prevName !== row.name) delete next[prevName];
+      next[row.name] = row.id;
+      return next;
+    });
+    setStaffRolesMap((m) => {
+      const next = { ...m };
+      if (prevName && prevName !== row.name) delete next[prevName];
+      next[row.name] = orderedRoles;
+      return next;
+    });
+    if (prevName && prevName !== row.name) {
+      setPatterns((prev) => {
+        if (!prev[prevName]) return prev;
+        const next = { ...prev, [row.name]: prev[prevName] };
+        delete next[prevName];
+        return next;
+      });
+    }
+    setGroupRosters((prev) => {
+      const next = {};
+      Object.entries(GROUP_ROLE).forEach(([gk, roleName]) => {
+        let list = (prev[gk] || []).map((n) => (n === prevName ? row.name : n));
+        const has = orderedRoles.includes(roleName);
+        if (has && !list.includes(row.name)) list = [...list, row.name];
+        // deactivated staff keep their row so slot indexes stay aligned
+        next[gk] = list;
+      });
+      return next;
+    });
+  }
+
+  async function handleAddStaff() {
+    const name = newStaff.name.trim();
+    setStaffMsg("");
+    if (!name) { setStaffMsg("Name is required."); return; }
+    if (staffList.some((s) => s.name === name)) { setStaffMsg(`${name} already exists.`); return; }
+    let roles = newStaff.roles.filter((r) => SECTION_ROLES[newStaff.section].includes(r));
+    if (roles.length === 0) {
+      if (newStaff.section === "FOH") { setStaffMsg("Pick at least one role."); return; }
+      roles = [SECTION_ROLES[newStaff.section][0]];
+    }
+    const primary = roles.includes(newStaff.primary) ? newStaff.primary : roles[0];
+    try {
+      const row = await insertStaff({ name, role: primary, section: newStaff.section });
+      if (rolesTableReady) await replaceStaffRoles(row.id, staffRolesToRows(name, roles, primary, newStaff.section));
+      applyStaffLocal({ ...row, active: true }, roles, primary, null);
+      setNewStaff({ name: "", section: "FOH", roles: [], primary: "" });
+      setStaffMsg(`Added ${name}.`);
+    } catch (e) {
+      console.error("Add staff failed:", e);
+      setStaffMsg(`Couldn't add ${name}: ${e.message || e}`);
+    }
+  }
+
+  function staffDraftFor(s) {
+    return (
+      staffDrafts[s.id || s.name] || {
+        name: s.name,
+        active: s.active !== false,
+        roles: staffRolesMap[s.name] || [s.role],
+        primary: (staffRolesMap[s.name] || [s.role])[0],
+      }
+    );
+  }
+  function setStaffDraft(s, patch) {
+    const cur = staffDraftFor(s);
+    const next = { ...cur, ...patch };
+    if (!next.roles.includes(next.primary)) next.primary = next.roles[0] || "";
+    setStaffDrafts((d) => ({ ...d, [s.id || s.name]: next }));
+  }
+
+  async function handleSaveStaff(s) {
+    const d = staffDraftFor(s);
+    const name = d.name.trim();
+    setStaffMsg("");
+    if (!name) { setStaffMsg("Name is required."); return; }
+    if (d.roles.length === 0) { setStaffMsg(`${name}: pick at least one role.`); return; }
+    if (!s.id) { setStaffMsg("Live data hasn't loaded — can't save yet."); return; }
+    const primary = d.roles.includes(d.primary) ? d.primary : d.roles[0];
+    try {
+      await updateStaff(s.id, { name, role: primary, active: d.active });
+      if (rolesTableReady) await replaceStaffRoles(s.id, staffRolesToRows(name, d.roles, primary, s.section));
+      applyStaffLocal({ ...s, name, role: primary, active: d.active }, d.roles, primary, s.name);
+      setStaffDrafts((drafts) => {
+        const next = { ...drafts };
+        delete next[s.id || s.name];
+        return next;
+      });
+      setStaffMsg(`Saved ${name}.`);
+    } catch (e) {
+      console.error("Save staff failed:", e);
+      setStaffMsg(`Couldn't save ${name}: ${e.message || e}`);
+    }
+  }
+
+  // every Rail request (pending or approved) touching a given date
+  function railItemsForDate(isoStr) {
+    const items = [];
+    pending.forEach((it) => {
+      if (railDatesMatch(it.dates, isoStr)) items.push({ ...it, status: "pending" });
+    });
+    resolvedReqs.forEach((it) => {
+      if (it.status === "approved" && railDatesMatch(it.dates, isoStr)) items.push(it);
+    });
+    return items;
+  }
+  // staff off that date: approved schedule overrides + REQUEST OFF rail items
+  function timeOffNamesForDate(isoStr) {
+    const names = new Set();
+    Object.entries(overrides).forEach(([key, ov]) => {
+      if (ov.type === "OFF" && key.endsWith(`|${isoStr}`)) names.add(key.split("|")[0]);
+    });
+    railItemsForDate(isoStr).forEach((it) => {
+      if (it.type === "REQUEST OFF") names.add(it.name);
+    });
+    return [...names];
+  }
+
+  // FOH dropdown cell: write the picked shift code (which carries its role)
+  function setCellShift(name, weekday, code) {
     if (scheduleLocked) return;
-    let newType;
-    setPatterns((prev) => {
-      const next = { ...prev, [name]: [...prev[name]] };
-      newType = nextInCycle(next[name][weekday], role, name);
-      next[name][weekday] = newType;
+    setPatterns((prev) => ({
+      ...prev,
+      [name]: (prev[name] || ALL_OFF_WEEK).map((c, i) => (i === weekday ? code : c)),
+    }));
+    setCellRoleSel((prev) => {
+      if (!(`${name}|${weekday}` in prev)) return prev;
+      const next = { ...prev };
+      delete next[`${name}|${weekday}`];
       return next;
     });
     const staffId = nameToId[name];
-    if (staffId && newType !== undefined) {
-      upsertPattern(staffId, weekday, newType).catch((e) => console.error("Save pattern failed:", e));
+    if (staffId) {
+      upsertPattern(staffId, weekday, code).catch((e) => console.error("Save pattern failed:", e));
+    }
+  }
+  // role picker changed: remember the choice and reset the cell's shift if the
+  // current code belongs to a different role
+  function setCellRole(name, weekday, role) {
+    if (scheduleLocked) return;
+    setCellRoleSel((prev) => ({ ...prev, [`${name}|${weekday}`]: role }));
+    const current = (patterns[name] || ALL_OFF_WEEK)[weekday];
+    if (current !== "OFF" && roleFromCode(current) !== role) {
+      setPatterns((prev) => ({
+        ...prev,
+        [name]: (prev[name] || ALL_OFF_WEEK).map((c, i) => (i === weekday ? "OFF" : c)),
+      }));
+      const staffId = nameToId[name];
+      if (staffId) {
+        upsertPattern(staffId, weekday, "OFF").catch((e) => console.error("Save pattern failed:", e));
+      }
     }
   }
 
   function publishWeek() {
     if (publishedWeeks.has(weekIndex)) return;
     const names = new Set();
-    activeWeek.forEach((d) => PERSON_ROSTER.forEach((p) => {
+    activeWeek.forEach((d) => fohRoster.forEach((p) => {
       const shift = personShiftFor(p.name, d, patterns, overrides);
       if (shift.type !== "OFF") names.add(p.name);
     }));
@@ -912,7 +1294,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         .print-btn:hover { transform: translateY(-1px); }
         .print-btn.lock-active { background: #B23A2F; }
 
-        .schedule-locked .chip-btn { pointer-events: none; opacity: 0.55; cursor: not-allowed; filter: grayscale(0.3); }
+        .schedule-locked .chip-btn, .schedule-locked .cell-select { pointer-events: none; opacity: 0.55; cursor: not-allowed; filter: grayscale(0.3); }
         .print-week-range { display: flex; align-items: center; gap: 8px; font-family: 'Space Mono', monospace; font-weight: 700; font-size: 13px; color: #2B2A25; letter-spacing: 0.5px; }
         .print-week-range .back-btn { color: #8c8574; padding: 2px; }
         .print-week-range .back-btn:hover { color: #2B2A25; }
@@ -928,6 +1310,61 @@ export default function SchedulingHub({ session, onSignOut }) {
         .tip-top-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
         .subject-preview { font-family: 'Space Mono', monospace; font-size: 12px; background: #FBF0DE; border: 1px dashed #C98A3E; padding: 8px 12px; border-radius: 5px; color: #8a5a20; }
         .footer-note { margin-top: 14px; font-size: 12px; color: #6b6355; font-style: italic; line-height: 1.5; }
+
+        /* ---- compact schedule dropdowns ---- */
+        .cell-stack { display: flex; flex-direction: column; gap: 3px; align-items: center; }
+        .cell-select { font-family: 'Space Mono', monospace; font-size: 10px; font-weight: 700; padding: 4px 3px; border-radius: 4px; border: 1px solid #d6cfbb; background: #FBF8EF; color: #8c8574; cursor: pointer; max-width: 100%; width: auto; }
+        .cell-select:disabled { opacity: 0.55; cursor: not-allowed; }
+        .role-select { font-size: 9px; padding: 2px 2px; color: #6b6355; background: #F1EFE6; border-color: rgba(43,42,37,0.18); }
+
+        /* ---- manager-on-shift banner (FOH) ---- */
+        .fm-banner { display: flex; gap: 6px; align-items: stretch; margin: 2px 0 16px; flex-wrap: wrap; }
+        .fm-banner-label { font-family: 'Space Mono', monospace; font-size: 9.5px; letter-spacing: 1px; text-transform: uppercase; color: #8c8574; align-self: center; margin-right: 4px; }
+        .fm-chip { flex: 1; min-width: 74px; text-align: center; background: #E7EAF2; border: 1px solid #4A5C7A; border-radius: 6px; padding: 4px 6px; }
+        .fm-chip-day { display: block; font-family: 'Space Mono', monospace; font-size: 8.5px; letter-spacing: 1px; text-transform: uppercase; color: #55617a; }
+        .fm-chip-name { display: block; font-weight: 800; font-size: 11.5px; color: #33425C; margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .fm-chip-empty { background: #F1EFE6; border-color: rgba(43,42,37,0.15); }
+        .fm-chip-empty .fm-chip-day { color: #a79e8c; }
+        .fm-chip-empty .fm-chip-name { color: #c7bfa9; font-weight: 600; }
+
+        /* ---- calendar day extras + popup ---- */
+        .cal-holiday-label { margin-top: 4px; font-size: 9px; font-weight: 700; color: #B3695E; line-height: 1.2; }
+        .cal-off-chips { margin-top: 4px; display: flex; flex-wrap: wrap; gap: 2px; }
+        .cal-off-chip { font-size: 8.5px; font-weight: 700; background: #E3E8EC; color: #4a5a66; border-radius: 6px; padding: 1px 5px; white-space: nowrap; }
+        .cal-off-more { background: #d9dfe4; }
+        .cal-rail-dot { position: absolute; bottom: 6px; right: 7px; width: 6px; height: 6px; border-radius: 50%; background: #8FA396; }
+        .day-popup-backdrop { position: fixed; inset: 0; background: rgba(20,18,14,0.55); display: flex; align-items: center; justify-content: center; z-index: 60; }
+        .day-popup { background: #F5F0E3; color: #2B2A25; border-radius: 10px; padding: 18px 20px; width: min(400px, 92vw); max-height: 80vh; overflow-y: auto; box-shadow: 0 18px 48px rgba(0,0,0,0.45); animation: zoomIn 0.18s ease; }
+        .day-popup-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 4px; }
+        .day-popup-date { font-family: 'Space Mono', monospace; font-weight: 700; font-size: 14px; }
+        .day-popup-close { background: none; border: none; cursor: pointer; color: #6b6355; padding: 2px; }
+        .day-popup-close:hover { color: #2B2A25; }
+        .day-popup-holiday { font-size: 12px; font-weight: 700; color: #B3695E; margin-bottom: 6px; }
+        .day-popup-section { font-family: 'Space Mono', monospace; font-size: 9.5px; letter-spacing: 1.5px; text-transform: uppercase; color: #8c8574; margin: 12px 0 6px; }
+        .day-popup-empty { font-size: 12px; color: #9a9385; font-style: italic; padding: 4px 0; }
+        .day-popup-item { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px dashed rgba(43,42,37,0.12); font-size: 12.5px; }
+        .day-popup-item:last-of-type { border-bottom: none; }
+        .day-popup-badge { font-family: 'Space Mono', monospace; font-size: 8.5px; letter-spacing: 0.5px; text-transform: uppercase; color: #fff; padding: 2px 7px; border-radius: 3px; white-space: nowrap; }
+        .day-popup-name { font-weight: 700; }
+        .day-popup-status { margin-left: auto; font-family: 'Space Mono', monospace; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .day-popup-status-pending { color: #C98A3E; }
+        .day-popup-status-approved { color: #4C6B4F; }
+        .day-popup-week-btn { width: 100%; margin-top: 14px; }
+
+        /* ---- staff & roles screen ---- */
+        .staff-msg { font-family: 'Space Mono', monospace; font-size: 11px; color: #4C6B4F; }
+        .staff-add { background: #FBF8EF; border: 1px solid rgba(43,42,37,0.12); border-radius: 8px; padding: 12px 14px; margin-bottom: 6px; }
+        .staff-add-title { font-family: 'Space Mono', monospace; font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; color: #8c8574; margin-bottom: 8px; }
+        .staff-add-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+        .staff-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 7px 2px; border-top: 1px solid rgba(43,42,37,0.08); }
+        .staff-row-inactive { opacity: 0.5; }
+        .staff-name-input { font-family: 'Manrope', sans-serif; font-weight: 700; font-size: 13px; padding: 6px 9px; border: 1px solid rgba(43,42,37,0.15); border-radius: 4px; background: #FFFDF7; color: #2B2A25; width: 150px; }
+        .staff-section-select, .staff-primary-select { font-size: 11px; padding: 5px 6px; }
+        .staff-role-checks { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+        .staff-role-check { display: flex; align-items: center; gap: 4px; font-size: 12px; color: #4a473d; cursor: pointer; white-space: nowrap; }
+        .staff-role-check input { accent-color: #4C6B4F; cursor: pointer; }
+        .staff-active-check { margin-left: auto; }
+        .staff-save-btn { padding: 6px 14px; }
 
         .hero-stat { display: flex; gap: 14px; margin-bottom: 20px; }
         .hero-item { flex: 1; background: #FBF0DE; border: 1px solid rgba(201,138,63,0.35); border-radius: 8px; padding: 22px 18px; }
@@ -974,7 +1411,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         <button className={`tab-btn ${tab === "calendar" ? "active" : ""}`} onClick={() => setTab("calendar")}>Calendar</button>
         <button className={`tab-btn ${tab === "template" ? "active" : ""}`} onClick={() => setTab("template")}>Set Schedule</button>
         <button className={`tab-btn ${tab === "tips" ? "active" : ""}`} onClick={() => setTab("tips")}>Tip Sheet</button>
-        <button className={`tab-btn ${tab === "timesheet" ? "active" : ""}`} onClick={() => setTab("timesheet")}>Timesheet</button>
+        <button className={`tab-btn ${tab === "staff" ? "active" : ""}`} onClick={() => setTab("staff")}>Staff</button>
       </div>
 
       {tab === "rail" && (
@@ -1012,7 +1449,8 @@ export default function SchedulingHub({ session, onSignOut }) {
                 <div className="nr-panel nr-week-panel">
                   <div className="nr-week-strip">
                     {weekStrip.map((d, i) => {
-                      const holiday = HOLIDAYS.find((h) => h.date === d.iso);
+                      const holidayName = holidayFor(d.iso);
+                      const holiday = holidayName ? { name: holidayName } : null;
                       return (
                         <div className={`nr-day ${i === 0 ? "nr-day-today" : ""}`} key={d.iso} title={holiday ? holiday.name : ""}>
                           <div className="nr-day-name">{d.label}</div>
@@ -1055,30 +1493,91 @@ export default function SchedulingHub({ session, onSignOut }) {
         <div className="cal-wrap" key="month">
           <div className="cal-card">
             <div className="cal-legend">
-              <span className="legend-item"><span className="legend-swatch" style={{ background: SHIFT_META.OPENER.border }}></span>Opener</span>
-              <span className="legend-item"><span className="legend-swatch" style={{ background: SHIFT_META.SWING.border }}></span>Swing</span>
-              <span className="legend-item"><span className="legend-swatch" style={{ background: SHIFT_META.CLOSER.border }}></span>Closer</span>
-              <span className="legend-item"><span className="legend-swatch" style={{ background: SHIFT_META.OFF.border }}></span>Off</span>
+              <span className="legend-item"><span className="legend-swatch" style={{ background: "#B3695E" }}></span>Holiday</span>
+              <span className="legend-item"><span className="legend-swatch" style={{ background: "#7B93A3" }}></span>Time off</span>
               <span className="legend-item"><AlertTriangle size={11} color="#B23A2F" />Open shift</span>
-              <span className="legend-item" style={{ marginLeft: "auto" }}>Click a day to see the week</span>
+              <span className="legend-item" style={{ marginLeft: "auto" }}>Click a day for requests, time off & the week view</span>
             </div>
             <div className="cal-grid">
               {WEEKDAY_LABELS.map((w) => <div className="cal-weekday" key={w}>{w}</div>)}
               {weeks.flat().map((d, i) => {
-                const s = daySummary(d, patterns, overrides);
+                const s = daySummary(d, patterns, overrides, fohRoster);
+                const holiday = holidayFor(d.iso);
+                const offNames = timeOffNamesForDate(d.iso);
+                const hasOtherRail = railItemsForDate(d.iso).some((it) => it.type !== "REQUEST OFF");
                 return (
                   <div
                     key={d.iso}
                     className={`cal-day ${!d.inMonth ? "dim" : ""} ${d.isToday ? "today" : ""}`}
-                    onClick={() => zoomToWeek(Math.floor(i / 7))}
+                    onClick={() => setDayPopup({ day: d, weekIdx: Math.floor(i / 7) })}
                   >
                     {s.gap && <AlertTriangle size={13} className="cal-gap-flag" />}
                     <div className="cal-day-num">{d.day}</div>
+                    {holiday && <div className="cal-holiday-label">{holiday}</div>}
+                    {offNames.length > 0 && (
+                      <div className="cal-off-chips">
+                        {offNames.slice(0, 2).map((n) => <span className="cal-off-chip" key={n}>{n}</span>)}
+                        {offNames.length > 2 && <span className="cal-off-chip cal-off-more">+{offNames.length - 2}</span>}
+                      </div>
+                    )}
+                    {hasOtherRail && <div className="cal-rail-dot" title="Swap / coverage request touches this day" />}
                   </div>
                 );
               })}
             </div>
           </div>
+
+          {dayPopup && (() => {
+            const d = dayPopup.day;
+            const holiday = holidayFor(d.iso);
+            const items = railItemsForDate(d.iso);
+            const railNames = new Set(items.filter((it) => it.type === "REQUEST OFF").map((it) => it.name));
+            const scheduleOffs = timeOffNamesForDate(d.iso).filter((n) => !railNames.has(n));
+            return (
+              <div className="day-popup-backdrop" onClick={() => setDayPopup(null)}>
+                <div className="day-popup" onClick={(e) => e.stopPropagation()}>
+                  <div className="day-popup-head">
+                    <div className="day-popup-date">
+                      {d.date.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}
+                    </div>
+                    <button className="day-popup-close" onClick={() => setDayPopup(null)}><X size={15} /></button>
+                  </div>
+                  {holiday && <div className="day-popup-holiday">★ {holiday}</div>}
+
+                  <div className="day-popup-section">Requests touching this date</div>
+                  {items.length === 0 && <div className="day-popup-empty">No requests off, swaps, or coverage requests.</div>}
+                  {items.map((it) => (
+                    <div className="day-popup-item" key={`${it.id}-${it.status}`}>
+                      <span className="day-popup-badge" style={{ background: TYPE_STYLES[it.type]?.badge || "#7B93A3" }}>
+                        {TYPE_STYLES[it.type]?.label || it.type}
+                      </span>
+                      <span className="day-popup-name">{it.name}</span>
+                      <span className={`day-popup-status day-popup-status-${it.status}`}>{it.status}</span>
+                    </div>
+                  ))}
+                  {scheduleOffs.length > 0 && (
+                    <>
+                      <div className="day-popup-section">Time off on the schedule</div>
+                      {scheduleOffs.map((n) => (
+                        <div className="day-popup-item" key={n}>
+                          <span className="day-popup-badge" style={{ background: "#7B93A3" }}>Day off</span>
+                          <span className="day-popup-name">{n}</span>
+                          <span className="day-popup-status day-popup-status-approved">approved</span>
+                        </div>
+                      ))}
+                    </>
+                  )}
+
+                  <button
+                    className="publish-btn day-popup-week-btn"
+                    onClick={() => { const idx = dayPopup.weekIdx; setDayPopup(null); zoomToWeek(idx); }}
+                  >
+                    View week
+                  </button>
+                </div>
+              </div>
+            );
+          })()}
         </div>
       )}
 
@@ -1104,17 +1603,17 @@ export default function SchedulingHub({ session, onSignOut }) {
                 </tr>
               </thead>
               <tbody>
-                {ROLES.map((role) => (
+                {fohRoleGroups.map((role) => (
                   <React.Fragment key={role}>
                     <tr>
                       <td className="role-header" colSpan={8}>{role}</td>
                     </tr>
-                    {PERSON_ROSTER.filter((p) => p.role === role).map((p) => (
+                    {fohRoster.filter((p) => p.role === role).map((p) => (
                       <tr key={p.name}>
                         <td className="emp-name">{p.name}</td>
                         {activeWeek.map((d) => {
                           const shift = personShiftFor(p.name, d, patterns, overrides);
-                          const meta = SHIFT_META[shift.type];
+                          const meta = SHIFT_META[shift.type] || SHIFT_META.OFF;
                           return (
                             <td key={d.iso} className={`shift-cell ${d.isToday ? "today-col" : ""}`}>
                               <span className="shift-chip" style={{ color: meta.fg, borderColor: meta.border, background: meta.bg }}>
@@ -1167,9 +1666,26 @@ export default function SchedulingHub({ session, onSignOut }) {
               <>
                 <div className="cal-legend">
                   <span className="legend-item">This is the default that fills every week automatically.</span>
-                  <span className="legend-item" style={{ marginLeft: "auto" }}>Click a cell to cycle: Off → Opener → Swing → Closer{"  "}(Busser/Runner also cycles to Expo)</span>
+                  <span className="legend-item" style={{ marginLeft: "auto" }}>Pick a shift from each cell's dropdown — people with more than one role pick the role first. (FC = first cut, SC = second cut, CL = close)</span>
                 </div>
                 <img src={HAENYEO_ICON} alt="Haenyeo" className="template-icon" />
+
+                <div className="fm-banner">
+                  <span className="fm-banner-label">Manager on</span>
+                  {WEEKDAY_LABELS.map((w, wi) => {
+                    const weekday = WEEKDAY_ORDER[wi];
+                    const names = (groupRosters.management || []).filter(
+                      (_, idx) => (placeholderPatterns.management?.[idx]?.[weekday] || "OFF") !== "OFF"
+                    );
+                    return (
+                      <div className={`fm-chip ${names.length === 0 ? "fm-chip-empty" : ""}`} key={w}>
+                        <span className="fm-chip-day">{w}</span>
+                        <span className="fm-chip-name">{names.length ? names.join(" + ") : "—"}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+
                 <table className={`week-table ${scheduleLocked ? "schedule-locked" : ""}`}>
                   <thead>
                     <tr>
@@ -1178,47 +1694,73 @@ export default function SchedulingHub({ session, onSignOut }) {
                     </tr>
                   </thead>
                   <tbody>
-                    {ROLES.map((role) => (
+                    {fohRoleGroups.map((role) => (
                       <React.Fragment key={role}>
                         <tr>
                           <td className="role-header" colSpan={8}>{role}</td>
                         </tr>
-                        {PERSON_ROSTER.filter((p) => p.role === role).map((p) => (
-                          <tr key={p.name}>
-                            <td className="emp-name">{p.name}</td>
-                            {WEEKDAY_LABELS.map((w, wi) => {
-                              const type = patterns[p.name][WEEKDAY_ORDER[wi]];
-                              const meta = SHIFT_META[type];
-                              return (
-                                <td key={w} className="shift-cell">
-                                  <button
-                                    className="shift-chip chip-btn"
-                                    style={{ color: meta.fg, borderColor: meta.border, background: meta.bg }}
-                                    onClick={() => cycleCell(p.name, WEEKDAY_ORDER[wi], p.role)}
-                                  >
-                                    {meta.label}
-                                  </button>
-                                </td>
-                              );
-                            })}
-                          </tr>
-                        ))}
+                        {fohRoster.filter((p) => p.role === role).map((p) => {
+                          const personRoles = staffRolesMap[p.name] || [p.role];
+                          return (
+                            <tr key={p.name}>
+                              <td className="emp-name">{p.name}</td>
+                              {WEEKDAY_LABELS.map((w, wi) => {
+                                const weekday = WEEKDAY_ORDER[wi];
+                                const code = (patterns[p.name] || ALL_OFF_WEEK)[weekday];
+                                const selKey = `${p.name}|${weekday}`;
+                                const cellRole = cellRoleSel[selKey] || roleFromCode(code) || personRoles[0];
+                                const opts = roleOptions[cellRole] || [{ code: "OFF", label: "Off" }];
+                                const value = opts.some((o) => o.code === code) ? code : "OFF";
+                                const meta = SHIFT_META[value] || SHIFT_META.OFF;
+                                return (
+                                  <td key={w} className="shift-cell">
+                                    <div className="cell-stack">
+                                      {personRoles.length > 1 && (
+                                        <select
+                                          className="cell-select role-select"
+                                          value={cellRole}
+                                          disabled={scheduleLocked}
+                                          onChange={(e) => setCellRole(p.name, weekday, e.target.value)}
+                                        >
+                                          {personRoles.map((r) => (
+                                            <option key={r} value={r}>{ROLE_SHORT[r] || r}</option>
+                                          ))}
+                                        </select>
+                                      )}
+                                      <select
+                                        className="cell-select shift-select"
+                                        value={value}
+                                        disabled={scheduleLocked}
+                                        style={value === "OFF" ? undefined : { color: meta.fg, borderColor: meta.border, background: meta.bg }}
+                                        onChange={(e) => setCellShift(p.name, weekday, e.target.value)}
+                                      >
+                                        {opts.map((o) => (
+                                          <option key={o.code} value={o.code}>{o.label}</option>
+                                        ))}
+                                      </select>
+                                    </div>
+                                  </td>
+                                );
+                              })}
+                            </tr>
+                          );
+                        })}
                       </React.Fragment>
                     ))}
                   </tbody>
                 </table>
-                <div className="template-note">Requests off, swaps, and coverage gaps approved on the Rail still override this automatically — this only sets the default. Bar, Busser/Runner, and Host rotations shown are starting assumptions since no rotation was specified — adjust the cells to match reality. Exact cut times (1st/2nd cut) are a live call each night based on how busy it is, not something fixed here.</div>
+                <div className="template-note">Requests off, swaps, and coverage gaps approved on the Rail still override this automatically — this only sets the default. Exact cut times (1st/2nd cut) are a live call each night based on how busy it is, not something fixed here. Who can work which role is managed on the Staff tab.</div>
               </>
             )}
 
             {scheduleView !== "foh" && (
               <>
                 <div className="cal-legend">
-                  <span className="legend-item">{PLACEHOLDER_LABELS[scheduleView]} — {PLACEHOLDER_GROUPS[scheduleView]} slots{PLACEHOLDER_NAMES[scheduleView].includes("####") ? ", names not fully assigned yet" : ""}.</span>
+                  <span className="legend-item">{PLACEHOLDER_LABELS[scheduleView]}</span>
                   <span className="legend-item" style={{ marginLeft: "auto" }}>
-                    {scheduleView === "boh" && "Click a cell to cycle: Off → Standard (3p–close) → Morning (9a–5p) → 12p–8p"}
-                    {scheduleView === "kitchen" && "Click a cell to cycle: Off → Working (3p–Close, or \"Yes\" for Jenny/Ajuma) → 12p–8p"}
-                    {scheduleView === "management" && "Click a cell to cycle: Off → Opener → Swing → Closer"}
+                    {scheduleView === "boh" && "Pick a shift from each cell's dropdown."}
+                    {scheduleView === "kitchen" && "Pick a shift from each cell's dropdown. (\"3p – Close\" shows as \"Yes\" for Jenny and Ajuma.)"}
+                    {scheduleView === "management" && "Click a cell to toggle: Off ↔ FM (Floor Manager)"}
                   </span>
                 </div>
                 <table className={`week-table ${scheduleLocked ? "schedule-locked" : ""}`}>
@@ -1229,35 +1771,57 @@ export default function SchedulingHub({ session, onSignOut }) {
                     </tr>
                   </thead>
                   <tbody>
-                    {placeholderPatterns[scheduleView].map((row, idx) => (
-                      <tr key={idx}>
-                        <td className="emp-name">{PLACEHOLDER_NAMES[scheduleView][idx]}</td>
-                        {WEEKDAY_LABELS.map((w, wi) => {
-                          const realWeekday = WEEKDAY_ORDER[wi];
-                          const type = row[realWeekday];
-                          const meta = SHIFT_META[type];
-                          let label = meta.label;
-                          if (scheduleView === "kitchen" && type === "KITCHEN") {
-                            const personName = PLACEHOLDER_NAMES.kitchen[idx];
-                            label = (personName.startsWith("Jenny") || personName.startsWith("Ajuma")) ? "Yes" : meta.label;
-                          }
-                          return (
-                            <td key={w} className="shift-cell">
-                              <button
-                                className="shift-chip chip-btn"
-                                style={{ color: meta.fg, borderColor: meta.border, background: meta.bg }}
-                                onClick={() => cyclePlaceholderCell(scheduleView, idx, realWeekday)}
-                              >
-                                {label}
-                              </button>
-                            </td>
-                          );
-                        })}
-                      </tr>
-                    ))}
+                    {(groupRosters[scheduleView] || []).map((personName, idx) => {
+                      const row = placeholderPatterns[scheduleView]?.[idx] || ALL_OFF_WEEK;
+                      const isYesPerson = personName.startsWith("Jenny") || personName.startsWith("Ajuma");
+                      return (
+                        <tr key={personName + idx}>
+                          <td className="emp-name">{personName.startsWith("Jenny") ? `${personName} — Head Chef` : personName}</td>
+                          {WEEKDAY_LABELS.map((w, wi) => {
+                            const realWeekday = WEEKDAY_ORDER[wi];
+                            const type = row[realWeekday] || "OFF";
+                            const meta = SHIFT_META[type] || SHIFT_META.OFF;
+                            if (scheduleView === "management") {
+                              return (
+                                <td key={w} className="shift-cell">
+                                  <button
+                                    className="shift-chip chip-btn"
+                                    style={{ color: meta.fg, borderColor: meta.border, background: meta.bg }}
+                                    onClick={() => toggleManagementCell(idx, realWeekday)}
+                                  >
+                                    {meta.label}
+                                  </button>
+                                </td>
+                              );
+                            }
+                            const opts = roleOptions[GROUP_ROLE[scheduleView]] || [{ code: "OFF", label: "Off" }];
+                            const value = opts.some((o) => o.code === type) ? type : "OFF";
+                            return (
+                              <td key={w} className="shift-cell">
+                                <select
+                                  className="cell-select shift-select"
+                                  value={value}
+                                  disabled={scheduleLocked}
+                                  style={value === "OFF" ? undefined : { color: meta.fg, borderColor: meta.border, background: meta.bg }}
+                                  onChange={(e) => setPlaceholderShift(scheduleView, idx, realWeekday, e.target.value)}
+                                >
+                                  {opts.map((o) => (
+                                    <option key={o.code} value={o.code}>
+                                      {scheduleView === "kitchen" && o.code === "KITCHEN" && isYesPerson ? "Yes" : o.label}
+                                    </option>
+                                  ))}
+                                </select>
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
-                <div className="template-note">Placeholder roster — swap "####" for real names once they're hired, same as the Front of House tab.</div>
+                {scheduleView !== "management" && (
+                  <div className="template-note">Shift wording for this schedule is configurable data (role_shift_options) — reword there, no code change needed.</div>
+                )}
               </>
             )}
           </div>
@@ -1276,12 +1840,12 @@ export default function SchedulingHub({ session, onSignOut }) {
                   <div className="recon-title">Cash</div>
 
                   <div className="denom-table">
-                    <div className="denom-header"><span></span><span>Opening</span><span>Closing</span></div>
+                    <div className="denom-header"><span>$ amt</span><span>Opening</span><span>Closing</span></div>
                     {DENOMS.map((d) => (
                       <div className="denom-row" key={d}>
                         <span className="denom-label">{denomLabel(d)}</span>
-                        <input type="number" value={openingCounts[d] || ""} onChange={(e) => setCount("open", d, e.target.value)} placeholder="0" />
-                        <input type="number" value={closingCounts[d] || ""} onChange={(e) => setCount("close", d, e.target.value)} placeholder="0" />
+                        <input type="number" value={openingCounts[d] || ""} onChange={(e) => setCount("open", d, e.target.value)} placeholder="0.00" />
+                        <input type="number" value={closingCounts[d] || ""} onChange={(e) => setCount("close", d, e.target.value)} placeholder="0.00" />
                       </div>
                     ))}
                     <div className="denom-row totals">
@@ -1335,7 +1899,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                     <label>Cash Tips Earned</label>
                     <span>${money(cashTipsEarned)}</span>
                   </div>
-                  <div className="recon-note">Should match cash tip sheet.</div>
+                  <div className="recon-note">Each row takes the dollar amount, not a bill count — 2 twenties = 40. Should match cash tip sheet.</div>
                 </div>
               </div>
 
@@ -1346,7 +1910,11 @@ export default function SchedulingHub({ session, onSignOut }) {
                   <button className="back-btn" onClick={() => shiftTipDate(1)}>Next day <ChevronRight size={14} /></button>
                 </div>
                 <div className="print-header" style={{ justifyContent: "flex-end", marginBottom: 14 }}>
-                  <button className="print-btn" onClick={() => window.print()}><Printer size={13} /> Print</button>
+                  <div className="point-reference">
+                    {POINT_REFERENCE.map((line) => (
+                      <div key={line}>{line}</div>
+                    ))}
+                  </div>
                 </div>
 
                 <div className="tip-top-row">
@@ -1371,12 +1939,6 @@ export default function SchedulingHub({ session, onSignOut }) {
                       <label>Covers</label>
                       <input type="number" value={covers} onChange={(e) => setCovers(e.target.value)} placeholder="0" style={{ width: 70 }} />
                     </div>
-                  </div>
-
-                  <div className="point-reference">
-                    {POINT_REFERENCE.map((line) => (
-                      <div key={line}>{line}</div>
-                    ))}
                   </div>
                 </div>
 
@@ -1467,9 +2029,9 @@ export default function SchedulingHub({ session, onSignOut }) {
 
                 <div className="floor-check-row">
                   <div className={`check-box ${floorCheckMatches ? "match" : "mismatch"}`}>
-                    <div className="check-label">Floor Check (Final − Bar Share)</div>
+                    <div className="check-label">Floor Check (paid out of floor pool)</div>
                     <div className="check-value">${money(floorCheckTotal)}</div>
-                    <div className="check-sub">{floorCheckMatches ? "✓ Matches floor pool" : `Off by $${money(Math.abs(floorCheckTotal - floorPool))}`}</div>
+                    <div className="check-sub">{floorCheckMatches ? "✓ Matches floor cash + CC" : `Off by $${money(Math.abs(floorCheckTotal - floorPool))} vs floor cash + CC`}</div>
                   </div>
                   <button className={`custom-toggle ${customMode ? "on" : ""}`} onClick={toggleCustomMode}>
                     {customMode ? "✓ Custom Schedule" : "Custom Schedule"}
@@ -1487,6 +2049,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                   ) : (
                     <button className="publish-btn" onClick={sendTipSheet}>Send Tip Sheet</button>
                   )}
+                  <button className="print-btn" style={{ marginLeft: "auto" }} onClick={() => window.print()}><Printer size={13} /> Print</button>
                 </div>
               </div>
             </div>
@@ -1494,12 +2057,127 @@ export default function SchedulingHub({ session, onSignOut }) {
         </div>
       )}
 
-      {tab === "timesheet" && (
-        <div className="cal-wrap" key="timesheet">
+      {tab === "staff" && (
+        <div className="cal-wrap" key="staff">
           <div className="cal-card">
-            <div className="col-label"><Clock size={13} /> TIMESHEET</div>
-            <div className="empty-decisions" style={{ padding: "60px 20px" }}>
-              Nothing logged yet — this is where staff hours will get tracked once it's built out.
+            <div className="week-header" style={{ marginBottom: 18 }}>
+              <div className="week-range"><Users size={14} style={{ verticalAlign: "-2px", marginRight: 6 }} />Staff &amp; Roles</div>
+              {staffMsg && <span className="staff-msg">{staffMsg}</span>}
+            </div>
+            {!rolesTableReady && (
+              <div className="template-note" style={{ marginTop: -6, marginBottom: 14 }}>
+                ⚠ The role tables aren't in the database yet — run supabase/migrations/0002_roles_and_shift_options.sql
+                in the Supabase SQL editor to enable saving role assignments. Until then this screen shows the built-in defaults.
+              </div>
+            )}
+
+            <div className="staff-add">
+              <div className="staff-add-title">Add a staff member</div>
+              <div className="staff-add-row">
+                <input
+                  className="staff-name-input"
+                  type="text"
+                  placeholder="Name"
+                  value={newStaff.name}
+                  onChange={(e) => setNewStaff((n) => ({ ...n, name: e.target.value }))}
+                />
+                <select
+                  className="cell-select staff-section-select"
+                  value={newStaff.section}
+                  onChange={(e) => setNewStaff((n) => ({ ...n, section: e.target.value, roles: [], primary: "" }))}
+                >
+                  {SECTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
+                </select>
+                <div className="staff-role-checks">
+                  {SECTION_ROLES[newStaff.section].map((r) => (
+                    <label key={r} className="staff-role-check">
+                      <input
+                        type="checkbox"
+                        checked={newStaff.roles.includes(r)}
+                        onChange={(e) => setNewStaff((n) => {
+                          const roles = e.target.checked ? [...n.roles, r] : n.roles.filter((x) => x !== r);
+                          return { ...n, roles, primary: roles.includes(n.primary) ? n.primary : roles[0] || "" };
+                        })}
+                      />
+                      {r}
+                    </label>
+                  ))}
+                </div>
+                {newStaff.roles.length > 1 && (
+                  <select
+                    className="cell-select staff-primary-select"
+                    value={newStaff.primary || newStaff.roles[0]}
+                    onChange={(e) => setNewStaff((n) => ({ ...n, primary: e.target.value }))}
+                    title="Primary / default role"
+                  >
+                    {newStaff.roles.map((r) => <option key={r} value={r}>Primary: {r}</option>)}
+                  </select>
+                )}
+                <button className="publish-btn" onClick={handleAddStaff}>Add</button>
+              </div>
+            </div>
+
+            {SECTIONS.map((section) => {
+              const members = staffList.filter((s) => (s.section || "FOH") === section);
+              if (members.length === 0) return null;
+              return (
+                <React.Fragment key={section}>
+                  <div className="role-header" style={{ display: "block", padding: "16px 2px 4px" }}>{section}</div>
+                  {members.map((s) => {
+                    const d = staffDraftFor(s);
+                    const dirty =
+                      d.name !== s.name ||
+                      d.active !== (s.active !== false) ||
+                      JSON.stringify(d.roles) !== JSON.stringify(staffRolesMap[s.name] || [s.role]) ||
+                      d.primary !== (staffRolesMap[s.name] || [s.role])[0];
+                    return (
+                      <div className={`staff-row ${d.active ? "" : "staff-row-inactive"}`} key={s.id || s.name}>
+                        <input
+                          className="staff-name-input"
+                          type="text"
+                          value={d.name}
+                          onChange={(e) => setStaffDraft(s, { name: e.target.value })}
+                        />
+                        <div className="staff-role-checks">
+                          {SECTION_ROLES[section].map((r) => (
+                            <label key={r} className="staff-role-check">
+                              <input
+                                type="checkbox"
+                                checked={d.roles.includes(r)}
+                                onChange={(e) =>
+                                  setStaffDraft(s, { roles: e.target.checked ? [...d.roles, r] : d.roles.filter((x) => x !== r) })
+                                }
+                              />
+                              {r}
+                            </label>
+                          ))}
+                        </div>
+                        {d.roles.length > 1 && (
+                          <select
+                            className="cell-select staff-primary-select"
+                            value={d.primary}
+                            onChange={(e) => setStaffDraft(s, { primary: e.target.value })}
+                            title="Primary / default role"
+                          >
+                            {d.roles.map((r) => <option key={r} value={r}>Primary: {r}</option>)}
+                          </select>
+                        )}
+                        <label className="staff-role-check staff-active-check">
+                          <input type="checkbox" checked={d.active} onChange={(e) => setStaffDraft(s, { active: e.target.checked })} />
+                          Active
+                        </label>
+                        {dirty && (
+                          <button className="publish-btn staff-save-btn" onClick={() => handleSaveStaff(s)}>Save</button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </React.Fragment>
+              );
+            })}
+            <div className="template-note">
+              Role assignments here drive each person's role picker on the Set Schedule. Deactivating someone hides them
+              from the Front of House schedule; BOH/Kitchen/Management rows stay put so the grid stays aligned.
             </div>
           </div>
         </div>

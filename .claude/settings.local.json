@@ -7,7 +7,11 @@
       "PowerShell($headers = @{ \"apikey\" = \"sb_publishable_6643hWCKC93dC0tMaAA_yg_HLrr1JJI\" }; try { $r = Invoke-WebRequest -Uri \"https://uasylyslmlxfjxwfsosf.supabase.co/rest/v1/\" -Headers $headers -UseBasicParsing -ErrorAction Stop; Write-Output \"STATUS: $\\($r.StatusCode\\)\"; $r.Content.Substring\\(0, [Math]::Min\\(300, $r.Content.Length\\)\\) } catch { Write-Output \"FAILED: $\\($_.Exception.Message\\)\" })",
       "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\); cd \"C:\\\\Users\\\\Lenre\\\\OneDrive\\\\Desktop\\\\HaenyeoMNG\"; git --version; if \\(-not \\(Test-Path \".git\"\\)\\) { git init -b main | Out-Null; git add -A; git -c user.name=\"HaenyeoMNG\" -c user.email=\"lenreds1016@gmail.com\" commit -m \"Haenyeo Scheduling Hub: Vite app, Supabase data layer + auth, wired from prototype\" | Out-Null; Write-Output \"repo initialized\" } else { Write-Output \"repo already exists\" }; git status --short | Select-Object -First 5; Write-Output \"--- tracked file count ---\"; \\(git ls-files | Measure-Object -Line\\).Lines)",
       "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\); cd \"C:\\\\Users\\\\Lenre\\\\OneDrive\\\\Desktop\\\\HaenyeoMNG\"; Write-Output \"env.local tracked? \\(should be empty\\):\"; git ls-files | Select-String -Pattern \"env.local|node_modules|dist/\"; Write-Output \"all tracked files:\"; git ls-files)",
-      "mcp__claude-in-chrome__tabs_context_mcp"
+      "mcp__claude-in-chrome__tabs_context_mcp",
+      "PowerShell($i=0; Get-Content \"C:\\\\Users\\\\Lenre\\\\OneDrive\\\\Desktop\\\\HaenyeoMNG\\\\src\\\\App.jsx\" | ForEach-Object { $i++; if \\($_.Length -gt 2000\\) { \"{0}: {1} chars\" -f $i, $_.Length } })",
+      "PowerShell(npm run build)",
+      "PowerShell(git add src/App.jsx src/AuthGate.jsx src/lib/data.js UPDATE-BRIEF-schedule-redesign.md supabase/migrations/0002_roles_and_shift_options.sql .claude/settings.local.json)",
+      "PowerShell(git add .claude/settings.local.json; $env:GIT_EDITOR='true'; git rebase --continue; git log --oneline -3)"
     ]
   }
 }

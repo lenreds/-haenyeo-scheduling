@@ -10,12 +10,78 @@ import { supabase } from "./supabase.js";
 /* ------------------------------------------------------------------ staff -- */
 
 export async function fetchStaff() {
+  // section was added in migration 0002 — fall back to the old shape if the
+  // column doesn't exist yet so the app keeps working pre-migration.
+  let { data, error } = await supabase
+    .from("staff")
+    .select("id, name, role, active, section")
+    .order("created_at", { ascending: true });
+  if (error) {
+    ({ data, error } = await supabase
+      .from("staff")
+      .select("id, name, role, active")
+      .order("created_at", { ascending: true }));
+    if (error) throw error;
+    data = (data || []).map((s) => ({ ...s, section: "FOH" }));
+  }
+  return data || [];
+}
+
+export async function insertStaff({ name, role, section }) {
   const { data, error } = await supabase
     .from("staff")
-    .select("id, name, role, active")
-    .order("created_at", { ascending: true });
+    .insert({ name, role, section })
+    .select()
+    .single();
   if (error) throw error;
+  return data;
+}
+
+export async function updateStaff(id, fields) {
+  const { error } = await supabase.from("staff").update(fields).eq("id", id);
+  if (error) throw error;
+}
+
+/* ------------------------------------------------------- staff_roles -------- */
+// -> [{ staff_id, role, is_primary, sort_order }] — null if the table doesn't
+// exist yet (pre-migration), so callers can fall back to built-in defaults.
+
+export async function fetchStaffRoles() {
+  const { data, error } = await supabase
+    .from("staff_roles")
+    .select("staff_id, role, is_primary, sort_order")
+    .order("sort_order", { ascending: true });
+  if (error) return null;
   return data || [];
+}
+
+// Replace a person's full role set (delete + insert keeps it simple).
+export async function replaceStaffRoles(staffId, roles) {
+  // roles: [{ role, is_primary, sort_order }]
+  const { error: delErr } = await supabase.from("staff_roles").delete().eq("staff_id", staffId);
+  if (delErr) throw delErr;
+  if (roles.length === 0) return;
+  const { error } = await supabase
+    .from("staff_roles")
+    .insert(roles.map((r) => ({ staff_id: staffId, ...r })));
+  if (error) throw error;
+}
+
+/* -------------------------------------------------- role_shift_options ----- */
+// -> { [role]: [{ code, label }] } in sort order — null pre-migration.
+
+export async function fetchRoleShiftOptions() {
+  const { data, error } = await supabase
+    .from("role_shift_options")
+    .select("role, code, label, sort_order")
+    .order("sort_order", { ascending: true });
+  if (error) return null;
+  if (!data || data.length === 0) return null;
+  const byRole = {};
+  data.forEach((row) => {
+    (byRole[row.role] = byRole[row.role] || []).push({ code: row.code, label: row.label });
+  });
+  return byRole;
 }
 
 /* -------------------------------------------------- schedule_patterns ------ */
@@ -164,11 +230,13 @@ export async function fetchInitial() {
     idToName[s.id] = s.name;
     nameToId[s.name] = s.id;
   });
-  const [patterns, placeholders, overrides, rail] = await Promise.all([
+  const [patterns, placeholders, overrides, rail, staffRoles, roleOptions] = await Promise.all([
     fetchPatterns(idToName),
     fetchPlaceholders(),
     fetchOverrides(idToName),
     fetchRailRequests(idToName),
+    fetchStaffRoles(),
+    fetchRoleShiftOptions(),
   ]);
-  return { staff, idToName, nameToId, patterns, placeholders, overrides, rail };
+  return { staff, idToName, nameToId, patterns, placeholders, overrides, rail, staffRoles, roleOptions };
 }
