@@ -1904,17 +1904,10 @@ export default function SchedulingHub({ session, onSignOut }) {
               </div>
 
               <div className="tip-right-col">
-                <div className="week-header">
+                <div className="week-header" style={{ marginBottom: 12 }}>
                   <button className="back-btn" onClick={() => shiftTipDate(-1)}><ChevronLeft size={14} /> Prev day</button>
                   <div className="week-range">{tipDateInfo.dateObj.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" })}</div>
                   <button className="back-btn" onClick={() => shiftTipDate(1)}>Next day <ChevronRight size={14} /></button>
-                </div>
-                <div className="print-header" style={{ justifyContent: "flex-end", marginBottom: 14 }}>
-                  <div className="point-reference">
-                    {POINT_REFERENCE.map((line) => (
-                      <div key={line}>{line}</div>
-                    ))}
-                  </div>
                 </div>
 
                 <div className="tip-top-row">
@@ -1939,6 +1932,12 @@ export default function SchedulingHub({ session, onSignOut }) {
                       <label>Covers</label>
                       <input type="number" value={covers} onChange={(e) => setCovers(e.target.value)} placeholder="0" style={{ width: 70 }} />
                     </div>
+                  </div>
+
+                  <div className="point-reference">
+                    {POINT_REFERENCE.map((line) => (
+                      <div key={line}>{line}</div>
+                    ))}
                   </div>
                 </div>
 
