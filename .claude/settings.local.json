@@ -22,7 +22,16 @@
       "PowerShell(git rebase origin/main)",
       "PowerShell(git rebase origin/main --autostash)",
       "PowerShell(git stash drop)",
-      "PowerShell(git add .claude/settings.local.json)"
+      "PowerShell(git add .claude/settings.local.json)",
+      "PowerShell(git add src/lib/data.js)",
+      "PowerShell(git commit -m \"Normalize staff section casing on read \\(live DB has lowercase 'foh'\\)\" -m \"The live staff table stored section values in mixed casings; the Staff tab and FOH roster compared exact-case against 'FOH', hiding all FOH staff. Canonicalize at the data layer so any casing works. Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>\")",
+      "PowerShell(git add src/App.jsx)",
+      "PowerShell(git commit -m \"Tighten Tip Sheet top spacing: legend shares the top row with tip inputs\" -m \"The legend sat alone in a full-width row under a 40px header margin, leaving a large gap above the tip inputs. Inputs now sit upper-left with the legend in the upper-right corner of the same band; date-nav margin reduced. Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>\")",
+      "Bash(git check-ignore *)",
+      "Bash(node \"C:/Users/Lenre/AppData/Local/Temp/claude/C--Users-Lenre-OneDrive-Desktop-HaenyeoMNG/c53558a1-3103-4dd4-8e6a-19be591b6dca/scratchpad/parse.test.mjs\")",
+      "Bash(npm run *)",
+      "Bash(git add *)",
+      "Bash(git commit *)"
     ]
   }
 }

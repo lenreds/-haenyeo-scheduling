@@ -170,15 +170,26 @@ export async function fetchOverrides(idToName) {
 // resolved -> [{ id, name, type, dates, status, created_at }] (for the log)
 
 export async function fetchRailRequests(idToName) {
-  const { data, error } = await supabase
+  // source/unmatched_name arrived in migration 0003 — select them if present,
+  // fall back to the older column set so the app still loads pre-migration.
+  let { data, error } = await supabase
     .from("rail_requests")
-    .select("id, staff_id, type, dates, notice, note, status, urgent, created_at")
+    .select("id, staff_id, type, dates, notice, note, status, urgent, created_at, source, unmatched_name")
     .order("created_at", { ascending: false });
-  if (error) throw error;
+  if (error) {
+    ({ data, error } = await supabase
+      .from("rail_requests")
+      .select("id, staff_id, type, dates, notice, note, status, urgent, created_at")
+      .order("created_at", { ascending: false }));
+    if (error) throw error;
+  }
   const pending = [];
   const resolved = [];
   (data || []).forEach((row) => {
-    const name = idToName[row.staff_id] || "Unknown";
+    // matched entries resolve staff_id -> name; email entries with no staff
+    // match fall back to the raw name from the email, flagged as unmatched.
+    const name = idToName[row.staff_id] || row.unmatched_name || "Unknown";
+    const unmatchedName = !row.staff_id && row.unmatched_name ? row.unmatched_name : null;
     if (row.status === "pending") {
       pending.push({
         id: row.id,
@@ -188,6 +199,8 @@ export async function fetchRailRequests(idToName) {
         notice: row.notice,
         note: row.note,
         urgent: !!row.urgent,
+        source: row.source || "manual",
+        unmatchedName,
       });
     } else {
       resolved.push({ id: row.id, name, type: row.type, dates: row.dates, status: row.status, created_at: row.created_at });
@@ -201,6 +214,31 @@ export async function fetchRailRequests(idToName) {
 export async function updateRailStatus(id, status) {
   const { error } = await supabase.from("rail_requests").update({ status }).eq("id", id);
   if (error) throw error;
+}
+
+/* ------------------------------------------------ gmail integration -------- */
+// These hit the server-side /api functions (never the Gmail creds directly).
+// Under plain `vite dev` the /api routes don't exist, so failures resolve to a
+// harmless "unavailable" status rather than throwing.
+
+export async function fetchGmailStatus() {
+  try {
+    const res = await fetch("/api/gmail/status", { headers: { Accept: "application/json" } });
+    if (!res.ok) return { configured: false, connected: false, unavailable: true };
+    return await res.json();
+  } catch {
+    return { configured: false, connected: false, unavailable: true };
+  }
+}
+
+// Manual "Check now" — authorized by the signed-in manager's Supabase JWT.
+export async function triggerGmailPoll(accessToken) {
+  const res = await fetch("/api/poll", {
+    method: "POST",
+    headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
+  });
+  if (!res.ok) throw new Error(`Poll failed (${res.status})`);
+  return await res.json();
 }
 
 /* ------------------------------------------------------------ tip_sheets --- */

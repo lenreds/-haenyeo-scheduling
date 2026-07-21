@@ -2,6 +2,7 @@ import React, { useState, useMemo, useEffect } from "react";
 import { Check, X, AlertTriangle, Users, Package, Clock, ChevronLeft, ChevronRight, Printer, Calendar, Lock, Unlock, LogOut } from "lucide-react";
 import {
   fetchInitial,
+  fetchRailRequests,
   upsertPattern,
   upsertPlaceholder,
   updateRailStatus,
@@ -10,6 +11,8 @@ import {
   insertStaff,
   updateStaff,
   replaceStaffRoles,
+  fetchGmailStatus,
+  triggerGmailPoll,
 } from "./lib/data.js";
 
 // "" / undefined -> null so numeric columns don't choke; otherwise Number().
@@ -527,6 +530,8 @@ export default function SchedulingHub({ session, onSignOut }) {
   const [newStaff, setNewStaff] = useState({ name: "", section: "FOH", roles: [], primary: "" });
   const [staffDrafts, setStaffDrafts] = useState({}); // staff id -> edited { name, active, roles, primary }
   const [staffMsg, setStaffMsg] = useState("");
+  const [gmailStatus, setGmailStatus] = useState(null); // { configured, connected, lastPollAt, lastError, ... }
+  const [gmailChecking, setGmailChecking] = useState(false);
   const [publishedWeeks, setPublishedWeeks] = useState(new Set());
   const [tipDateIso, setTipDateIso] = useState("2026-07-02");
   const [floorCash, setFloorCash] = useState("");
@@ -796,6 +801,39 @@ export default function SchedulingHub({ session, onSignOut }) {
       });
     return () => { cancelled = true; };
   }, []);
+
+  // Gmail connection status for the Rail indicator (harmless if /api is absent).
+  useEffect(() => {
+    let cancelled = false;
+    fetchGmailStatus().then((s) => { if (!cancelled) setGmailStatus(s); });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Re-pull rail requests from the DB (used after a manual Gmail poll so new
+  // auto-created pending entries show up without a full reload).
+  function reloadRail() {
+    const idToName = {};
+    staffList.forEach((s) => { if (s.id) idToName[s.id] = s.name; });
+    return fetchRailRequests(idToName)
+      .then((rail) => { setPending(rail.pending); setResolvedReqs(rail.resolved); })
+      .catch((e) => console.error("Rail reload failed:", e));
+  }
+
+  async function checkGmailNow() {
+    if (gmailChecking) return;
+    setGmailChecking(true);
+    try {
+      await triggerGmailPoll(session?.access_token);
+      await reloadRail();
+      const s = await fetchGmailStatus();
+      setGmailStatus(s);
+    } catch (e) {
+      console.error("Gmail check failed:", e);
+      setGmailStatus((prev) => ({ ...(prev || {}), connected: false, lastError: e.message }));
+    } finally {
+      setGmailChecking(false);
+    }
+  }
 
   // Load the saved tip sheet for the selected date (or clear the form if none).
   useEffect(() => {
@@ -1097,7 +1135,21 @@ export default function SchedulingHub({ session, onSignOut }) {
         .nr-item-type { font-size: 11.5px; color: #85897F; font-weight: 500; }
         .nr-item-dates { margin-left: auto; font-weight: 700; font-size: 14.5px; color: #2F3432; }
         .nr-urgent { display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; font-weight: 700; color: #B3695E; background: #F1DFDB; padding: 2px 9px; border-radius: 20px; margin-left: 6px; white-space: nowrap; }
+        .nr-unmatched { display: inline-flex; align-items: center; gap: 3px; font-size: 9.5px; font-weight: 700; color: #9a5a1f; background: #F5E6CE; padding: 2px 8px; border-radius: 20px; margin-left: 8px; vertical-align: 2px; white-space: nowrap; }
         .nr-item-note { font-size: 13px; color: #5c625f; line-height: 1.5; margin: 6px 0 14px; padding-left: 40px; }
+
+        /* Gmail connection status bar (top of the Rail card) */
+        .gmail-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 18px; padding-bottom: 14px; border-bottom: 1px solid #DFE1DB; font-size: 12.5px; color: #5c625f; }
+        .gmail-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+        .gmail-dot-on { background: #6E9B72; box-shadow: 0 0 0 3px rgba(110,155,114,0.18); }
+        .gmail-dot-off { background: #B3695E; box-shadow: 0 0 0 3px rgba(179,105,94,0.18); }
+        .gmail-dot-idle { background: #b8b3a6; }
+        .gmail-label { font-weight: 700; color: #2F3432; }
+        .gmail-sub { color: #85897F; font-size: 11.5px; }
+        .gmail-err { color: #B3695E; }
+        .gmail-check-btn { margin-left: auto; font-family: 'Plus Jakarta Sans', sans-serif; font-weight: 700; font-size: 11.5px; padding: 5px 12px; border-radius: 8px; border: 1px solid rgba(47,52,50,0.15); background: #F0F0EC; color: #2F3432; cursor: pointer; }
+        .gmail-check-btn:hover:not(:disabled) { background: #E4E5DF; }
+        .gmail-check-btn:disabled { opacity: 0.5; cursor: not-allowed; }
         .nr-item-actions { display: flex; gap: 10px; padding-left: 40px; }
 
         .nr-btn { display: flex; align-items: center; gap: 6px; font-family: 'Plus Jakarta Sans', sans-serif; font-weight: 700; font-size: 12.5px; padding: 7px 15px; border-radius: 9px; border: none; cursor: pointer; }
@@ -1417,6 +1469,38 @@ export default function SchedulingHub({ session, onSignOut }) {
       {tab === "rail" && (
         <div className="nr-wrap">
           <div className="nr-card">
+            <div className="gmail-bar">
+              {(() => {
+                const st = gmailStatus;
+                const connected = !!st?.connected;
+                const dot = connected ? "on" : st?.configured ? "off" : "idle";
+                const label = st == null
+                  ? "Checking Gmail…"
+                  : connected
+                  ? "Gmail connected"
+                  : st.configured
+                  ? "Gmail disconnected"
+                  : "Gmail not set up";
+                const last = st?.lastPollAt ? new Date(st.lastPollAt) : null;
+                return (
+                  <>
+                    <span className={`gmail-dot gmail-dot-${dot}`} />
+                    <span className="gmail-label">{label}</span>
+                    {st?.email && connected && <span className="gmail-sub">· {st.email}</span>}
+                    {last && <span className="gmail-sub">· last checked {last.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</span>}
+                    {st?.lastError && !connected && <span className="gmail-sub gmail-err">· {st.lastError}</span>}
+                    <button
+                      className="gmail-check-btn"
+                      onClick={checkGmailNow}
+                      disabled={gmailChecking || !session?.access_token}
+                      title={!session?.access_token ? "Sign in to check for new emails" : "Check the inbox for new scheduling emails now"}
+                    >
+                      {gmailChecking ? "Checking…" : "Check now"}
+                    </button>
+                  </>
+                );
+              })()}
+            </div>
             <div className="nr-grid">
               <div>
                 <div className="nr-label"><Clock size={13} /> Pending Decisions <span className="nr-count">{pending.length}</span></div>
@@ -1428,8 +1512,15 @@ export default function SchedulingHub({ session, onSignOut }) {
                       <div className="nr-item-top">
                         <div className="nr-hex" style={{ background: style.badge }}><span>{item.name[0]}</span></div>
                         <div>
-                          <div className="nr-item-name">{item.name}</div>
-                          <div className="nr-item-type">{style.label} · {item.notice}</div>
+                          <div className="nr-item-name">
+                            {item.name}
+                            {item.unmatchedName && (
+                              <span className="nr-unmatched" title="No staff member matches this name — approve after fixing, or add them on the Staff tab">
+                                <AlertTriangle size={10} /> Unmatched name
+                              </span>
+                            )}
+                          </div>
+                          <div className="nr-item-type">{style.label}{item.notice ? ` · ${item.notice}` : item.source === "gmail" ? " · via email" : ""}</div>
                         </div>
                         {item.urgent && <span className="nr-urgent"><AlertTriangle size={11} /> Short notice</span>}
                         <div className="nr-item-dates">{item.dates}</div>

@@ -1,0 +1,85 @@
+// Supabase access for the server side, using the SERVICE ROLE key (bypasses RLS).
+// This module is the only thing that touches integration_tokens and it is never
+// imported by client code.
+
+import { createClient } from "@supabase/supabase-js";
+import { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, assertSupabaseConfigured } from "./config.js";
+
+let _admin = null;
+export function admin() {
+  if (!_admin) {
+    assertSupabaseConfigured();
+    _admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+      auth: { autoRefreshToken: false, persistSession: false },
+    });
+  }
+  return _admin;
+}
+
+/* ---- integration_tokens (provider = 'gmail') ---- */
+
+export async function getGmailToken() {
+  const { data, error } = await admin()
+    .from("integration_tokens")
+    .select("provider, refresh_token, email, last_poll_at, last_ok_at, last_error, updated_at")
+    .eq("provider", "gmail")
+    .maybeSingle();
+  if (error) throw error;
+  return data || null;
+}
+
+export async function saveGmailRefreshToken(refreshToken, email) {
+  const patch = { provider: "gmail", email, updated_at: new Date().toISOString(), last_error: null };
+  if (refreshToken) patch.refresh_token = refreshToken; // Google omits it on re-consent sometimes
+  const { error } = await admin().from("integration_tokens").upsert(patch, { onConflict: "provider" });
+  if (error) throw error;
+}
+
+export async function recordPoll({ ok, error }) {
+  const now = new Date().toISOString();
+  const patch = { provider: "gmail", last_poll_at: now, updated_at: now };
+  if (ok) { patch.last_ok_at = now; patch.last_error = null; }
+  else if (error) { patch.last_error = String(error).slice(0, 500); }
+  const { error: e } = await admin().from("integration_tokens").upsert(patch, { onConflict: "provider" });
+  if (e) throw e;
+}
+
+/* ---- staff + rail_requests ---- */
+
+export async function fetchStaffMinimal() {
+  const { data, error } = await admin().from("staff").select("id, name, active");
+  if (error) throw error;
+  return data || [];
+}
+
+// Insert a pending rail entry from an email. Relies on the partial unique index
+// on gmail_message_id to reject duplicates (returns { duplicate: true }).
+export async function insertGmailRail({ staffId, unmatchedName, type, dates, note, messageId }) {
+  const row = {
+    staff_id: staffId || null,
+    type,
+    dates,
+    note: note || null,
+    status: "pending",
+    urgent: false,
+    source: "gmail",
+    unmatched_name: unmatchedName || null,
+    gmail_message_id: messageId,
+  };
+  const { error } = await admin().from("rail_requests").insert(row);
+  if (error) {
+    if (error.code === "23505") return { duplicate: true }; // unique violation
+    throw error;
+  }
+  return { duplicate: false };
+}
+
+export async function gmailMessageExists(messageId) {
+  const { data, error } = await admin()
+    .from("rail_requests")
+    .select("id")
+    .eq("gmail_message_id", messageId)
+    .maybeSingle();
+  if (error) throw error;
+  return !!data;
+}
