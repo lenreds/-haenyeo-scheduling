@@ -74,6 +74,19 @@ export async function listSchedulingUnread(accessToken, maxResults = 25) {
   return data.messages || []; // [{ id, threadId }]
 }
 
+// Broader than listSchedulingUnread: also catches [REGISTER] and [UPDATE INFO].
+// Gmail `{ a b }` = OR. Brackets in the tags are ignored by search; the code
+// filters subjects precisely afterward.
+export async function listActionableUnread(accessToken, maxResults = 30) {
+  const q = encodeURIComponent('is:unread {subject:SCHEDULING subject:REGISTER subject:"UPDATE INFO"}');
+  const res = await fetch(`${GMAIL_BASE}/messages?q=${q}&maxResults=${maxResults}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(`Gmail list failed: ${data.error?.message || res.status}`);
+  return data.messages || [];
+}
+
 export async function getMessage(accessToken, id) {
   const res = await fetch(`${GMAIL_BASE}/messages/${id}?format=full`, {
     headers: { Authorization: `Bearer ${accessToken}` },
@@ -97,17 +110,41 @@ export async function sendMessage(accessToken, { raw, threadId }) {
   return data;
 }
 
-// Best-effort: remove the UNREAD label so the message isn't polled again.
-// Requires gmail.modify; if the granted scope is readonly this throws and the
-// caller logs+continues (the gmail_message_id dedup still prevents re-inserts).
-export async function markRead(accessToken, id) {
+// Add/remove labels on a message (generalizes mark-read). Requires gmail.modify.
+export async function modifyMessage(accessToken, id, { addLabelIds = [], removeLabelIds = [] }) {
   const res = await fetch(`${GMAIL_BASE}/messages/${id}/modify`, {
     method: "POST",
     headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ removeLabelIds: ["UNREAD"] }),
+    body: JSON.stringify({ addLabelIds, removeLabelIds }),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(`Gmail mark-read failed: ${data.error?.message || res.status}`);
+    throw new Error(`Gmail modify failed: ${data.error?.message || res.status}`);
   }
+}
+
+// Best-effort: remove the UNREAD label so the message isn't polled again.
+export async function markRead(accessToken, id) {
+  return modifyMessage(accessToken, id, { removeLabelIds: ["UNREAD"] });
+}
+
+// List all user labels: [{ id, name, ... }].
+export async function listLabels(accessToken) {
+  const res = await fetch(`${GMAIL_BASE}/labels`, { headers: { Authorization: `Bearer ${accessToken}` } });
+  const data = await res.json();
+  if (!res.ok) throw new Error(`Gmail labels list failed: ${data.error?.message || res.status}`);
+  return data.labels || [];
+}
+
+// Create a label (name may be nested, e.g. "Requests/Time Off"). If it already
+// exists Gmail returns 409 — the caller's cache handles that path.
+export async function createLabel(accessToken, name) {
+  const res = await fetch(`${GMAIL_BASE}/labels`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ name, labelListVisibility: "labelShow", messageListVisibility: "show" }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(`Gmail label create failed (${name}): ${data.error?.message || res.status}`);
+  return data;
 }

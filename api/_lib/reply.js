@@ -10,21 +10,33 @@ const DEFAULT_LINE = {
   "SHIFT SWAP|false": "Please reach out if you have any questions.",
   "COVERAGE REQUEST|true": "We'll find coverage for your shift.",
   "COVERAGE REQUEST|false": "Please reach out if you have any questions.",
+  "TIME OFF|true": "Enjoy your time off!",
+  "TIME OFF|false": "Please reach out if you have any questions.",
 };
 
 const PHRASE = {
   "REQUEST OFF": "time off request",
   "SHIFT SWAP": "shift swap request",
   "COVERAGE REQUEST": "coverage request",
+  "TIME OFF": "time off request",
 };
 
-// Build the reply body text for a given request + decision.
-export function buildReplyBody({ type, approved, name, date, note }) {
+// Build the reply body text for a given request + decision. `partial` +
+// `approvedDates` apply only to a partially-approved TIME OFF.
+export function buildReplyBody({ type, approved, partial, name, date, approvedDates, note }) {
+  const sig = "\n— Haenyeo Management";
+  const cleanNote = note && note.trim();
+
+  if (type === "TIME OFF" && approved && partial) {
+    const tail = cleanNote || "";
+    return `Hi ${name}, your time off request has been partially approved. Approved dates: ${approvedDates}.${tail ? " " + tail : ""}${sig}`;
+  }
+
   const phrase = PHRASE[type] || "request";
   const outcome = approved ? "has been approved" : "has been denied";
   const lead = approved ? "" : "unfortunately ";
-  const tail = (note && note.trim()) || DEFAULT_LINE[`${type}|${approved}`] || "";
-  return `Hi ${name}, ${lead}your ${phrase} for ${date} ${outcome}. ${tail}\n— Haenyeo Management`;
+  const tail = cleanNote || DEFAULT_LINE[`${type}|${approved}`] || "";
+  return `Hi ${name}, ${lead}your ${phrase} for ${date} ${outcome}. ${tail}${sig}`;
 }
 
 // RFC 2047 encoded-word for a Subject that contains non-ASCII (e.g. en-dash).

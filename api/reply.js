@@ -5,9 +5,10 @@
 // failures return { sent:false, error } with HTTP 200.
 
 import { GMAIL_REFRESH_TOKEN } from "./_lib/config.js";
-import { getAccessToken, getMessage, sendMessage } from "./_lib/google.js";
+import { getAccessToken, getMessage, sendMessage, modifyMessage } from "./_lib/google.js";
 import { headerValue } from "./_lib/parse.js";
 import { buildReplyBody, buildRawEmail } from "./_lib/reply.js";
+import { makeLabeler, LABELS } from "./_lib/labels.js";
 import { getGmailToken, getRailRequestById, isManager } from "./_lib/store.js";
 
 function readBody(req) {
@@ -21,7 +22,7 @@ export default async function handler(req, res) {
   const token = (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
   if (!(await isManager(token))) return res.status(401).json({ error: "unauthorized" });
 
-  const { railRequestId, approved, managerNote } = readBody(req);
+  const { railRequestId, approved, managerNote, partial, approvedDatesText } = readBody(req);
   if (!railRequestId || typeof approved !== "boolean") {
     return res.status(400).json({ error: "railRequestId and approved are required" });
   }
@@ -52,12 +53,22 @@ export default async function handler(req, res) {
     const body = buildReplyBody({
       type: reqRow.type,
       approved,
+      partial: !!partial,
       name: reqRow.name,
       date: reqRow.dates,
+      approvedDates: approvedDatesText || "",
       note: managerNote,
     });
     const raw = buildRawEmail({ to: from, subject, inReplyTo: messageId, body });
-    await sendMessage(accessToken, { raw, threadId: reqRow.gmail_thread_id });
+    const sent = await sendMessage(accessToken, { raw, threadId: reqRow.gmail_thread_id });
+
+    // Tag the sent reply (best-effort).
+    if (sent?.id) {
+      try {
+        const labeler = makeLabeler(accessToken);
+        await modifyMessage(accessToken, sent.id, { addLabelIds: [await labeler.ensure(LABELS.sentReplies)] });
+      } catch (e) { console.warn(`[reply] label sent failed: ${e.message}`); }
+    }
 
     return res.status(200).json({ sent: true });
   } catch (e) {

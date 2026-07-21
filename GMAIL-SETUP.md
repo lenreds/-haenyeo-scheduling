@@ -100,10 +100,33 @@ transcript. It's only stored in the gitignored `.env.local` (not committed) and
 in Vercel. If you want to be safe, rotate it in Google Cloud Console → Credentials
 and update `GMAIL_CLIENT_SECRET` in Vercel + `.env.local`.
 
+## Combined build round (registration, publish, finalize, labels, time off)
+
+Extra setup for the COMBINED-BUILD-BRIEF features:
+
+1. **Run migration `0005_registration_publish_finalize.sql`** (staff contact
+   columns, tip finalize columns, `staff_info_updates` table).
+2. **Add two env vars** (server + client copy of the same code word):
+   | Name | Where | Value |
+   |---|---|---|
+   | `STAFF_REGISTER_CODE` | Vercel (server) | the registration code word |
+   | `VITE_STAFF_REGISTER_CODE` | Vercel (client) | **same** value — baked into the QR codes at build time |
+   `VITE_STAFF_REGISTER_CODE` is **not secret** (it's readable in the page source
+   and printed on the QR codes posted in the restaurant). It must be set **before
+   the deploy build** or the Register/Update QR codes encode a placeholder.
+3. **No new OAuth scope** — Gmail label create/apply uses the `gmail.modify`
+   scope you already granted, and sending uses `gmail.send`. If replies/sends
+   already work, nothing to re-consent here.
+
+Gmail labels (`Registrations`, `Requests/*`, `Info Updates`, `Sent/*`) are created
+automatically on first use — no manual Gmail setup.
+
 ## Endpoints
 
 - `GET  /api/auth/start` — begin OAuth
 - `GET  /api/auth/callback` — OAuth redirect target (stores refresh token)
-- `POST /api/poll` — poll inbox (cron `Bearer CRON_SECRET`, or a manager JWT)
+- `POST /api/poll` — poll inbox: rail requests + [REGISTER] + [UPDATE INFO] (cron `Bearer CRON_SECRET`, or a manager JWT)
 - `POST /api/reply` — send the staff auto-reply on approve/deny (manager JWT)
+- `POST /api/send-schedule` — email the week's schedule to registered staff (manager JWT)
+- `POST /api/send-tipsheet` — email the finalized tip sheet to workers (manager JWT)
 - `GET  /api/gmail/status` — connection status for the Rail indicator (no secrets)

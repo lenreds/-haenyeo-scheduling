@@ -52,6 +52,33 @@ export async function fetchStaffMinimal() {
   return data || [];
 }
 
+// Registered staff (registered=true, active, has an email) for schedule/tip sends.
+export async function fetchRegisteredStaff() {
+  const { data, error } = await admin()
+    .from("staff")
+    .select("id, name, personal_email, registered, active")
+    .eq("registered", true);
+  if (error) throw error;
+  return (data || []).filter((s) => s.active !== false && s.personal_email);
+}
+
+// [REGISTER]: store contact info + mark registered.
+export async function registerStaffContact(staffId, { email, phone }) {
+  const patch = { registered: true };
+  if (email) patch.personal_email = email;
+  if (phone) patch.phone = phone;
+  const { error } = await admin().from("staff").update(patch).eq("id", staffId);
+  if (error) throw error;
+}
+
+// [UPDATE INFO]: queue a pending change for manager review (never auto-applied).
+export async function insertInfoUpdate({ staffId, newEmail, newPhone }) {
+  const { error } = await admin()
+    .from("staff_info_updates")
+    .insert({ staff_id: staffId, new_email: newEmail || null, new_phone: newPhone || null, status: "pending" });
+  if (error) throw error;
+}
+
 // Insert a pending rail entry from an email. Relies on the partial unique index
 // on gmail_message_id to reject duplicates (returns { duplicate: true }).
 export async function insertGmailRail({ staffId, unmatchedName, type, dates, note, messageId, threadId }) {

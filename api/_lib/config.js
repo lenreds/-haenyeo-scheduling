@@ -31,6 +31,10 @@ export const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY |
 // Shared secret Vercel Cron sends as `Authorization: Bearer <CRON_SECRET>`.
 export const CRON_SECRET = process.env.CRON_SECRET || "";
 
+// Code word staff must include in [REGISTER] / [UPDATE INFO] emails. Server-side
+// gate only — the VITE_ copy baked into the client (for QR links) is not secret.
+export const STAFF_REGISTER_CODE = process.env.STAFF_REGISTER_CODE || "";
+
 export function assertGoogleConfigured() {
   const missing = [];
   if (!GMAIL_CLIENT_ID) missing.push("GMAIL_CLIENT_ID");

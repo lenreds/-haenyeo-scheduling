@@ -15,7 +15,13 @@ import {
   replaceStaffRoles,
   fetchGmailStatus,
   triggerGmailPoll,
+  fetchInfoUpdates,
+  approveInfoUpdate,
+  denyInfoUpdate,
+  triggerSchedulePublish,
+  triggerTipSheetSend,
 } from "./lib/data.js";
+import QRCode from "qrcode";
 
 // "" / undefined -> null so numeric columns don't choke; otherwise Number().
 function numOrNull(v) {
@@ -36,7 +42,23 @@ const TYPE_STYLES = {
   "REQUEST OFF": { badge: "#7B93A3", label: "Request Off" },
   "SHIFT SWAP": { badge: "#8FA396", label: "Shift Swap" },
   "COVERAGE REQUEST": { badge: "#D98C86", label: "Coverage Request" },
+  "TIME OFF": { badge: "#6E86A8", label: "Time Off" },
 };
+
+// A TIME OFF dates string is "consecutive" if it uses a range ("Jul 28 to Aug 4"),
+// otherwise a "non-consecutive" list. Returns { consecutive, dates:[ISO...] }.
+function timeOffDates(datesStr, ref = new Date()) {
+  const parsed = parseRailDates(datesStr, ref);
+  const consecutive = /\b(?:to|through)\b/i.test(String(datesStr || "")) && parsed.length >= 2;
+  if (consecutive) {
+    const start = new Date(parsed[0] + "T00:00:00");
+    const end = new Date(parsed[parsed.length - 1] + "T00:00:00");
+    const out = [];
+    for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) out.push(iso(new Date(d)));
+    return { consecutive: true, dates: out };
+  }
+  return { consecutive: false, dates: parsed };
+}
 
 const initialPending = [
   { id: 1, type: "REQUEST OFF", name: "Bernie", dates: "07/16", notice: "9 days notice", urgent: false, note: "Bar covered by Isabella & Angel that day.", rotate: -1.4 },
@@ -238,6 +260,27 @@ const SECTION_ROLES = {
   Management: ["Management"],
 };
 const SECTIONS = ["FOH", "BOH", "Kitchen", "Management"];
+
+// QR codes for the Staff tab. VITE_STAFF_REGISTER_CODE is baked in at build time
+// (not secret — it's the code word posted in the restaurant). Missing at build
+// time shows a visible placeholder so it's obvious the env var wasn't set.
+const SCHEDULE_INBOX = "haenyeo.schedule@gmail.com";
+const REGISTER_CODE = import.meta.env.VITE_STAFF_REGISTER_CODE || "CODEWORD-NOT-SET";
+function mailtoLink(subject, body) {
+  const p = new URLSearchParams();
+  p.set("subject", subject);
+  if (body) p.set("body", body);
+  return `mailto:${SCHEDULE_INBOX}?${p.toString()}`;
+}
+const QR_CODES = [
+  { key: "register", label: "Register", subject: `[REGISTER] – Your Name Here – ${REGISTER_CODE}`, body: "My best phone number is: " },
+  { key: "reqoff", label: "Request Off", subject: "[SCHEDULING] – REQUEST OFF – Your Name – Date" },
+  { key: "timeoff-c", label: "Time Off (consecutive)", subject: "[SCHEDULING] – TIME OFF – Your Name – Start Date to End Date" },
+  { key: "timeoff-n", label: "Time Off (non-consecutive)", subject: "[SCHEDULING] – TIME OFF – Your Name – Date, Date, Date" },
+  { key: "swap", label: "Shift Swap", subject: "[SCHEDULING] – SHIFT SWAP – Your Name – Date", body: "I'd like to swap with: " },
+  { key: "coverage", label: "Coverage Request", subject: "[SCHEDULING] – COVERAGE REQUEST – Your Name – Date" },
+  { key: "update", label: "Update My Info", subject: `[UPDATE INFO] – Your Name – ${REGISTER_CODE}`, body: "My new email is: \nMy new phone is: " },
+];
 
 // which role a stored shift code belongs to (null for OFF/GAP)
 function roleFromCode(code) {
@@ -565,6 +608,17 @@ export default function SchedulingHub({ session, onSignOut }) {
   const [gmailChecking, setGmailChecking] = useState(false);
   const [railNotes, setRailNotes] = useState({}); // rail request id -> manager note draft
   const [railBusy, setRailBusy] = useState(null); // id being resolved (disables its buttons)
+  const [partialOpen, setPartialOpen] = useState({}); // TIME OFF id -> partial-approve field open
+  const [partialDates, setPartialDates] = useState({}); // TIME OFF id -> approved-dates text
+  const [infoUpdates, setInfoUpdates] = useState([]); // pending staff_info_updates
+  const [staffProfile, setStaffProfile] = useState(null); // open staff id in directory
+  const [qrModal, setQrModal] = useState(null); // open QR key
+  const [qrDataUrl, setQrDataUrl] = useState(""); // generated QR image
+  const [publishModal, setPublishModal] = useState(null); // { weekIdx } | null
+  const [publishBusy, setPublishBusy] = useState(false);
+  const [tipFinalized, setTipFinalized] = useState(false);
+  const [tipFinalizedAt, setTipFinalizedAt] = useState(null);
+  const [finalizing, setFinalizing] = useState(false);
   const [publishedWeeks, setPublishedWeeks] = useState(new Set());
   const [tipDateIso, setTipDateIso] = useState("2026-07-02");
   const [floorCash, setFloorCash] = useState("");
@@ -727,13 +781,9 @@ export default function SchedulingHub({ session, onSignOut }) {
     setTipSent(false);
   }
 
-  function sendTipSheet() {
-    setTipSent(true);
-    setLog((l) => [
-      { id: `l-${Date.now()}`, text: `Tip sheet sent — ${tipDateInfo.dateObj.toLocaleDateString(undefined, MONTH_FMT)} — ${tipSubject}`, time: timeNow(), tone: "good" },
-      ...l,
-    ]);
-    upsertTipSheet({
+  // Shared tip_sheets row payload; `extra` overrides/adds columns (sent, finalized…).
+  function tipPayload(extra = {}) {
+    return {
       date: tipDateIso,
       floor_cash: numOrNull(floorCash),
       floor_credit: numOrNull(floorCredit),
@@ -747,8 +797,77 @@ export default function SchedulingHub({ session, onSignOut }) {
       closing_sum: numOrNull(closingSum),
       slot_overrides: customMode ? slotOverrides : {},
       time_entries: tipTimes,
-      sent: true,
-    }).catch((e) => console.error("Save tip sheet failed:", e));
+      ...extra,
+    };
+  }
+
+  function sendTipSheet() {
+    setTipSent(true);
+    addLog(`Tip sheet sent — ${tipDateInfo.dateObj.toLocaleDateString(undefined, MONTH_FMT)} — ${tipSubject}`, "good");
+    upsertTipSheet(tipPayload({ sent: true })).catch((e) => console.error("Save tip sheet failed:", e));
+  }
+
+  // Recipients for the finalized tip email: each unique worker who is registered
+  // with an email, plus their personalized payout.
+  function tipRecipients() {
+    const seen = new Set();
+    const out = [];
+    finalSlots.forEach((p) => {
+      if (!p.name || seen.has(p.name)) return;
+      seen.add(p.name);
+      const staff = staffList.find((st) => st.name === p.name);
+      if (staff && staff.registered && staff.personal_email) {
+        out.push({ name: p.name, email: staff.personal_email, payout: money(p.final || 0) });
+      }
+    });
+    return out;
+  }
+  function tipWorkerCount() {
+    return new Set(finalSlots.filter((p) => p.name).map((p) => p.name)).size;
+  }
+
+  async function finalizeTipSheet() {
+    if (finalizing || tipFinalized) return;
+    const recipients = tipRecipients();
+    const skipped = tipWorkerCount() - recipients.length;
+    if (!window.confirm(
+      `Finalize tonight's tip sheet? This will email all staff who worked tonight and lock the sheet. ` +
+      `Sending to ${recipients.length} staff — ${skipped} have no email on file and will be skipped.`
+    )) return;
+
+    setFinalizing(true);
+    const now = new Date().toISOString();
+    setTipFinalized(true);
+    setTipFinalizedAt(now);
+    try { await upsertTipSheet(tipPayload({ finalized: true, finalized_at: now, sent: true })); }
+    catch (e) { console.error("Finalize save failed:", e); }
+
+    const rows = finalSlots.filter((p) => p.name).map((p) => ({
+      name: p.name, position: p.label, points: (p.pts || 0).toFixed(2), hours: (p.hours || 0).toFixed(2), final: money(p.final || 0),
+    }));
+    const floorCheckText = floorCheckMatches
+      ? `Floor check: $${money(floorCheckTotal)} — matches floor cash + CC.`
+      : `Floor check: $${money(floorCheckTotal)} — off by $${money(Math.abs(floorCheckTotal - floorPool))}.`;
+    const res = await triggerTipSheetSend({
+      dayDateLabel: tipDateInfo.dateObj.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" }),
+      floorPool: money(floorPool),
+      rows,
+      barTipOut: money(barTipOutTotal),
+      barRecipients: barTipOutRecipients,
+      floorCheckText,
+      recipients,
+    }, session?.access_token);
+    if (res?.error) addLog(`Tip email failed (${res.error}) — sheet still finalized`, "warn");
+    else addLog(`Tip sheet finalized — emailed ${res?.sent ?? 0} staff`, "good");
+    setFinalizing(false);
+  }
+
+  async function unlockTipSheet() {
+    if (!window.confirm("Unlock this tip sheet for edits? Previously sent emails are not recalled.")) return;
+    setTipFinalized(false);
+    setTipFinalizedAt(null);
+    try { await upsertTipSheet(tipPayload({ finalized: false, finalized_at: null })); }
+    catch (e) { console.error("Unlock save failed:", e); }
   }
 
   const weeks = useMemo(() => buildMonth(), []);
@@ -842,6 +961,54 @@ export default function SchedulingHub({ session, onSignOut }) {
     return () => { cancelled = true; };
   }, []);
 
+  // Pending staff info-update requests (Staff tab review section).
+  function reloadInfoUpdates() {
+    return fetchInfoUpdates().then((u) => setInfoUpdates(u)).catch(() => setInfoUpdates([]));
+  }
+  useEffect(() => { reloadInfoUpdates(); }, []);
+
+  // Generate the QR image whenever a QR modal opens.
+  useEffect(() => {
+    if (!qrModal) { setQrDataUrl(""); return; }
+    const spec = QR_CODES.find((q) => q.key === qrModal);
+    if (!spec) return;
+    let cancelled = false;
+    QRCode.toDataURL(mailtoLink(spec.subject, spec.body), { width: 320, margin: 2 })
+      .then((url) => { if (!cancelled) setQrDataUrl(url); })
+      .catch((e) => { console.error("QR generation failed:", e); if (!cancelled) setQrDataUrl(""); });
+    return () => { cancelled = true; };
+  }, [qrModal]);
+
+  const staffNameById = useMemo(() => {
+    const m = {};
+    staffList.forEach((s) => { if (s.id) m[s.id] = s.name; });
+    return m;
+  }, [staffList]);
+
+  async function handleApproveInfo(u) {
+    try {
+      await approveInfoUpdate(u);
+      setStaffList((l) => l.map((s) => (s.id === u.staff_id
+        ? { ...s, personal_email: u.new_email || s.personal_email, phone: u.new_phone || s.phone }
+        : s)));
+      setInfoUpdates((list) => list.filter((x) => x.id !== u.id));
+    } catch (e) {
+      console.error("Approve info update failed:", e);
+      window.alert(`Couldn't approve: ${e.message}`);
+    }
+  }
+  async function handleDenyInfo(u) {
+    try {
+      await denyInfoUpdate(u.id);
+      setInfoUpdates((list) => list.filter((x) => x.id !== u.id));
+    } catch (e) {
+      console.error("Deny info update failed:", e);
+    }
+  }
+  function copyText(text) {
+    if (text && navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {});
+  }
+
   // Re-pull rail requests from the DB (used after a manual Gmail poll so new
   // auto-created pending entries show up without a full reload).
   function reloadRail() {
@@ -889,6 +1056,8 @@ export default function SchedulingHub({ session, onSignOut }) {
         setTipTimes(row?.time_entries || {});
         setCustomMode(row?.slot_overrides && Object.keys(row.slot_overrides).length > 0);
         setTipSent(!!row?.sent);
+        setTipFinalized(!!row?.finalized);
+        setTipFinalizedAt(row?.finalized_at || null);
       })
       .catch((e) => console.error("Tip sheet load failed:", e));
     return () => { cancelled = true; };
@@ -933,8 +1102,29 @@ export default function SchedulingHub({ session, onSignOut }) {
     return other ? { name: other.name, id: other.id || nameToId[other.name] } : null;
   }
 
+  // Write an OFF override for each ISO date (shared by REQUEST OFF and TIME OFF).
+  async function writeOffDates(item, staffId, isoDates) {
+    for (const isoStr of isoDates) {
+      if (!confirmOverwrite(item.name, isoStr)) continue;
+      await upsertScheduleOverride({ staffId, dateIso: isoStr, overrideType: "OFF", isSwap: false, railRequestId: item.id });
+      setOverrides((o) => ({ ...o, [`${item.name}|${isoStr}`]: { type: "OFF", swap: false } }));
+    }
+  }
+
   // Apply the schedule side effects of an APPROVED request (item 1 of the brief).
   async function applyApprovalSchedule(item) {
+    if (item.type === "TIME OFF") {
+      const staffId = item.staffId || nameToId[item.name];
+      if (!staffId) {
+        window.alert(`Approved, but the schedule wasn't updated — no staff member matches "${item.name}".`);
+        return;
+      }
+      const { dates } = timeOffDates(item.dates);
+      if (!dates.length) { console.warn("No parseable dates on TIME OFF:", item.dates); return; }
+      await writeOffDates(item, staffId, dates);
+      return;
+    }
+
     const dates = parseRailDates(item.dates);
     if (!dates.length) { console.warn("No parseable date on request:", item.dates); return; }
 
@@ -1001,6 +1191,41 @@ export default function SchedulingHub({ session, onSignOut }) {
     else if (reply?.error && reply.error !== "gmail_not_connected") addLog(`Email reply not sent (${reply.error})`, "warn");
 
     setRailNotes((n) => { const next = { ...n }; delete next[item.id]; return next; });
+    setRailBusy(null);
+  }
+
+  // Partial approval of a TIME OFF request: only the manager-specified dates get
+  // an Off override; a manager note is required. The reply lists approved dates.
+  async function resolvePartial(item) {
+    if (railBusy) return;
+    const managerNote = (railNotes[item.id] || "").trim();
+    const approvedText = (partialDates[item.id] || "").trim();
+    const isoDates = parseRailDates(approvedText);
+    if (!managerNote) { window.alert("A manager note is required for a partial approval."); return; }
+    if (!isoDates.length) { window.alert("Enter the approved dates (e.g. \"Jul 28, Jul 30\")."); return; }
+
+    setRailBusy(item.id);
+    setPending((p) => p.filter((r) => r.id !== item.id));
+    addLog(`Partially approved ${item.name} — Time Off (${approvedText})`, "good");
+
+    try { await updateRailStatus(item.id, "approved", managerNote); }
+    catch (e) { console.error("Update request failed:", e); }
+
+    const staffId = item.staffId || nameToId[item.name];
+    if (staffId) {
+      try { await writeOffDates(item, staffId, isoDates); }
+      catch (e) { console.error("Partial schedule update failed:", e); addLog(`Schedule update failed for ${item.name}`, "warn"); }
+    } else {
+      window.alert(`Partially approved, but no staff match for "${item.name}" — set the days manually.`);
+    }
+
+    const reply = await sendRailReply(item.id, true, managerNote, session?.access_token, { partial: true, approvedDatesText: approvedText });
+    if (reply?.sent) addLog(`Email reply sent to ${item.name}`, "good");
+    else if (reply?.error && reply.error !== "gmail_not_connected") addLog(`Email reply not sent (${reply.error})`, "warn");
+
+    setRailNotes((n) => { const x = { ...n }; delete x[item.id]; return x; });
+    setPartialDates((n) => { const x = { ...n }; delete x[item.id]; return x; });
+    setPartialOpen((n) => { const x = { ...n }; delete x[item.id]; return x; });
     setRailBusy(null);
   }
 
@@ -1188,18 +1413,45 @@ export default function SchedulingHub({ session, onSignOut }) {
     }
   }
 
-  function publishWeek() {
-    if (publishedWeeks.has(weekIndex)) return;
-    const names = new Set();
-    activeWeek.forEach((d) => fohRoster.forEach((p) => {
-      const shift = personShiftFor(p.name, d, patterns, overrides);
-      if (shift.type !== "OFF") names.add(p.name);
+  function shiftLabelForType(type) {
+    if (!type || type === "OFF") return "Off";
+    return SHIFT_META[type]?.label || type;
+  }
+  // Build the schedule-email payload for a week: 7 day headers + per-person shifts.
+  function buildSchedulePayload(week) {
+    const dayHeaders = week.map((d) => `${JS_WEEKDAY_NAMES[d.weekday]} ${d.date.getMonth() + 1}/${d.date.getDate()}`);
+    const rows = fohRoster.map((p) => ({
+      name: p.name,
+      shifts: week.map((d) => shiftLabelForType(personShiftFor(p.name, d, patterns, overrides).type)),
     }));
-    setPublishedWeeks((s) => new Set(s).add(weekIndex));
-    setLog((l) => [
-      { id: `l-${Date.now()}`, text: `Published week of ${activeWeek[0].date.toLocaleDateString(undefined, MONTH_FMT)} — would notify ${names.size} staff by email`, time: timeNow(), tone: "good" },
-      ...l,
-    ]);
+    const weekLabel = `${week[0].date.toLocaleDateString(undefined, MONTH_FMT)} – ${week[6].date.toLocaleDateString(undefined, MONTH_FMT)}`;
+    return { weekLabel, dayHeaders, rows };
+  }
+  // Registered active staff with an email (who the schedule actually reaches).
+  const publishRecipients = useMemo(
+    () => staffList.filter((s) => s.active !== false && s.registered && s.personal_email),
+    [staffList]
+  );
+  const activeStaffCount = useMemo(() => staffList.filter((s) => s.active !== false).length, [staffList]);
+
+  function publishWeek() {
+    setPublishModal({ weekIdx: weekIndex });
+  }
+  async function confirmPublish() {
+    if (publishBusy || !publishModal) return;
+    setPublishBusy(true);
+    const idx = publishModal.weekIdx;
+    const week = weeks[idx];
+    try {
+      const res = await triggerSchedulePublish(buildSchedulePayload(week), session?.access_token);
+      setPublishedWeeks((s) => new Set(s).add(idx));
+      if (res?.error) addLog(`Publish email failed (${res.error}) — schedule marked published`, "warn");
+      else addLog(`Published week of ${week[0].date.toLocaleDateString(undefined, MONTH_FMT)} — emailed ${res?.sent ?? 0} staff`, "good");
+    } catch (e) {
+      addLog(`Publish failed: ${e.message}`, "warn");
+    }
+    setPublishBusy(false);
+    setPublishModal(null);
   }
 
   const activeWeek = weeks[weekIndex];
@@ -1272,6 +1524,7 @@ export default function SchedulingHub({ session, onSignOut }) {
 
         .nr-btn { display: flex; align-items: center; gap: 6px; font-family: 'Plus Jakarta Sans', sans-serif; font-weight: 700; font-size: 12.5px; padding: 7px 15px; border-radius: 9px; border: none; cursor: pointer; }
         .nr-btn-approve { background: #2F3432; color: #F0F0EC; }
+        .nr-btn-partial { background: #E7EAF2; color: #33425C; border: 1px solid #b9c2d4; }
         .nr-btn-deny { background: #E8E9E4; color: #5c625f; }
         .nr-btn:hover:not(:disabled) { opacity: 0.88; }
         .nr-btn:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -1413,6 +1666,9 @@ export default function SchedulingHub({ session, onSignOut }) {
         .tip-position { font-size: 11px; color: #2B2A25; padding: 8px 8px 8px 2px; white-space: nowrap; border-top: 1px solid rgba(43,42,37,0.08); }
         .slot-empty { color: #c7bfa9; font-family: 'Space Mono', monospace; }
 
+        .tip-finalized-banner { display: flex; align-items: center; gap: 8px; background: #E6F0E6; border: 1px solid #7BA37E; color: #2f5232; font-family: 'Space Mono', monospace; font-weight: 700; font-size: 13px; letter-spacing: 1px; padding: 10px 14px; border-radius: 8px; margin-bottom: 16px; }
+        .tip-finalized-sub { font-family: 'Manrope', sans-serif; font-weight: 500; font-size: 11.5px; letter-spacing: 0; color: #5c705d; margin-left: 6px; }
+        .tip-locked input, .tip-locked .add-payout-btn, .tip-locked .remove-payout-btn, .tip-locked .custom-toggle { pointer-events: none; opacity: 0.6; background: #f1ece0; }
         .tip-page-split { display: flex; gap: 22px; align-items: stretch; }
         .tip-left-col { width: 300px; flex-shrink: 0; display: flex; flex-direction: column; }
         .tip-right-col { flex: 1; min-width: 0; }
@@ -1522,6 +1778,18 @@ export default function SchedulingHub({ session, onSignOut }) {
         .day-popup-status-approved { color: #4C6B4F; }
         .day-popup-week-btn { width: 100%; margin-top: 14px; }
 
+        /* publish preview modal */
+        .publish-modal { background: #F5F0E3; color: #2B2A25; border-radius: 12px; padding: 18px 20px; width: min(680px, 94vw); max-height: 84vh; overflow-y: auto; box-shadow: 0 18px 48px rgba(0,0,0,0.45); animation: zoomIn 0.18s ease; }
+        .publish-count { font-size: 13px; color: #2B2A25; margin: 4px 0 12px; }
+        .publish-skip { color: #9a7a1f; }
+        .publish-preview { overflow-x: auto; border: 1px solid rgba(43,42,37,0.12); border-radius: 8px; }
+        .publish-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+        .publish-table th { font-family: 'Space Mono', monospace; font-size: 9px; letter-spacing: 0.5px; text-transform: uppercase; color: #8c8574; padding: 6px 5px; text-align: center; white-space: nowrap; }
+        .publish-table td { padding: 5px 6px; text-align: center; border-top: 1px solid rgba(43,42,37,0.07); white-space: nowrap; }
+        .publish-table .publish-name { text-align: left; font-weight: 700; }
+        .publish-table .publish-off { color: #b0a892; }
+        .publish-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 14px; }
+
         /* ---- staff & roles screen ---- */
         .staff-msg { font-family: 'Space Mono', monospace; font-size: 11px; color: #4C6B4F; }
         .staff-add { background: #FBF8EF; border: 1px solid rgba(43,42,37,0.12); border-radius: 8px; padding: 12px 14px; margin-bottom: 6px; }
@@ -1536,6 +1804,39 @@ export default function SchedulingHub({ session, onSignOut }) {
         .staff-role-check input { accent-color: #4C6B4F; cursor: pointer; }
         .staff-active-check { margin-left: auto; }
         .staff-save-btn { padding: 6px 14px; }
+
+        /* QR row + modal */
+        .qr-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+        .qr-row-label { font-family: 'Space Mono', monospace; font-size: 10px; letter-spacing: 1px; text-transform: uppercase; color: #8c8574; }
+        .qr-btn { font-family: 'Manrope', sans-serif; font-weight: 700; font-size: 11.5px; padding: 6px 12px; border-radius: 20px; border: 1px solid rgba(43,42,37,0.18); background: #FBF8EF; color: #4a473d; cursor: pointer; }
+        .qr-btn:hover { background: #F1EAD9; }
+        .qr-modal { background: #F5F0E3; color: #2B2A25; border-radius: 12px; padding: 18px 20px; width: min(380px, 92vw); text-align: center; box-shadow: 0 18px 48px rgba(0,0,0,0.45); animation: zoomIn 0.18s ease; }
+        .qr-img { width: 260px; height: 260px; max-width: 100%; background: #fff; border-radius: 8px; padding: 8px; }
+        .qr-loading { height: 260px; display: flex; align-items: center; justify-content: center; color: #8c8574; }
+        .qr-caption { font-size: 12px; color: #5c625f; margin-top: 10px; }
+        .qr-subject { font-family: 'Space Mono', monospace; font-size: 10.5px; color: #8a5a20; background: #FBF0DE; border-radius: 6px; padding: 6px 9px; margin-top: 8px; word-break: break-word; }
+        .qr-warn { font-size: 11px; color: #B23A2F; margin-top: 8px; }
+
+        /* pending info updates */
+        .info-updates { background: #FBF0DE; border: 1px solid rgba(201,138,63,0.4); border-radius: 8px; padding: 12px 14px; margin-bottom: 14px; }
+        .info-updates-title { font-family: 'Space Mono', monospace; font-size: 10.5px; letter-spacing: 1px; text-transform: uppercase; color: #8a5a20; margin-bottom: 8px; }
+        .info-update-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 6px 0; border-top: 1px solid rgba(201,138,63,0.25); }
+        .info-update-row:first-of-type { border-top: none; }
+        .info-update-body { font-size: 13px; color: #4a473d; }
+        .info-update-field { color: #6b6355; }
+
+        /* registration dot + profile panel */
+        .staff-reg-dot { width: 11px; height: 11px; border-radius: 50%; border: none; cursor: pointer; padding: 0; flex-shrink: 0; }
+        .staff-reg-dot.reg-yes { background: #6E9B72; }
+        .staff-reg-dot.reg-no { background: #d8b24a; box-shadow: 0 0 0 3px rgba(216,178,74,0.2); }
+        .staff-profile { margin: 2px 0 8px 23px; padding: 10px 14px; background: #FBF8EF; border: 1px solid rgba(43,42,37,0.12); border-radius: 8px; max-width: 420px; }
+        .staff-profile-row { display: flex; align-items: center; gap: 12px; padding: 4px 0; font-size: 13px; }
+        .staff-profile-key { font-family: 'Space Mono', monospace; font-size: 10px; letter-spacing: 1px; text-transform: uppercase; color: #8c8574; width: 56px; flex-shrink: 0; }
+        .staff-profile-val { font-family: 'Manrope', sans-serif; font-size: 13px; color: #2B2A25; background: #fff; border: 1px solid rgba(43,42,37,0.15); border-radius: 5px; padding: 3px 8px; cursor: pointer; }
+        .staff-profile-val:hover { border-color: #8FA396; }
+        .staff-profile-empty { color: #b0a892; font-size: 12.5px; font-style: italic; }
+        .staff-profile-status.reg-yes { color: #4C6B4F; font-weight: 700; }
+        .staff-profile-status.reg-no { color: #9a7a1f; font-weight: 700; }
 
         .hero-stat { display: flex; gap: 14px; margin-bottom: 20px; }
         .hero-item { flex: 1; background: #FBF0DE; border: 1px solid rgba(201,138,63,0.35); border-radius: 8px; padding: 22px 18px; }
@@ -1625,7 +1926,10 @@ export default function SchedulingHub({ session, onSignOut }) {
                 <div className="nr-label"><Clock size={13} /> Pending Decisions <span className="nr-count">{pending.length}</span></div>
                 {pending.length === 0 && <div className="nr-empty">Nothing waiting on you right now.</div>}
                 {pending.map((item) => {
-                  const style = TYPE_STYLES[item.type];
+                  const style = TYPE_STYLES[item.type] || { badge: "#7B93A3", label: item.type };
+                  const isTimeOff = item.type === "TIME OFF";
+                  const to = isTimeOff ? timeOffDates(item.dates) : null;
+                  const busy = railBusy === item.id;
                   return (
                     <div className="nr-item" key={item.id}>
                       <div className="nr-item-top">
@@ -1639,7 +1943,11 @@ export default function SchedulingHub({ session, onSignOut }) {
                               </span>
                             )}
                           </div>
-                          <div className="nr-item-type">{style.label}{item.notice ? ` · ${item.notice}` : item.source === "gmail" ? " · via email" : ""}</div>
+                          <div className="nr-item-type">
+                            {style.label}
+                            {isTimeOff && ` · ${to.consecutive ? "Consecutive" : "Non-consecutive"}${to.dates.length ? ` · ${to.dates.length} day${to.dates.length > 1 ? "s" : ""}` : ""}`}
+                            {!isTimeOff && (item.notice ? ` · ${item.notice}` : item.source === "gmail" ? " · via email" : "")}
+                          </div>
                         </div>
                         {item.urgent && <span className="nr-urgent"><AlertTriangle size={11} /> Short notice</span>}
                         <div className="nr-item-dates">{item.dates}</div>
@@ -1649,14 +1957,36 @@ export default function SchedulingHub({ session, onSignOut }) {
                         <input
                           className="nr-manager-note"
                           type="text"
-                          placeholder="Optional note to staff (used in the email reply)…"
+                          placeholder={partialOpen[item.id] ? "Note to staff (required for partial approval)…" : "Optional note to staff (used in the email reply)…"}
                           value={railNotes[item.id] || ""}
                           onChange={(e) => setRailNotes((n) => ({ ...n, [item.id]: e.target.value }))}
-                          disabled={railBusy === item.id}
+                          disabled={busy}
                         />
+                        {isTimeOff && partialOpen[item.id] && (
+                          <input
+                            className="nr-manager-note"
+                            type="text"
+                            placeholder='Approved dates only (e.g. "Jul 28, Jul 30")'
+                            value={partialDates[item.id] || ""}
+                            onChange={(e) => setPartialDates((n) => ({ ...n, [item.id]: e.target.value }))}
+                            disabled={busy}
+                          />
+                        )}
                         <div className="nr-item-actions">
-                          <button className="nr-btn nr-btn-approve" disabled={railBusy === item.id} onClick={() => resolve(item, true)}><Check size={14} /> Approve</button>
-                          <button className="nr-btn nr-btn-deny" disabled={railBusy === item.id} onClick={() => resolve(item, false)}><X size={14} /> Deny</button>
+                          {isTimeOff && partialOpen[item.id] ? (
+                            <>
+                              <button className="nr-btn nr-btn-approve" disabled={busy} onClick={() => resolvePartial(item)}><Check size={14} /> Confirm partial</button>
+                              <button className="nr-btn nr-btn-deny" disabled={busy} onClick={() => setPartialOpen((n) => ({ ...n, [item.id]: false }))}>Cancel</button>
+                            </>
+                          ) : (
+                            <>
+                              <button className="nr-btn nr-btn-approve" disabled={busy} onClick={() => resolve(item, true)}><Check size={14} /> Approve</button>
+                              {isTimeOff && (
+                                <button className="nr-btn nr-btn-partial" disabled={busy} onClick={() => setPartialOpen((n) => ({ ...n, [item.id]: true }))}>Partial</button>
+                              )}
+                              <button className="nr-btn nr-btn-deny" disabled={busy} onClick={() => resolve(item, false)}><X size={14} /> Deny</button>
+                            </>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -1850,6 +2180,47 @@ export default function SchedulingHub({ session, onSignOut }) {
               </tbody>
             </table>
           </div>
+
+          {publishModal && (() => {
+            const week = weeks[publishModal.weekIdx];
+            const payload = buildSchedulePayload(week);
+            const skipped = activeStaffCount - publishRecipients.length;
+            return (
+              <div className="day-popup-backdrop" onClick={() => !publishBusy && setPublishModal(null)}>
+                <div className="publish-modal" onClick={(e) => e.stopPropagation()}>
+                  <div className="day-popup-head">
+                    <div className="day-popup-date">Publish schedule — {payload.weekLabel}</div>
+                    <button className="day-popup-close" disabled={publishBusy} onClick={() => setPublishModal(null)}><X size={15} /></button>
+                  </div>
+                  <div className="publish-count">
+                    Sending to <b>{publishRecipients.length}</b> of {activeStaffCount} staff
+                    {skipped > 0 && <span className="publish-skip"> ({skipped} not yet registered — will be skipped)</span>}
+                  </div>
+                  <div className="publish-preview">
+                    <table className="publish-table">
+                      <thead>
+                        <tr><th></th>{payload.dayHeaders.map((h) => <th key={h}>{h}</th>)}</tr>
+                      </thead>
+                      <tbody>
+                        {payload.rows.map((r) => (
+                          <tr key={r.name}>
+                            <td className="publish-name">{r.name}</td>
+                            {r.shifts.map((sh, i) => <td key={i} className={sh === "Off" ? "publish-off" : ""}>{sh}</td>)}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="publish-actions">
+                    <button className="nr-btn nr-btn-deny" disabled={publishBusy} onClick={() => setPublishModal(null)}>Cancel</button>
+                    <button className="publish-btn" disabled={publishBusy} onClick={confirmPublish}>
+                      {publishBusy ? "Sending…" : "Confirm & Send"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
         </div>
       )}
 
@@ -2051,7 +2422,13 @@ export default function SchedulingHub({ session, onSignOut }) {
       {tab === "tips" && (
         <div className="cal-wrap" key="tips">
           <div className="cal-card">
-            <div className="tip-page-split">
+            {tipFinalized && (
+              <div className="tip-finalized-banner">
+                <Lock size={14} /> FINALIZED{tipFinalizedAt ? ` — ${new Date(tipFinalizedAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}` : ""}
+                <span className="tip-finalized-sub">Inputs are locked. Unlock to edit and re-finalize.</span>
+              </div>
+            )}
+            <div className={`tip-page-split ${tipFinalized ? "tip-locked" : ""}`}>
               <div className="tip-left-col">
                 <div className="tip-logo-space">
                   <img src={HAENYEO_LOGO} alt="Haenyeo" className="tip-logo-img" />
@@ -2261,14 +2638,23 @@ export default function SchedulingHub({ session, onSignOut }) {
                   Distributed: ${money(totalDistributed)} of ${money(floorPool + barPool)} total pool (floor + bar). Host only earns their point if covers exceed 80 for the day. Expo and Host are paid flat — their hours aren't part of any pooled rate. Type times like "4:00 PM" or "9:30" — if you leave off AM/PM, it assumes PM. Clock times round to the nearest 15 minutes (≤7 min rounds down, ≥8 rounds up).
                 </div>
 
-                <div style={{ marginTop: 16, display: "flex", alignItems: "center", gap: 12 }}>
+                <div style={{ marginTop: 16, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
                   <span className="subject-preview">{tipSubject}</span>
                   {tipSent ? (
                     <span className="published-badge"><Check size={12} /> Sent</span>
                   ) : (
                     <button className="publish-btn" onClick={sendTipSheet}>Send Tip Sheet</button>
                   )}
-                  <button className="print-btn" style={{ marginLeft: "auto" }} onClick={() => window.print()}><Printer size={13} /> Print</button>
+                  <div style={{ marginLeft: "auto", display: "flex", gap: 10 }}>
+                    {tipFinalized ? (
+                      <button className="print-btn" style={{ background: "#B23A2F" }} onClick={unlockTipSheet}><Unlock size={13} /> Unlock</button>
+                    ) : (
+                      <button className="print-btn" style={{ background: "#4C6B4F" }} disabled={finalizing} onClick={finalizeTipSheet}>
+                        <Lock size={13} /> {finalizing ? "Finalizing…" : "Finalize"}
+                      </button>
+                    )}
+                    <button className="print-btn" onClick={() => window.print()}><Printer size={13} /> Print</button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -2279,10 +2665,37 @@ export default function SchedulingHub({ session, onSignOut }) {
       {tab === "staff" && (
         <div className="cal-wrap" key="staff">
           <div className="cal-card">
-            <div className="week-header" style={{ marginBottom: 18 }}>
+            <div className="week-header" style={{ marginBottom: 14 }}>
               <div className="week-range"><Users size={14} style={{ verticalAlign: "-2px", marginRight: 6 }} />Staff &amp; Roles</div>
               {staffMsg && <span className="staff-msg">{staffMsg}</span>}
             </div>
+
+            <div className="qr-row">
+              <span className="qr-row-label">QR codes:</span>
+              {QR_CODES.map((q) => (
+                <button key={q.key} className="qr-btn" onClick={() => setQrModal(q.key)}>{q.label}</button>
+              ))}
+            </div>
+
+            {infoUpdates.length > 0 && (
+              <div className="info-updates">
+                <div className="info-updates-title">Pending info updates ({infoUpdates.length})</div>
+                {infoUpdates.map((u) => (
+                  <div className="info-update-row" key={u.id}>
+                    <div className="info-update-body">
+                      <b>{staffNameById[u.staff_id] || "Unknown"}</b> has requested an info update
+                      {u.new_email && <span className="info-update-field"> · email → {u.new_email}</span>}
+                      {u.new_phone && <span className="info-update-field"> · phone → {u.new_phone}</span>}
+                    </div>
+                    <div className="nr-item-actions">
+                      <button className="nr-btn nr-btn-approve" onClick={() => handleApproveInfo(u)}><Check size={13} /> Approve</button>
+                      <button className="nr-btn nr-btn-deny" onClick={() => handleDenyInfo(u)}><X size={13} /> Deny</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
             {!rolesTableReady && (
               <div className="template-note" style={{ marginTop: -6, marginBottom: 14 }}>
                 ⚠ The role tables aren't in the database yet — run supabase/migrations/0002_roles_and_shift_options.sql
@@ -2349,8 +2762,15 @@ export default function SchedulingHub({ session, onSignOut }) {
                       d.active !== (s.active !== false) ||
                       JSON.stringify(d.roles) !== JSON.stringify(staffRolesMap[s.name] || [s.role]) ||
                       d.primary !== (staffRolesMap[s.name] || [s.role])[0];
+                    const open = staffProfile === s.id;
                     return (
-                      <div className={`staff-row ${d.active ? "" : "staff-row-inactive"}`} key={s.id || s.name}>
+                      <React.Fragment key={s.id || s.name}>
+                      <div className={`staff-row ${d.active ? "" : "staff-row-inactive"}`}>
+                        <button
+                          className={`staff-reg-dot ${s.registered ? "reg-yes" : "reg-no"}`}
+                          title={s.registered ? "Registered — view contact info" : "Not yet registered — view contact info"}
+                          onClick={() => setStaffProfile(open ? null : s.id)}
+                        />
                         <input
                           className="staff-name-input"
                           type="text"
@@ -2389,6 +2809,29 @@ export default function SchedulingHub({ session, onSignOut }) {
                           <button className="publish-btn staff-save-btn" onClick={() => handleSaveStaff(s)}>Save</button>
                         )}
                       </div>
+                      {open && (
+                        <div className="staff-profile">
+                          <div className="staff-profile-row">
+                            <span className="staff-profile-key">Email</span>
+                            {s.personal_email
+                              ? <button className="staff-profile-val" title="Tap to copy" onClick={() => copyText(s.personal_email)}>{s.personal_email}</button>
+                              : <span className="staff-profile-empty">— none on file —</span>}
+                          </div>
+                          <div className="staff-profile-row">
+                            <span className="staff-profile-key">Phone</span>
+                            {s.phone
+                              ? <button className="staff-profile-val" title="Tap to copy" onClick={() => copyText(s.phone)}>{s.phone}</button>
+                              : <span className="staff-profile-empty">— none on file —</span>}
+                          </div>
+                          <div className="staff-profile-row">
+                            <span className="staff-profile-key">Status</span>
+                            <span className={`staff-profile-status ${s.registered ? "reg-yes" : "reg-no"}`}>
+                              {s.registered ? "Registered" : "Not yet registered"}
+                            </span>
+                          </div>
+                        </div>
+                      )}
+                      </React.Fragment>
                     );
                   })}
                 </React.Fragment>
@@ -2399,6 +2842,28 @@ export default function SchedulingHub({ session, onSignOut }) {
               from the Front of House schedule; BOH/Kitchen/Management rows stay put so the grid stays aligned.
             </div>
           </div>
+
+          {qrModal && (() => {
+            const spec = QR_CODES.find((q) => q.key === qrModal);
+            return (
+              <div className="day-popup-backdrop" onClick={() => setQrModal(null)}>
+                <div className="qr-modal" onClick={(e) => e.stopPropagation()}>
+                  <div className="day-popup-head">
+                    <div className="day-popup-date">{spec?.label}</div>
+                    <button className="day-popup-close" onClick={() => setQrModal(null)}><X size={15} /></button>
+                  </div>
+                  {qrDataUrl
+                    ? <img className="qr-img" src={qrDataUrl} alt={`QR code for ${spec?.label}`} />
+                    : <div className="qr-loading">Generating…</div>}
+                  <div className="qr-caption">Scan to open a pre-filled email to {SCHEDULE_INBOX}.</div>
+                  <div className="qr-subject">{spec?.subject}</div>
+                  {REGISTER_CODE === "CODEWORD-NOT-SET" && (spec?.key === "register" || spec?.key === "update") && (
+                    <div className="qr-warn">⚠ VITE_STAFF_REGISTER_CODE isn't set — this QR has a placeholder code. Set it in Vercel and redeploy.</div>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
         </div>
       )}
     </div>

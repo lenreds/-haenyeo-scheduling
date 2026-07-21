@@ -17,12 +17,18 @@ function canonSection(section) {
 }
 
 export async function fetchStaff() {
-  // section was added in migration 0002 — fall back to the old shape if the
-  // column doesn't exist yet so the app keeps working pre-migration.
+  // Columns arrived across migrations (section=0002; personal_email/phone/
+  // registered=0005) — degrade the select gracefully if any are missing.
   let { data, error } = await supabase
     .from("staff")
-    .select("id, name, role, active, section")
+    .select("id, name, role, active, section, personal_email, phone, registered")
     .order("created_at", { ascending: true });
+  if (error) {
+    ({ data, error } = await supabase
+      .from("staff")
+      .select("id, name, role, active, section")
+      .order("created_at", { ascending: true }));
+  }
   if (error) {
     ({ data, error } = await supabase
       .from("staff")
@@ -30,7 +36,73 @@ export async function fetchStaff() {
       .order("created_at", { ascending: true }));
     if (error) throw error;
   }
-  return (data || []).map((s) => ({ ...s, section: canonSection(s.section) }));
+  return (data || []).map((s) => ({
+    ...s,
+    section: canonSection(s.section),
+    registered: !!s.registered,
+    personal_email: s.personal_email ?? null,
+    phone: s.phone ?? null,
+  }));
+}
+
+/* -------------------------------------------------- staff_info_updates ----- */
+
+export async function fetchInfoUpdates() {
+  const { data, error } = await supabase
+    .from("staff_info_updates")
+    .select("id, staff_id, new_email, new_phone, status, created_at")
+    .eq("status", "pending")
+    .order("created_at", { ascending: true });
+  if (error) return []; // table may not exist pre-0005
+  return data || [];
+}
+
+// Approve: write the new contact info onto staff, mark the update approved.
+export async function approveInfoUpdate(update) {
+  const patch = {};
+  if (update.new_email) patch.personal_email = update.new_email;
+  if (update.new_phone) patch.phone = update.new_phone;
+  if (Object.keys(patch).length) {
+    const { error } = await supabase.from("staff").update(patch).eq("id", update.staff_id);
+    if (error) throw error;
+  }
+  const { error } = await supabase.from("staff_info_updates").update({ status: "approved" }).eq("id", update.id);
+  if (error) throw error;
+}
+
+export async function denyInfoUpdate(id) {
+  const { error } = await supabase.from("staff_info_updates").update({ status: "denied" }).eq("id", id);
+  if (error) throw error;
+}
+
+/* ------------------------------------------------ schedule / tip sends ----- */
+
+export async function triggerSchedulePublish(payload, accessToken) {
+  try {
+    const res = await fetch("/api/send-schedule", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}) },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) return { sent: 0, error: `HTTP ${res.status}` };
+    return await res.json();
+  } catch (e) {
+    return { sent: 0, error: e.message };
+  }
+}
+
+export async function triggerTipSheetSend(payload, accessToken) {
+  try {
+    const res = await fetch("/api/send-tipsheet", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}) },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) return { sent: 0, error: `HTTP ${res.status}` };
+    return await res.json();
+  } catch (e) {
+    return { sent: 0, error: e.message };
+  }
 }
 
 export async function insertStaff({ name, role, section }) {
@@ -239,12 +311,19 @@ export async function upsertScheduleOverride({ staffId, dateIso, overrideType, i
 }
 
 // Fire the server-side auto-reply (best-effort; never throws to the caller).
-export async function sendRailReply(railRequestId, approved, managerNote, accessToken) {
+// opts: { partial, approvedDatesText } for a partially-approved TIME OFF.
+export async function sendRailReply(railRequestId, approved, managerNote, accessToken, opts = {}) {
   try {
     const res = await fetch("/api/reply", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}) },
-      body: JSON.stringify({ railRequestId, approved, managerNote: managerNote || "" }),
+      body: JSON.stringify({
+        railRequestId,
+        approved,
+        managerNote: managerNote || "",
+        partial: !!opts.partial,
+        approvedDatesText: opts.approvedDatesText || "",
+      }),
     });
     if (!res.ok) return { sent: false, error: `HTTP ${res.status}` };
     return await res.json();
