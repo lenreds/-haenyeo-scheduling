@@ -57,12 +57,19 @@ The Rail tab's status bar will flip to **Gmail connected**.
 
 ## Scope note (important)
 
-The brief listed `gmail.readonly`, but marking processed emails as read (brief
-item 2) requires **`gmail.modify`** — read-only can't change labels. The code
-requests `gmail.modify`. If your Google consent screen was configured with only
-`gmail.readonly`, add `gmail.modify` to the OAuth scopes, or emails will be
-parsed but never marked read (they still won't be double-processed — every
-message id is de-duplicated in the database as a backstop).
+The app requests two scopes: **`gmail.modify`** (read mailbox + mark processed
+emails read — `gmail.readonly` can't change labels) and **`gmail.send`** (send
+the staff auto-reply on approve/deny).
+
+If you change scopes you must **re-consent** for the new grant to take effect:
+1. In Google Cloud Console → **Data Access**, add
+   `https://www.googleapis.com/auth/gmail.modify` and
+   `https://www.googleapis.com/auth/gmail.send`.
+2. Re-run the OAuth flow: visit `/api/auth/start` and approve again (this
+   overwrites the stored refresh token with one carrying both scopes).
+
+Until `gmail.send` is granted, approvals/denials still work and update the
+schedule — only the auto-reply email is skipped (logged, non-fatal).
 
 ## Polling cadence & Vercel plan
 
@@ -98,4 +105,5 @@ and update `GMAIL_CLIENT_SECRET` in Vercel + `.env.local`.
 - `GET  /api/auth/start` — begin OAuth
 - `GET  /api/auth/callback` — OAuth redirect target (stores refresh token)
 - `POST /api/poll` — poll inbox (cron `Bearer CRON_SECRET`, or a manager JWT)
+- `POST /api/reply` — send the staff auto-reply on approve/deny (manager JWT)
 - `GET  /api/gmail/status` — connection status for the Rail indicator (no secrets)

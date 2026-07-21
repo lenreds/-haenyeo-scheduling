@@ -54,7 +54,7 @@ export async function fetchStaffMinimal() {
 
 // Insert a pending rail entry from an email. Relies on the partial unique index
 // on gmail_message_id to reject duplicates (returns { duplicate: true }).
-export async function insertGmailRail({ staffId, unmatchedName, type, dates, note, messageId }) {
+export async function insertGmailRail({ staffId, unmatchedName, type, dates, note, messageId, threadId }) {
   const row = {
     staff_id: staffId || null,
     type,
@@ -65,6 +65,7 @@ export async function insertGmailRail({ staffId, unmatchedName, type, dates, not
     source: "gmail",
     unmatched_name: unmatchedName || null,
     gmail_message_id: messageId,
+    gmail_thread_id: threadId || null,
   };
   const { error } = await admin().from("rail_requests").insert(row);
   if (error) {
@@ -82,4 +83,28 @@ export async function gmailMessageExists(messageId) {
     .maybeSingle();
   if (error) throw error;
   return !!data;
+}
+
+// Full request row + the resolved staff name (falls back to unmatched_name),
+// for composing the reply.
+export async function getRailRequestById(id) {
+  const { data, error } = await admin()
+    .from("rail_requests")
+    .select("id, staff_id, type, dates, unmatched_name, gmail_message_id, gmail_thread_id, staff:staff_id(name)")
+    .eq("id", id)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) return null;
+  return { ...data, name: data.staff?.name || data.unmatched_name || "there" };
+}
+
+// True if the bearer token is a valid Supabase user (an authenticated manager).
+export async function isManager(token) {
+  if (!token) return false;
+  try {
+    const { data, error } = await admin().auth.getUser(token);
+    return !error && !!data?.user;
+  } catch {
+    return false;
+  }
 }

@@ -83,6 +83,20 @@ export async function getMessage(accessToken, id) {
   return data;
 }
 
+// Send a message. `raw` is a base64url-encoded RFC 822 message; passing
+// `threadId` makes Gmail attach it to the existing thread (a reply). Requires
+// the gmail.send scope.
+export async function sendMessage(accessToken, { raw, threadId }) {
+  const res = await fetch(`${GMAIL_BASE}/messages/send`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify(threadId ? { raw, threadId } : { raw }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`Gmail send failed: ${data.error?.message || res.status}`);
+  return data;
+}
+
 // Best-effort: remove the UNREAD label so the message isn't polled again.
 // Requires gmail.modify; if the granted scope is readonly this throws and the
 // caller logs+continues (the gmail_message_id dedup still prevents re-inserts).

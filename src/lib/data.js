@@ -195,6 +195,7 @@ export async function fetchRailRequests(idToName) {
         id: row.id,
         type: row.type,
         name,
+        staffId: row.staff_id || null,
         dates: row.dates,
         notice: row.notice,
         note: row.note,
@@ -211,9 +212,45 @@ export async function fetchRailRequests(idToName) {
   return { pending, resolved };
 }
 
-export async function updateRailStatus(id, status) {
-  const { error } = await supabase.from("rail_requests").update({ status }).eq("id", id);
+export async function updateRailStatus(id, status, managerNote) {
+  const patch = { status };
+  if (managerNote !== undefined) patch.manager_note = managerNote || null;
+  let { error } = await supabase.from("rail_requests").update(patch).eq("id", id);
+  // manager_note column arrived in migration 0004 — retry status-only if absent
+  if (error && managerNote !== undefined) {
+    ({ error } = await supabase.from("rail_requests").update({ status }).eq("id", id));
+  }
   if (error) throw error;
+}
+
+/* --------------------------------------------- schedule_overrides (write) -- */
+// Upsert a one-off override for a specific date (keyed by staff_id + date).
+// overrideType: 'OFF' | 'GAP' | a shift code (swap) | null. rail_request_id
+// links it to the approving request (column added in migration 0004).
+export async function upsertScheduleOverride({ staffId, dateIso, overrideType, isSwap, railRequestId }) {
+  const row = { staff_id: staffId, date: dateIso, override_type: overrideType ?? null, is_swap: !!isSwap };
+  if (railRequestId) row.rail_request_id = railRequestId;
+  let { error } = await supabase.from("schedule_overrides").upsert(row, { onConflict: "staff_id,date" });
+  if (error && row.rail_request_id) {
+    delete row.rail_request_id; // pre-0004 fallback
+    ({ error } = await supabase.from("schedule_overrides").upsert(row, { onConflict: "staff_id,date" }));
+  }
+  if (error) throw error;
+}
+
+// Fire the server-side auto-reply (best-effort; never throws to the caller).
+export async function sendRailReply(railRequestId, approved, managerNote, accessToken) {
+  try {
+    const res = await fetch("/api/reply", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}) },
+      body: JSON.stringify({ railRequestId, approved, managerNote: managerNote || "" }),
+    });
+    if (!res.ok) return { sent: false, error: `HTTP ${res.status}` };
+    return await res.json();
+  } catch (e) {
+    return { sent: false, error: e.message };
+  }
 }
 
 /* ------------------------------------------------ gmail integration -------- */

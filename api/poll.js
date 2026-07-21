@@ -67,6 +67,7 @@ export default async function handler(req, res) {
           dates: parsed.date,
           note,
           messageId: id,
+          threadId: msg.threadId || null,
         });
         if (result.duplicate) { summary.duplicates++; }
         else { summary.created++; }

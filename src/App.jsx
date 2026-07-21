@@ -6,6 +6,8 @@ import {
   upsertPattern,
   upsertPlaceholder,
   updateRailStatus,
+  upsertScheduleOverride,
+  sendRailReply,
   fetchTipSheet,
   upsertTipSheet,
   insertStaff,
@@ -494,16 +496,45 @@ function daySummary(dateObj, patterns, overrides, roster) {
   return { scheduled, off, gap };
 }
 
-// pull every m/d token out of a Rail "dates" display string ("07/16", "07/12 & 07/13")
+const MONTH_INDEX = {
+  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+  jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+};
+
+// Parse a Rail "dates" display string into ISO dates. Handles both numeric
+// "MM/DD" / "MM/DD/YY" and month-name "Jul 28" forms (the latter is what Gmail
+// subjects use). Years are inferred: use the reference year, but roll forward if
+// the date would land more than ~2 months in the past (a future request typed
+// near year-end). Returns [] if nothing parses.
+function parseRailDates(datesStr, ref = new Date()) {
+  if (!datesStr) return [];
+  const s = String(datesStr);
+  const refY = ref.getFullYear();
+  const inferYear = (m, d, y) => {
+    if (y != null) return y < 100 ? 2000 + y : y;
+    const cand = new Date(refY, m - 1, d);
+    return (cand - ref) / 86400000 < -60 ? refY + 1 : refY;
+  };
+  const out = new Set();
+  const push = (m, d, y) => {
+    if (m < 1 || m > 12 || d < 1 || d > 31) return;
+    const yr = inferYear(m, d, y);
+    out.add(`${yr}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`);
+  };
+  let mm;
+  const numeric = /(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/g;
+  while ((mm = numeric.exec(s))) push(Number(mm[1]), Number(mm[2]), mm[3] ? Number(mm[3]) : null);
+  const named = /\b([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:,?\s*(\d{4}))?/g;
+  while ((mm = named.exec(s))) {
+    const mi = MONTH_INDEX[mm[1].slice(0, 3).toLowerCase()];
+    if (mi) push(mi, Number(mm[2]), mm[3] ? Number(mm[3]) : null);
+  }
+  return [...out].sort();
+}
+
+// Does a Rail "dates" string touch a given ISO date? (used by the calendar popup)
 function railDatesMatch(datesStr, isoStr) {
-  if (!datesStr) return false;
-  const month = Number(isoStr.slice(5, 7));
-  const day = Number(isoStr.slice(8, 10));
-  const tokens = String(datesStr).match(/(\d{1,2})\/(\d{1,2})/g) || [];
-  return tokens.some((t) => {
-    const [tm, td] = t.split("/").map(Number);
-    return tm === month && td === day;
-  });
+  return parseRailDates(datesStr).includes(isoStr);
 }
 
 /* ------------------------------------ APP ------------------------------------- */
@@ -532,6 +563,8 @@ export default function SchedulingHub({ session, onSignOut }) {
   const [staffMsg, setStaffMsg] = useState("");
   const [gmailStatus, setGmailStatus] = useState(null); // { configured, connected, lastPollAt, lastError, ... }
   const [gmailChecking, setGmailChecking] = useState(false);
+  const [railNotes, setRailNotes] = useState({}); // rail request id -> manager note draft
+  const [railBusy, setRailBusy] = useState(null); // id being resolved (disables its buttons)
   const [publishedWeeks, setPublishedWeeks] = useState(new Set());
   const [tipDateIso, setTipDateIso] = useState("2026-07-02");
   const [floorCash, setFloorCash] = useState("");
@@ -881,13 +914,94 @@ export default function SchedulingHub({ session, onSignOut }) {
     .map((d) => { const name = holidayFor(d.iso); return name ? { date: d.iso, name } : null; })
     .filter(Boolean);
 
-  function resolve(item, approved) {
+  function addLog(text, tone) {
+    setLog((l) => [{ id: `l-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, text, time: timeNow(), tone }, ...l]);
+  }
+
+  // Warn before clobbering an existing override on the same person+date.
+  function confirmOverwrite(name, isoStr) {
+    if (!overrides[`${name}|${isoStr}`]) return true;
+    return window.confirm(`${name} already has a schedule override on ${isoStr}. Overwrite it with this request?`);
+  }
+
+  // Find the swap partner named in a SHIFT SWAP request's note.
+  function findSwapPartner(item) {
+    const note = item.note || "";
+    const other = staffList.find(
+      (s) => s.name && s.name !== item.name && new RegExp(`\\b${s.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(note)
+    );
+    return other ? { name: other.name, id: other.id || nameToId[other.name] } : null;
+  }
+
+  // Apply the schedule side effects of an APPROVED request (item 1 of the brief).
+  async function applyApprovalSchedule(item) {
+    const dates = parseRailDates(item.dates);
+    if (!dates.length) { console.warn("No parseable date on request:", item.dates); return; }
+
+    if (item.type === "REQUEST OFF" || item.type === "COVERAGE REQUEST") {
+      const staffId = item.staffId || nameToId[item.name];
+      if (!staffId) {
+        window.alert(`Approved, but the schedule wasn't updated — no staff member matches "${item.name}". Add them on the Staff tab, then set the day manually.`);
+        return;
+      }
+      const overrideType = item.type === "REQUEST OFF" ? "OFF" : "GAP";
+      for (const isoStr of dates) {
+        if (!confirmOverwrite(item.name, isoStr)) continue;
+        await upsertScheduleOverride({ staffId, dateIso: isoStr, overrideType, isSwap: false, railRequestId: item.id });
+        setOverrides((o) => ({ ...o, [`${item.name}|${isoStr}`]: { type: overrideType, swap: false } }));
+      }
+    } else if (item.type === "SHIFT SWAP") {
+      const partner = findSwapPartner(item);
+      const isoStr = dates[0];
+      const aId = item.staffId || nameToId[item.name];
+      const bId = partner?.id;
+      if (!partner || !aId || !bId) {
+        window.alert(`Approved, but couldn't identify both people to swap from the request note. Adjust ${item.name}'s schedule manually if needed.`);
+        return;
+      }
+      if (!confirmOverwrite(item.name, isoStr) || !confirmOverwrite(partner.name, isoStr)) return;
+      const di = dateInfoFromIso(isoStr);
+      const aShift = personShiftFor(item.name, di, patterns, overrides).type;
+      const bShift = personShiftFor(partner.name, di, patterns, overrides).type;
+      await upsertScheduleOverride({ staffId: aId, dateIso: isoStr, overrideType: bShift, isSwap: true, railRequestId: item.id });
+      await upsertScheduleOverride({ staffId: bId, dateIso: isoStr, overrideType: aShift, isSwap: true, railRequestId: item.id });
+      setOverrides((o) => ({
+        ...o,
+        [`${item.name}|${isoStr}`]: { type: bShift, swap: true },
+        [`${partner.name}|${isoStr}`]: { type: aShift, swap: true },
+      }));
+    }
+  }
+
+  async function resolve(item, approved) {
+    if (railBusy) return;
+    const managerNote = (railNotes[item.id] || "").trim();
+    setRailBusy(item.id);
     setPending((p) => p.filter((r) => r.id !== item.id));
-    setLog((l) => [
-      { id: `l-${Date.now()}`, text: `${approved ? "Approved" : "Denied"} ${item.name} — ${TYPE_STYLES[item.type].label}, ${item.dates}`, time: timeNow(), tone: approved ? "good" : "warn" },
-      ...l,
-    ]);
-    updateRailStatus(item.id, approved ? "approved" : "denied").catch((e) => console.error("Update request failed:", e));
+    addLog(`${approved ? "Approved" : "Denied"} ${item.name} — ${TYPE_STYLES[item.type].label}, ${item.dates}`, approved ? "good" : "warn");
+
+    try {
+      await updateRailStatus(item.id, approved ? "approved" : "denied", managerNote);
+    } catch (e) {
+      console.error("Update request failed:", e);
+    }
+
+    if (approved) {
+      try {
+        await applyApprovalSchedule(item);
+      } catch (e) {
+        console.error("Schedule auto-update failed:", e);
+        addLog(`Schedule auto-update failed for ${item.name} — set the day manually`, "warn");
+      }
+    }
+
+    // Auto-reply to the original email thread (best-effort; skipped for manual entries).
+    const reply = await sendRailReply(item.id, approved, managerNote, session?.access_token);
+    if (reply?.sent) addLog(`Email reply sent to ${item.name}`, "good");
+    else if (reply?.error && reply.error !== "gmail_not_connected") addLog(`Email reply not sent (${reply.error})`, "warn");
+
+    setRailNotes((n) => { const next = { ...n }; delete next[item.id]; return next; });
+    setRailBusy(null);
   }
 
   function zoomToWeek(idx) {
@@ -1150,12 +1264,17 @@ export default function SchedulingHub({ session, onSignOut }) {
         .gmail-check-btn { margin-left: auto; font-family: 'Plus Jakarta Sans', sans-serif; font-weight: 700; font-size: 11.5px; padding: 5px 12px; border-radius: 8px; border: 1px solid rgba(47,52,50,0.15); background: #F0F0EC; color: #2F3432; cursor: pointer; }
         .gmail-check-btn:hover:not(:disabled) { background: #E4E5DF; }
         .gmail-check-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-        .nr-item-actions { display: flex; gap: 10px; padding-left: 40px; }
+        .nr-item-reply { padding-left: 40px; }
+        .nr-manager-note { width: 100%; box-sizing: border-box; font-family: 'Plus Jakarta Sans', sans-serif; font-size: 12.5px; padding: 8px 11px; border: 1px solid rgba(47,52,50,0.14); border-radius: 9px; background: #FBFBF9; color: #2F3432; margin-bottom: 10px; }
+        .nr-manager-note::placeholder { color: #a7aba2; }
+        .nr-manager-note:focus { outline: none; border-color: #8FA396; background: #fff; }
+        .nr-item-actions { display: flex; gap: 10px; }
 
         .nr-btn { display: flex; align-items: center; gap: 6px; font-family: 'Plus Jakarta Sans', sans-serif; font-weight: 700; font-size: 12.5px; padding: 7px 15px; border-radius: 9px; border: none; cursor: pointer; }
         .nr-btn-approve { background: #2F3432; color: #F0F0EC; }
         .nr-btn-deny { background: #E8E9E4; color: #5c625f; }
-        .nr-btn:hover { opacity: 0.88; }
+        .nr-btn:hover:not(:disabled) { opacity: 0.88; }
+        .nr-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
         .nr-empty { text-align: center; padding: 40px 20px; color: #9a9e95; font-size: 13.5px; background: #F0F0EC; border-radius: 16px; border: 1px dashed rgba(47,52,50,0.15); }
 
@@ -1526,9 +1645,19 @@ export default function SchedulingHub({ session, onSignOut }) {
                         <div className="nr-item-dates">{item.dates}</div>
                       </div>
                       <div className="nr-item-note">{item.note}</div>
-                      <div className="nr-item-actions">
-                        <button className="nr-btn nr-btn-approve" onClick={() => resolve(item, true)}><Check size={14} /> Approve</button>
-                        <button className="nr-btn nr-btn-deny" onClick={() => resolve(item, false)}><X size={14} /> Deny</button>
+                      <div className="nr-item-reply">
+                        <input
+                          className="nr-manager-note"
+                          type="text"
+                          placeholder="Optional note to staff (used in the email reply)…"
+                          value={railNotes[item.id] || ""}
+                          onChange={(e) => setRailNotes((n) => ({ ...n, [item.id]: e.target.value }))}
+                          disabled={railBusy === item.id}
+                        />
+                        <div className="nr-item-actions">
+                          <button className="nr-btn nr-btn-approve" disabled={railBusy === item.id} onClick={() => resolve(item, true)}><Check size={14} /> Approve</button>
+                          <button className="nr-btn nr-btn-deny" disabled={railBusy === item.id} onClick={() => resolve(item, false)}><X size={14} /> Deny</button>
+                        </div>
                       </div>
                     </div>
                   );

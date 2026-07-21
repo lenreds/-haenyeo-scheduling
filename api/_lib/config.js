@@ -15,10 +15,12 @@ export const GMAIL_REFRESH_TOKEN = process.env.GMAIL_REFRESH_TOKEN || "";
 export const OAUTH_REDIRECT_URI =
   process.env.OAUTH_REDIRECT_URI || "https://haenyeo-scheduling.vercel.app/api/auth/callback";
 
-// gmail.modify is required because the brief wants processed emails marked read
-// (gmail.readonly cannot change labels). It still only grants mailbox read +
-// label changes, not send. Marking-read is best-effort; dedup is the real guard.
-export const GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.modify";
+// gmail.modify: read mailbox + mark processed emails read (readonly can't change
+// labels). gmail.send: reply to staff on approve/deny (auto-reply feature).
+// Space-separated = multiple scopes on one consent. Re-run /api/auth/start after
+// adding gmail.send so the stored refresh token carries the new grant.
+export const GMAIL_SCOPE =
+  "https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/gmail.send";
 
 // Supabase — server side uses the SERVICE ROLE key so the poller can insert
 // rail_requests and read integration_tokens regardless of RLS. This key must
