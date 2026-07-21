@@ -66,11 +66,17 @@ message id is de-duplicated in the database as a backstop).
 
 ## Polling cadence & Vercel plan
 
-`vercel.json` schedules `/api/poll` every 10 minutes. **Sub-daily cron requires a
-Vercel Pro plan** — on the Hobby plan Vercel will only run it once a day. Either
-way, the Rail tab has a **"Check now"** button (visible to a signed-in manager)
-that polls on demand, and you can point an external scheduler (e.g. cron-job.org)
-at `POST /api/poll` with header `Authorization: Bearer <CRON_SECRET>`.
+`vercel.json` schedules `/api/poll` **once daily** (`0 9 * * *`, 09:00 UTC). This
+is deliberately Hobby-plan-safe: **the Hobby plan rejects any cron more frequent
+than daily and fails the whole deployment if you try** (this is what caused the
+first Gmail deploy to fail and 404 — Vercel rolled back to the previous build).
+
+- On a **Pro** plan you can raise the frequency, e.g. `*/10 * * * *` for every 10
+  minutes, and redeploy.
+- On **any** plan: the Rail tab's **"Check now"** button (signed-in manager) polls
+  on demand, and you can point an external scheduler (e.g. cron-job.org) at
+  `POST https://haenyeo-scheduling.vercel.app/api/poll` with header
+  `Authorization: Bearer <CRON_SECRET>` for more frequent automated polling.
 
 ## Email convention (share with staff)
 
