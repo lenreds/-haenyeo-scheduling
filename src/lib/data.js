@@ -120,6 +120,13 @@ export async function updateStaff(id, fields) {
   if (error) throw error;
 }
 
+// Permanent delete. Every table referencing staff(id) is ON DELETE CASCADE, so
+// this also removes the person's roles, patterns, overrides, and rail requests.
+export async function deleteStaff(id) {
+  const { error } = await supabase.from("staff").delete().eq("id", id);
+  if (error) throw error;
+}
+
 /* ------------------------------------------------------- staff_roles -------- */
 // -> [{ staff_id, role, is_primary, sort_order }] — null if the table doesn't
 // exist yet (pre-migration), so callers can fall back to built-in defaults.

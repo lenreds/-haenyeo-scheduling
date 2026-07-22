@@ -13,6 +13,7 @@ import {
   insertStaff,
   updateStaff,
   replaceStaffRoles,
+  deleteStaff,
   fetchGmailStatus,
   triggerGmailPoll,
   fetchInfoUpdates,
@@ -275,13 +276,13 @@ function mailtoLink(subject, body) {
   return `mailto:${SCHEDULE_INBOX}?${p.toString()}`;
 }
 const QR_CODES = [
-  { key: "register", label: "Register", subject: `[REGISTER] – Your Name Here – ${REGISTER_CODE}`, body: "My best phone number is: " },
-  { key: "reqoff", label: "Request Off", subject: "[SCHEDULING] – REQUEST OFF – Your Name – Date" },
-  { key: "timeoff-c", label: "Time Off (consecutive)", subject: "[SCHEDULING] – TIME OFF – Your Name – Start Date to End Date" },
-  { key: "timeoff-n", label: "Time Off (non-consecutive)", subject: "[SCHEDULING] – TIME OFF – Your Name – Date, Date, Date" },
-  { key: "swap", label: "Shift Swap", subject: "[SCHEDULING] – SHIFT SWAP – Your Name – Date", body: "I'd like to swap with: " },
-  { key: "coverage", label: "Coverage Request", subject: "[SCHEDULING] – COVERAGE REQUEST – Your Name – Date" },
-  { key: "update", label: "Update My Info", subject: `[UPDATE INFO] – Your Name – ${REGISTER_CODE}`, body: "My new email is: \nMy new phone is: " },
+  { key: "register", label: "Register", printLabel: "Register", instruction: 'Replace "Your Name Here" with your full name, add your phone number, and send', subject: `[REGISTER] – Your Name Here – ${REGISTER_CODE}`, body: "My best phone number is: " },
+  { key: "reqoff", label: "Request Off", printLabel: "Request Off", instruction: 'Replace "Your Name" with your name, add the date, and send', subject: "[SCHEDULING] – REQUEST OFF – Your Name – Date" },
+  { key: "timeoff-c", label: "Time Off (consecutive)", printLabel: "Time Off — Date Range", instruction: 'Replace "Your Name" with your name, add your start and end dates, and send', subject: "[SCHEDULING] – TIME OFF – Your Name – Start Date to End Date" },
+  { key: "timeoff-n", label: "Time Off (non-consecutive)", printLabel: "Time Off — Specific Dates", instruction: 'Replace "Your Name" with your name, list each date separated by commas, and send', subject: "[SCHEDULING] – TIME OFF – Your Name – Date, Date, Date" },
+  { key: "swap", label: "Shift Swap", printLabel: "Shift Swap", instruction: 'Replace "Your Name" with your name, add the date, and mention who you\'re swapping with in the body', subject: "[SCHEDULING] – SHIFT SWAP – Your Name – Date", body: "I'd like to swap with: " },
+  { key: "coverage", label: "Coverage Request", printLabel: "Coverage Request", instruction: 'Replace "Your Name" with your name, add the date, and send', subject: "[SCHEDULING] – COVERAGE REQUEST – Your Name – Date" },
+  { key: "update", label: "Update My Info", printLabel: "Update Contact Info", instruction: 'Replace "Your Name" with your name and fill in your new email and/or phone number', subject: `[UPDATE INFO] – Your Name – ${REGISTER_CODE}`, body: "My new email is: \nMy new phone is: " },
 ];
 
 // which role a stored shift code belongs to (null for OFF/GAP)
@@ -622,6 +623,10 @@ export default function SchedulingHub({ session, onSignOut }) {
   const [staffProfile, setStaffProfile] = useState(null); // open staff id in directory
   const [qrModal, setQrModal] = useState(null); // open QR key
   const [qrDataUrl, setQrDataUrl] = useState(""); // generated QR image
+  const [deleteTarget, setDeleteTarget] = useState(null); // staff pending delete confirm
+  const [deleting, setDeleting] = useState(false);
+  const [qrPrintUrls, setQrPrintUrls] = useState({}); // all 7 QR images for the print sheet
+  const [qrPrinting, setQrPrinting] = useState(false);
   const [publishModal, setPublishModal] = useState(null); // { weekIdx } | null
   const [publishBusy, setPublishBusy] = useState(false);
   const [tipFinalized, setTipFinalized] = useState(false);
@@ -1019,6 +1024,65 @@ export default function SchedulingHub({ session, onSignOut }) {
   function copyText(text) {
     if (text && navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {});
   }
+
+  // Permanent staff delete (DB cascades to roles/patterns/overrides/rail). Local
+  // state is cleaned so the grids update without a reload; group rosters and
+  // their schedule grids are spliced at the same index to stay aligned.
+  async function handleConfirmDelete() {
+    const s = deleteTarget;
+    if (!s || deleting) return;
+    setDeleting(true);
+    const idxByGroup = {};
+    Object.keys(groupRosters).forEach((gk) => {
+      const i = (groupRosters[gk] || []).indexOf(s.name);
+      if (i >= 0) idxByGroup[gk] = i;
+    });
+    try {
+      if (s.id) await deleteStaff(s.id);
+      setStaffList((l) => l.filter((x) => (s.id ? x.id !== s.id : x.name !== s.name)));
+      setStaffRolesMap((m) => { const n = { ...m }; delete n[s.name]; return n; });
+      setPatterns((p) => { const n = { ...p }; delete n[s.name]; return n; });
+      setNameToId((m) => { const n = { ...m }; delete n[s.name]; return n; });
+      setStaffDrafts((d) => { const n = { ...d }; delete n[s.id || s.name]; return n; });
+      setGroupRosters((prev) => {
+        const next = {};
+        Object.entries(prev).forEach(([gk, names]) => { next[gk] = names.filter((nm) => nm !== s.name); });
+        return next;
+      });
+      setPlaceholderPatterns((prev) => {
+        const next = { ...prev };
+        Object.entries(idxByGroup).forEach(([gk, i]) => { if (next[gk]) next[gk] = next[gk].filter((_, j) => j !== i); });
+        return next;
+      });
+      if (staffProfile === s.id) setStaffProfile(null);
+      setStaffMsg(`Deleted ${s.name}.`);
+    } catch (e) {
+      console.error("Delete staff failed:", e);
+      setStaffMsg(`Couldn't delete ${s.name}: ${e.message || e}`);
+    }
+    setDeleting(false);
+    setDeleteTarget(null);
+  }
+
+  // Generate all 7 QR images, then print (only the print sheet shows — see the
+  // body.printing-qr @media print rules).
+  function handlePrintQR() {
+    if (qrPrinting) return;
+    setQrPrinting(true);
+    Promise.all(
+      QR_CODES.map((q) => QRCode.toDataURL(mailtoLink(q.subject, q.body), { width: 300, margin: 1 }).then((url) => [q.key, url]))
+    )
+      .then((pairs) => setQrPrintUrls(Object.fromEntries(pairs)))
+      .catch((e) => { console.error("QR print generation failed:", e); setQrPrinting(false); });
+  }
+  useEffect(() => {
+    if (qrPrinting && Object.keys(qrPrintUrls).length === QR_CODES.length) {
+      document.body.classList.add("printing-qr");
+      window.print();
+      document.body.classList.remove("printing-qr");
+      setQrPrinting(false);
+    }
+  }, [qrPrinting, qrPrintUrls]);
 
   // Re-pull rail requests from the DB (used after a manual Gmail poll so new
   // auto-created pending entries show up without a full reload).
@@ -1816,7 +1880,20 @@ export default function SchedulingHub({ session, onSignOut }) {
           .hub { background: #fff !important; padding: 0 !important; }
           .tabs, .print-btn, .custom-toggle, .publish-btn, .published-badge, .back-btn, .subject-preview { display: none !important; }
           .cal-card { box-shadow: none !important; }
+          /* printing the QR sheet: show ONLY the sheet, hide the rest of the app */
+          body.printing-qr .hub > *:not(.qr-print-sheet) { display: none !important; }
+          body.printing-qr .qr-print-sheet { display: block !important; }
         }
+
+        /* QR print sheet layout (black & white friendly) */
+        .qr-print-header { text-align: center; margin-bottom: 18px; }
+        .qr-print-logo { max-width: 240px; max-height: 90px; object-fit: contain; }
+        .qr-print-subtitle { font-family: 'Manrope', sans-serif; font-size: 13px; color: #000; margin-top: 8px; }
+        .qr-print-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px 22px; }
+        .qr-print-cell { border: 1px solid #000; border-radius: 8px; padding: 10px 12px; text-align: center; break-inside: avoid; page-break-inside: avoid; }
+        .qr-print-label { font-family: 'Manrope', sans-serif; font-weight: 800; font-size: 14px; color: #000; margin-bottom: 4px; }
+        .qr-print-img { width: 150px; height: 150px; }
+        .qr-print-instruction { font-family: 'Manrope', sans-serif; font-size: 11px; color: #000; line-height: 1.35; margin-top: 4px; }
 
         .point-reference { width: fit-content; margin: 0; text-align: right; font-family: 'Space Mono', monospace; font-weight: 700; font-size: 9.5px; letter-spacing: 0.3px; color: #B23A2F; line-height: 1.4; flex-shrink: 0; }
 
@@ -1892,6 +1969,23 @@ export default function SchedulingHub({ session, onSignOut }) {
         .staff-role-check input { accent-color: #4C6B4F; cursor: pointer; }
         .staff-active-check { margin-left: auto; }
         .staff-save-btn { padding: 6px 14px; }
+        .staff-delete-btn { font-family: 'Manrope', sans-serif; font-weight: 700; font-size: 11.5px; padding: 6px 12px; border-radius: 6px; border: 1px solid #d9a59e; background: #FBEDEA; color: #B23A2F; cursor: pointer; }
+        .staff-delete-btn:hover { background: #f6ddd8; }
+
+        /* delete confirmation modal */
+        .delete-modal { background: #F5F0E3; color: #2B2A25; border-radius: 12px; padding: 20px 22px; width: min(400px, 92vw); box-shadow: 0 18px 48px rgba(0,0,0,0.45); animation: zoomIn 0.18s ease; }
+        .delete-modal-title { font-family: 'Space Mono', monospace; font-weight: 700; font-size: 15px; margin-bottom: 8px; }
+        .delete-modal-body { font-size: 13.5px; color: #4a473d; line-height: 1.5; }
+        .delete-modal-warn { font-size: 12.5px; color: #B23A2F; background: #FBEDEA; border: 1px solid #e6c3bc; border-radius: 7px; padding: 8px 11px; margin: 12px 0 4px; line-height: 1.45; }
+        .delete-modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
+        .delete-confirm-btn { font-family: 'Plus Jakarta Sans', sans-serif; font-weight: 700; font-size: 12.5px; padding: 8px 18px; border-radius: 9px; border: none; background: #B23A2F; color: #fff; cursor: pointer; }
+        .delete-confirm-btn:hover:not(:disabled) { background: #9c3128; }
+        .delete-confirm-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+        .qr-print-btn { background: #2B2A25; color: #F5F0E3; border-color: #2B2A25; display: inline-flex; align-items: center; gap: 5px; }
+        .qr-print-btn:hover { background: #3a3831; }
+
+        /* QR print sheet — hidden on screen, shown only when printing it */
+        .qr-print-sheet { display: none; }
 
         /* QR row + modal */
         .qr-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
@@ -2779,6 +2873,9 @@ export default function SchedulingHub({ session, onSignOut }) {
               {QR_CODES.map((q) => (
                 <button key={q.key} className="qr-btn" onClick={() => setQrModal(q.key)}>{q.label}</button>
               ))}
+              <button className="qr-btn qr-print-btn" disabled={qrPrinting} onClick={handlePrintQR}>
+                <Printer size={12} /> {qrPrinting ? "Preparing…" : "Print QR Codes"}
+              </button>
             </div>
 
             {infoUpdates.length > 0 && (
@@ -2912,6 +3009,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                         {dirty && (
                           <button className="publish-btn staff-save-btn" onClick={() => handleSaveStaff(s)}>Save</button>
                         )}
+                        <button className="staff-delete-btn" title={`Delete ${s.name}`} onClick={() => setDeleteTarget(s)}>Delete</button>
                       </div>
                       {open && (
                         <div className="staff-profile">
@@ -2968,8 +3066,46 @@ export default function SchedulingHub({ session, onSignOut }) {
               </div>
             );
           })()}
+
+          {deleteTarget && (
+            <div className="day-popup-backdrop" onClick={() => !deleting && setDeleteTarget(null)}>
+              <div className="delete-modal" onClick={(e) => e.stopPropagation()}>
+                <div className="delete-modal-title">Delete {deleteTarget.name}?</div>
+                <div className="delete-modal-body">
+                  Are you sure you want to delete <b>{deleteTarget.name}</b>? This cannot be undone.
+                </div>
+                <div className="delete-modal-warn">
+                  This person is currently on the schedule — deleting them will remove all their shifts.
+                </div>
+                <div className="delete-modal-actions">
+                  <button className="nr-btn nr-btn-deny" disabled={deleting} onClick={() => setDeleteTarget(null)}>Cancel</button>
+                  <button className="delete-confirm-btn" disabled={deleting} onClick={handleConfirmDelete}>
+                    {deleting ? "Deleting…" : "Delete"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
+
+      {/* Print-only sheet of all 7 QR codes (direct child of .hub — shown only
+          when body.printing-qr is set, see @media print rules). */}
+      <div className="qr-print-sheet" aria-hidden="true">
+        <div className="qr-print-header">
+          <img src={HAENYEO_LOGO} alt="Haenyeo" className="qr-print-logo" />
+          <div className="qr-print-subtitle">Scan the code that matches your request and follow the instructions</div>
+        </div>
+        <div className="qr-print-grid">
+          {QR_CODES.map((q) => (
+            <div className="qr-print-cell" key={q.key}>
+              <div className="qr-print-label">{q.printLabel}</div>
+              {qrPrintUrls[q.key] && <img className="qr-print-img" src={qrPrintUrls[q.key]} alt={`QR code: ${q.printLabel}`} />}
+              <div className="qr-print-instruction">{q.instruction}</div>
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
