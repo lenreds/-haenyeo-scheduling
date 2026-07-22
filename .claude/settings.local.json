@@ -45,7 +45,8 @@
       "Bash(curl -s -o /dev/null -w '%{redirect_url}' \"https://haenyeo-scheduling.vercel.app/api/auth/start\")",
       "Bash(npm install *)",
       "Bash(node -e \"console.log\\(require\\('qrcode/package.json'\\).version\\)\")",
-      "Bash(node \"C:/Users/Lenre/AppData/Local/Temp/claude/C--Users-Lenre-OneDrive-Desktop-HaenyeoMNG/c53558a1-3103-4dd4-8e6a-19be591b6dca/scratchpad/combined.test.mjs\")"
+      "Bash(node \"C:/Users/Lenre/AppData/Local/Temp/claude/C--Users-Lenre-OneDrive-Desktop-HaenyeoMNG/c53558a1-3103-4dd4-8e6a-19be591b6dca/scratchpad/combined.test.mjs\")",
+      "Bash(node \"C:/Users/Lenre/AppData/Local/Temp/claude/C--Users-Lenre-OneDrive-Desktop-HaenyeoMNG/c53558a1-3103-4dd4-8e6a-19be591b6dca/scratchpad/emails.test.mjs\")"
     ]
   }
 }

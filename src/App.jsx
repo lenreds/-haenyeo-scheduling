@@ -461,6 +461,12 @@ const SHIFT_META = {
 function iso(d) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
+// Single source of truth for "today" across the calendar, week nav, and tip sheet.
+const TODAY_ISO = iso(new Date());
+const TODAY_HEADER = new Date()
+  .toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" })
+  .replace(",", "")
+  .toUpperCase();
 function personShiftFor(name, dateObj, patterns, overrides) {
   const key = `${name}|${dateObj.iso}`;
   const ov = overrides[key];
@@ -506,7 +512,7 @@ function buildMonth() {
       day: d.getDate(),
       weekday: d.getDay(),
       inMonth: d.getMonth() === 6, // July = index 6
-      isToday: iso(d) === "2026-07-02",
+      isToday: iso(d) === TODAY_ISO,
     });
   }
   const weeks = [];
@@ -871,6 +877,9 @@ export default function SchedulingHub({ session, onSignOut }) {
   }
 
   const weeks = useMemo(() => buildMonth(), []);
+  // Index of the week that contains today (-1 if today falls outside the grid).
+  const currentWeekIndex = useMemo(() => weeks.findIndex((w) => w.some((d) => d.iso === TODAY_ISO)), [weeks]);
+  const onCurrentWeek = weekIndex === currentWeekIndex;
   const weekStrip = useMemo(() => getWeekStrip(), []);
   const [scheduleView, setScheduleView] = useState("foh");
   const [scheduleLocked, setScheduleLocked] = useState(false);
@@ -1074,10 +1083,76 @@ export default function SchedulingHub({ session, onSignOut }) {
     });
     upsertPlaceholder(groupKey, slotIdx, weekday, newType).catch((e) => console.error("Save placeholder failed:", e));
   }
+  // Cross-scheduling (item 2): a person can't be scheduled in two sections the
+  // same day. Returns the label of another section where `name` is already
+  // working that weekday, else null. Kitchen conflicts with BOH + Management(FM);
+  // BOH conflicts with Kitchen; Management conflicts with Kitchen.
+  function crossSectionBlock(name, thisGroup, weekday) {
+    const checks =
+      thisGroup === "kitchen" ? [["boh", "BOH"], ["management", "Management"]]
+      : thisGroup === "boh" ? [["kitchen", "Kitchen"]]
+      : thisGroup === "management" ? [["kitchen", "Kitchen"]]
+      : [];
+    for (const [grp, label] of checks) {
+      const idx = (groupRosters[grp] || []).indexOf(name);
+      if (idx < 0) continue;
+      if ((placeholderPatterns[grp]?.[idx]?.[weekday] || "OFF") !== "OFF") return label;
+    }
+    return null;
+  }
+
   function toggleManagementCell(slotIdx, weekday) {
     if (scheduleLocked) return;
+    const name = (groupRosters.management || [])[slotIdx];
     const current = placeholderPatterns.management?.[slotIdx]?.[weekday] || "OFF";
+    if (current === "OFF") {
+      const conflict = crossSectionBlock(name, "management", weekday);
+      if (conflict) { window.alert(`${name} is already scheduled in ${conflict} that day — can't also be FM.`); return; }
+    }
     setPlaceholderShift("management", slotIdx, weekday, current === "OFF" ? "FM" : "OFF");
+  }
+
+  // Render one BOH/Kitchen roster row (dropdown cells with cross-section blocking).
+  function renderGroupRow(groupKey, personName, idx) {
+    const row = placeholderPatterns[groupKey]?.[idx] || ALL_OFF_WEEK;
+    const isYesPerson = personName.startsWith("Jenny") || personName.startsWith("Ajuma");
+    const opts = roleOptions[GROUP_ROLE[groupKey]] || [{ code: "OFF", label: "Off" }];
+    return (
+      <tr key={groupKey + personName + idx}>
+        <td className="emp-name">{personName.startsWith("Jenny") ? `${personName} — Head Chef` : personName}</td>
+        {WEEKDAY_LABELS.map((w, wi) => {
+          const realWeekday = WEEKDAY_ORDER[wi];
+          const type = row[realWeekday] || "OFF";
+          const meta = SHIFT_META[type] || SHIFT_META.OFF;
+          const value = opts.some((o) => o.code === type) ? type : "OFF";
+          const blockLabel = value === "OFF" ? crossSectionBlock(personName, groupKey, realWeekday) : null;
+          if (blockLabel) {
+            return (
+              <td key={w} className="shift-cell">
+                <div className="cell-blocked" title={`Already scheduled in ${blockLabel}`}>—</div>
+              </td>
+            );
+          }
+          return (
+            <td key={w} className="shift-cell">
+              <select
+                className="cell-select shift-select"
+                value={value}
+                disabled={scheduleLocked}
+                style={value === "OFF" ? undefined : { color: meta.fg, borderColor: meta.border, background: meta.bg }}
+                onChange={(e) => setPlaceholderShift(groupKey, idx, realWeekday, e.target.value)}
+              >
+                {opts.map((o) => (
+                  <option key={o.code} value={o.code}>
+                    {groupKey === "kitchen" && o.code === "KITCHEN" && isYesPerson ? "Yes" : o.label}
+                  </option>
+                ))}
+              </select>
+            </td>
+          );
+        })}
+      </tr>
+    );
   }
   const holidaysThisWeek = weekStrip
     .map((d) => { const name = holidayFor(d.iso); return name ? { date: d.iso, name } : null; })
@@ -1623,6 +1698,9 @@ export default function SchedulingHub({ session, onSignOut }) {
         .cal-day.dim { opacity: 0.38; }
         .cal-day.today { border: 1.5px solid #C98A3E; }
         .cal-day-num { font-family: 'Space Mono', monospace; font-weight: 700; font-size: 13px; color: #2B2A25; }
+        /* filled accent circle behind today's number (calendar month view) */
+        .cal-day.today .cal-day-num { background: #C98A3E; color: #2B2A25; width: 22px; height: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; }
+        .today-pill { font-family: 'Manrope', sans-serif; font-weight: 700; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: #2B2A25; background: #C98A3E; border-radius: 12px; padding: 2px 9px; }
         .cal-day-meta { margin-top: 10px; font-size: 10.5px; color: #6b6355; line-height: 1.5; }
         .cal-gap-flag { position: absolute; top: 7px; right: 7px; color: #B23A2F; }
 
@@ -1634,6 +1712,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         .week-table { width: 100%; border-collapse: collapse; }
         .week-table th { font-family: 'Space Mono', monospace; font-size: 10px; letter-spacing: 1px; text-transform: uppercase; color: #8c8574; padding: 6px 4px; text-align: center; font-weight: 400; }
         .week-table th.today-col, .week-table td.today-col { background: rgba(201,138,63,0.08); }
+        .week-table th.today-col { color: #8a5a20; border-bottom: 2px solid #C98A3E; }
         .emp-name { font-size: 12.5px; font-weight: 700; color: #2B2A25; padding: 8px 8px 8px 2px; white-space: nowrap; border-top: 1px solid rgba(43,42,37,0.08); }
         .role-header { font-family: 'Space Mono', monospace; font-size: 10.5px; letter-spacing: 2px; text-transform: uppercase; color: #C98A3E; padding: 14px 2px 4px; border-bottom: 1px solid rgba(43,42,37,0.12); }
         .week-table td.shift-cell { border-top: 1px solid rgba(43,42,37,0.08); padding: 6px 4px; text-align: center; }
@@ -1725,6 +1804,11 @@ export default function SchedulingHub({ session, onSignOut }) {
         .print-week-range { display: flex; align-items: center; gap: 8px; font-family: 'Space Mono', monospace; font-weight: 700; font-size: 13px; color: #2B2A25; letter-spacing: 0.5px; }
         .print-week-range .back-btn { color: #8c8574; padding: 2px; }
         .print-week-range .back-btn:hover { color: #2B2A25; }
+        .today-btn { font-family: 'Manrope', sans-serif; font-weight: 700; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; padding: 4px 11px; border-radius: 14px; border: 1px solid #C98A3E; background: #C98A3E; color: #2B2A25; cursor: pointer; margin-right: 4px; }
+        .today-btn:hover:not(:disabled) { background: #d89a4e; }
+        .today-btn:disabled { background: transparent; color: #b8b0a0; border-color: rgba(43,42,37,0.18); cursor: default; }
+        .week-range-text { padding: 3px 8px; border-radius: 6px; }
+        .week-range-current { background: rgba(201,138,63,0.2); color: #8a5a20; }
 
         @media print {
           .hub { background: #fff !important; padding: 0 !important; }
@@ -1743,6 +1827,8 @@ export default function SchedulingHub({ session, onSignOut }) {
         .cell-select { font-family: 'Space Mono', monospace; font-size: 10px; font-weight: 700; padding: 4px 3px; border-radius: 4px; border: 1px solid #d6cfbb; background: #FBF8EF; color: #8c8574; cursor: pointer; max-width: 100%; width: auto; }
         .cell-select:disabled { opacity: 0.55; cursor: not-allowed; }
         .role-select { font-size: 9px; padding: 2px 2px; color: #6b6355; background: #F1EFE6; border-color: rgba(43,42,37,0.18); }
+        .cell-blocked { font-family: 'Space Mono', monospace; font-size: 11px; color: #b0a892; text-align: center; padding: 5px 2px; border-radius: 4px; background: repeating-linear-gradient(45deg, rgba(43,42,37,0.04), rgba(43,42,37,0.04) 4px, transparent 4px, transparent 8px); cursor: not-allowed; }
+        .section-divider { height: 10px; border-bottom: 2px solid rgba(201,138,63,0.35); padding: 0 !important; }
 
         /* ---- manager-on-shift banner (FOH) ---- */
         .fm-banner { display: flex; gap: 6px; align-items: stretch; margin: 2px 0 16px; flex-wrap: wrap; }
@@ -1857,7 +1943,7 @@ export default function SchedulingHub({ session, onSignOut }) {
           <div className="hub-title">HAENYEO <span>/ SCHEDULING</span></div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-          <div className="hub-date">TODAY — THU JUL 2, 2026</div>
+          <div className="hub-date">TODAY — {TODAY_HEADER}</div>
           {session?.user?.email && (
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
               <span className="hub-date" style={{ color: "#7d7666" }}>{session.user.email}</span>
@@ -2235,8 +2321,16 @@ export default function SchedulingHub({ session, onSignOut }) {
                 </button>
               </div>
               <div className="print-week-range">
+                <button
+                  className="today-btn"
+                  disabled={onCurrentWeek || currentWeekIndex < 0}
+                  title={currentWeekIndex < 0 ? "Today isn't in this schedule window" : "Jump to the current week"}
+                  onClick={() => currentWeekIndex >= 0 && setWeekIndex(currentWeekIndex)}
+                >
+                  Today
+                </button>
                 <button className="back-btn" onClick={() => setWeekIndex((i) => Math.max(0, i - 1))}><ChevronLeft size={13} /></button>
-                {formatWeekRange(activeWeek)}
+                <span className={`week-range-text ${onCurrentWeek ? "week-range-current" : ""}`}>{formatWeekRange(activeWeek)}</span>
                 <button className="back-btn" onClick={() => setWeekIndex((i) => Math.min(weeks.length - 1, i + 1))}><ChevronRight size={13} /></button>
               </div>
             </div>
@@ -2248,9 +2342,8 @@ export default function SchedulingHub({ session, onSignOut }) {
 
             <div className="subtabs">
               <button className={`subtab-btn ${scheduleView === "foh" ? "active" : ""}`} onClick={() => setScheduleView("foh")}>Front of House</button>
-              {Object.keys(PLACEHOLDER_GROUPS).map((key) => (
-                <button key={key} className={`subtab-btn ${scheduleView === key ? "active" : ""}`} onClick={() => setScheduleView(key)}>{PLACEHOLDER_LABELS[key]}</button>
-              ))}
+              <button className={`subtab-btn ${scheduleView === "bohkitchen" ? "active" : ""}`} onClick={() => setScheduleView("bohkitchen")}>BOH &amp; Kitchen</button>
+              <button className={`subtab-btn ${scheduleView === "management" ? "active" : ""}`} onClick={() => setScheduleView("management")}>Management</button>
             </div>
 
             {scheduleView === "foh" && (
@@ -2344,14 +2437,12 @@ export default function SchedulingHub({ session, onSignOut }) {
               </>
             )}
 
-            {scheduleView !== "foh" && (
+            {scheduleView === "bohkitchen" && (
               <>
                 <div className="cal-legend">
-                  <span className="legend-item">{PLACEHOLDER_LABELS[scheduleView]}</span>
+                  <span className="legend-item">Kitchen &amp; Back of House</span>
                   <span className="legend-item" style={{ marginLeft: "auto" }}>
-                    {scheduleView === "boh" && "Pick a shift from each cell's dropdown."}
-                    {scheduleView === "kitchen" && "Pick a shift from each cell's dropdown. (\"3p – Close\" shows as \"Yes\" for Jenny and Ajuma.)"}
-                    {scheduleView === "management" && "Click a cell to toggle: Off ↔ FM (Floor Manager)"}
+                    Pick a shift from each cell's dropdown. ("3p – Close" shows as "Yes" for Jenny &amp; Ajuma.) Freddy works both — scheduling one section blocks the other that day.
                   </span>
                 </div>
                 <table className={`week-table ${scheduleLocked ? "schedule-locked" : ""}`}>
@@ -2362,46 +2453,57 @@ export default function SchedulingHub({ session, onSignOut }) {
                     </tr>
                   </thead>
                   <tbody>
-                    {(groupRosters[scheduleView] || []).map((personName, idx) => {
-                      const row = placeholderPatterns[scheduleView]?.[idx] || ALL_OFF_WEEK;
-                      const isYesPerson = personName.startsWith("Jenny") || personName.startsWith("Ajuma");
+                    <tr><td className="role-header" colSpan={8}>Kitchen</td></tr>
+                    {(groupRosters.kitchen || []).map((name, idx) => renderGroupRow("kitchen", name, idx))}
+                    <tr><td className="section-divider" colSpan={8}></td></tr>
+                    <tr><td className="role-header" colSpan={8}>Back of House</td></tr>
+                    {(groupRosters.boh || []).map((name, idx) => renderGroupRow("boh", name, idx))}
+                  </tbody>
+                </table>
+                <div className="template-note">Shift wording is configurable data (role_shift_options). Freddy appears in both sections; a blocked cell (—) means he's already scheduled in the other section that day.</div>
+              </>
+            )}
+
+            {scheduleView === "management" && (
+              <>
+                <div className="cal-legend">
+                  <span className="legend-item">Management</span>
+                  <span className="legend-item" style={{ marginLeft: "auto" }}>Click a cell to toggle: Off ↔ FM (Floor Manager)</span>
+                </div>
+                <table className={`week-table ${scheduleLocked ? "schedule-locked" : ""}`}>
+                  <thead>
+                    <tr>
+                      <th></th>
+                      {WEEKDAY_LABELS.map((w) => <th key={w}>{w}</th>)}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(groupRosters.management || []).map((personName, idx) => {
+                      const row = placeholderPatterns.management?.[idx] || ALL_OFF_WEEK;
                       return (
                         <tr key={personName + idx}>
-                          <td className="emp-name">{personName.startsWith("Jenny") ? `${personName} — Head Chef` : personName}</td>
+                          <td className="emp-name">{personName}</td>
                           {WEEKDAY_LABELS.map((w, wi) => {
                             const realWeekday = WEEKDAY_ORDER[wi];
                             const type = row[realWeekday] || "OFF";
                             const meta = SHIFT_META[type] || SHIFT_META.OFF;
-                            if (scheduleView === "management") {
+                            const blockLabel = type === "OFF" ? crossSectionBlock(personName, "management", realWeekday) : null;
+                            if (blockLabel) {
                               return (
                                 <td key={w} className="shift-cell">
-                                  <button
-                                    className="shift-chip chip-btn"
-                                    style={{ color: meta.fg, borderColor: meta.border, background: meta.bg }}
-                                    onClick={() => toggleManagementCell(idx, realWeekday)}
-                                  >
-                                    {meta.label}
-                                  </button>
+                                  <div className="cell-blocked" title={`Already scheduled in ${blockLabel}`}>—</div>
                                 </td>
                               );
                             }
-                            const opts = roleOptions[GROUP_ROLE[scheduleView]] || [{ code: "OFF", label: "Off" }];
-                            const value = opts.some((o) => o.code === type) ? type : "OFF";
                             return (
                               <td key={w} className="shift-cell">
-                                <select
-                                  className="cell-select shift-select"
-                                  value={value}
-                                  disabled={scheduleLocked}
-                                  style={value === "OFF" ? undefined : { color: meta.fg, borderColor: meta.border, background: meta.bg }}
-                                  onChange={(e) => setPlaceholderShift(scheduleView, idx, realWeekday, e.target.value)}
+                                <button
+                                  className="shift-chip chip-btn"
+                                  style={{ color: meta.fg, borderColor: meta.border, background: meta.bg }}
+                                  onClick={() => toggleManagementCell(idx, realWeekday)}
                                 >
-                                  {opts.map((o) => (
-                                    <option key={o.code} value={o.code}>
-                                      {scheduleView === "kitchen" && o.code === "KITCHEN" && isYesPerson ? "Yes" : o.label}
-                                    </option>
-                                  ))}
-                                </select>
+                                  {meta.label}
+                                </button>
                               </td>
                             );
                           })}
@@ -2410,9 +2512,6 @@ export default function SchedulingHub({ session, onSignOut }) {
                     })}
                   </tbody>
                 </table>
-                {scheduleView !== "management" && (
-                  <div className="template-note">Shift wording for this schedule is configurable data (role_shift_options) — reword there, no code change needed.</div>
-                )}
               </>
             )}
           </div>
@@ -2503,7 +2602,10 @@ export default function SchedulingHub({ session, onSignOut }) {
               <div className="tip-right-col">
                 <div className="week-header" style={{ marginBottom: 12 }}>
                   <button className="back-btn" onClick={() => shiftTipDate(-1)}><ChevronLeft size={14} /> Prev day</button>
-                  <div className="week-range">{tipDateInfo.dateObj.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" })}</div>
+                  <div className="week-range" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    {tipDateInfo.dateObj.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" })}
+                    {tipDateIso === TODAY_ISO && <span className="today-pill">Today</span>}
+                  </div>
                   <button className="back-btn" onClick={() => shiftTipDate(1)}>Next day <ChevronRight size={14} /></button>
                 </div>
 

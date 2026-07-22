@@ -3,22 +3,26 @@
 
 // Default sentences when the manager leaves the note blank, keyed by
 // "TYPE|approved". The manager's note, if provided, replaces these.
-const DEFAULT_LINE = {
-  "REQUEST OFF|true": "Enjoy your day off!",
-  "REQUEST OFF|false": "Please reach out if you have any questions.",
-  "SHIFT SWAP|true": "The schedule has been updated accordingly.",
-  "SHIFT SWAP|false": "Please reach out if you have any questions.",
-  "COVERAGE REQUEST|true": "We'll find coverage for your shift.",
-  "COVERAGE REQUEST|false": "Please reach out if you have any questions.",
-  "TIME OFF|true": "Enjoy your time off!",
-  "TIME OFF|false": "Please reach out if you have any questions.",
+// Warm, human approve/deny copy (UI-IMPROVEMENTS-BRIEF item 1). Approved: an
+// optional manager note goes on its own line, no default. Denied: the note (or
+// a per-type default) trails the sentence on the same line.
+const APPROVED_LEAD = {
+  "REQUEST OFF": (d) => `we got your request and you're all set — ${d} is yours. Enjoy the time off!`,
+  "SHIFT SWAP": (d) => `the swap is confirmed for ${d} — the schedule's been updated. Thanks for coordinating!`,
+  "COVERAGE REQUEST": (d) => `got it — we'll get coverage sorted for ${d}. Thanks for the heads up!`,
+  "TIME OFF": (d) => `your time off for ${d} is approved — you're all set. Enjoy!`,
 };
-
-const PHRASE = {
-  "REQUEST OFF": "time off request",
-  "SHIFT SWAP": "shift swap request",
-  "COVERAGE REQUEST": "coverage request",
-  "TIME OFF": "time off request",
+const DENIED_LEAD = {
+  "REQUEST OFF": (d) => `unfortunately we can't approve the time off for ${d} this time around.`,
+  "SHIFT SWAP": (d) => `we weren't able to approve the swap for ${d}.`,
+  "COVERAGE REQUEST": (d) => `we can't approve the coverage request for ${d} right now.`,
+  "TIME OFF": (d) => `unfortunately we can't approve the time off for ${d} this time.`,
+};
+const DENIED_DEFAULT = {
+  "REQUEST OFF": "Reach out if you'd like to talk through it.",
+  "SHIFT SWAP": "Feel free to reach out if you have questions.",
+  "COVERAGE REQUEST": "Please reach out directly if this is urgent.",
+  "TIME OFF": "Feel free to reach out if you'd like to discuss.",
 };
 
 // Build the reply body text for a given request + decision. `partial` +
@@ -26,17 +30,18 @@ const PHRASE = {
 export function buildReplyBody({ type, approved, partial, name, date, approvedDates, note }) {
   const sig = "\n— Haenyeo Management";
   const cleanNote = note && note.trim();
+  const key = APPROVED_LEAD[type] ? type : "REQUEST OFF";
 
   if (type === "TIME OFF" && approved && partial) {
-    const tail = cleanNote || "";
-    return `Hi ${name}, your time off request has been partially approved. Approved dates: ${approvedDates}.${tail ? " " + tail : ""}${sig}`;
+    const lead = `we were able to approve part of your time off request. Approved dates: ${approvedDates}.`;
+    return `Hi ${name}, ${lead}${cleanNote ? " " + cleanNote : ""}${sig}`;
   }
-
-  const phrase = PHRASE[type] || "request";
-  const outcome = approved ? "has been approved" : "has been denied";
-  const lead = approved ? "" : "unfortunately ";
-  const tail = cleanNote || DEFAULT_LINE[`${type}|${approved}`] || "";
-  return `Hi ${name}, ${lead}your ${phrase} for ${date} ${outcome}. ${tail}${sig}`;
+  if (approved) {
+    // note on its own line, only when provided
+    return `Hi ${name}, ${APPROVED_LEAD[key](date)}${cleanNote ? "\n" + cleanNote : ""}${sig}`;
+  }
+  const tail = cleanNote || DENIED_DEFAULT[key];
+  return `Hi ${name}, ${DENIED_LEAD[key](date)}${tail ? " " + tail : ""}${sig}`;
 }
 
 // RFC 2047 encoded-word for a Subject that contains non-ASCII (e.g. en-dash).

@@ -7,31 +7,17 @@ const SIG = "— Haenyeo Management";
 export function buildWelcomeEmail(name) {
   const subject = "You're registered — here's how scheduling works at Haenyeo";
   const body =
-`Hi ${name},
+`Hi ${name}, you're all set on the Haenyeo scheduling system! From now on, your weekly schedule will come straight to this email.
 
-You're all set on the Haenyeo scheduling system. From now on, the weekly schedule will be sent directly to this email every week.
+To send any scheduling requests, email haenyeo.schedule@gmail.com using these subject line formats:
 
-For any scheduling requests, email haenyeo.schedule@gmail.com with the subject line in exactly this format:
+Single day off: [SCHEDULING] – REQUEST OFF – [Your Name] – [Date]
+Consecutive time off: [SCHEDULING] – TIME OFF – [Your Name] – Jul 28 to Aug 4
+Non-consecutive days: [SCHEDULING] – TIME OFF – [Your Name] – Jul 28, Jul 30, Aug 2
+Shift swap: [SCHEDULING] – SHIFT SWAP – [Your Name] – [Date] (mention who you're swapping with in the body)
+Coverage needed: [SCHEDULING] – COVERAGE REQUEST – [Your Name] – [Date]
 
-SINGLE DAY OFF:
-[SCHEDULING] – REQUEST OFF – [Your Name] – [Date]
-
-CONSECUTIVE TIME OFF (date range):
-[SCHEDULING] – TIME OFF – [Your Name] – Jul 28 to Aug 4
-
-NON-CONSECUTIVE DAYS OFF (specific dates):
-[SCHEDULING] – TIME OFF – [Your Name] – Jul 28, Jul 30, Aug 2
-
-SHIFT SWAP:
-[SCHEDULING] – SHIFT SWAP – [Your Name] – [Date]
-(In the body, mention who you're swapping with: "swapping with Reiko")
-
-COVERAGE NEEDED:
-[SCHEDULING] – COVERAGE REQUEST – [Your Name] – [Date]
-
-You'll receive a reply once your request has been reviewed by management.
-
-If your email or phone number ever changes, scan the "Update My Info" QR code posted in the restaurant and follow the same steps.
+You'll hear back once your request is reviewed. If your contact info ever changes, scan the "Update My Info" QR code posted at the restaurant.
 
 ${SIG}`;
   return { subject, body };
