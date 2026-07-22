@@ -145,12 +145,14 @@ function getWeekStrip() {
 const ROLES = ["Bar", "Host", "Servers", "Busser/Runner"];
 
 // other schedules on the Set Schedule tab, not staffed yet — placeholder slots only
-const PLACEHOLDER_GROUPS = { boh: 4, kitchen: 5, management: 2 };
+const PLACEHOLDER_GROUPS = { boh: 4, kitchen: 6, management: 2 };
 const PLACEHOLDER_LABELS = { boh: "Back of House", kitchen: "Kitchen", management: "Management" };
-// row order here mirrors staff_roles.sort_order — keep them in sync
+// row order here mirrors staff_roles.sort_order — keep them in sync.
+// Jon cross-works Kitchen (Management + Kitchen), so he appears in the Kitchen
+// roster too; cross-scheduling blocks him from both sections the same day.
 const PLACEHOLDER_NAMES = {
   boh: ["Hector", "Freddy", "Temo", "Oryan"],
-  kitchen: ["Jenny", "Ajuma", "Kelvin", "Jason", "Freddy"],
+  kitchen: ["Jenny", "Ajuma", "Kelvin", "Jason", "Freddy", "Jon"],
   management: ["Lenis", "Jon"],
 };
 
@@ -257,7 +259,7 @@ const SECTION_ROLES = {
   FOH: ["Bar", "Host", "Servers", "Busser/Runner", "Expo"],
   BOH: ["BOH", "Kitchen"],
   Kitchen: ["Kitchen", "BOH"],
-  Management: ["Management"],
+  Management: ["Management", "Kitchen"],
 };
 const SECTIONS = ["FOH", "BOH", "Kitchen", "Management"];
 
