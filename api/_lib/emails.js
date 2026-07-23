@@ -64,6 +64,10 @@ const GROUP_COLOR = {
   Bar: SHEET_COLORS.orange, Servers: SHEET_COLORS.green, "Busser/Runner": SHEET_COLORS.blue,
   Host: SHEET_COLORS.purple, Kitchen: SHEET_COLORS.orange, BOH: SHEET_COLORS.blue,
 };
+// Cell-level colors: a cell takes the color of the role actually worked that
+// day (rows carry a `roles` array resolved client-side from the shift code
+// prefix), not the section it appears in. Mirrors ROLE_COLOR in src/App.jsx.
+const ROLE_COLOR = { ...GROUP_COLOR, Expo: SHEET_COLORS.orange, Management: "#888888" };
 const escHtml = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -100,10 +104,12 @@ export function buildScheduleEmailHtml(payload) {
     .join("");
 
   const tint = (i) => (i === todayIdx ? `background:${C.tint};` : "");
-  const shiftCell = (label, i) => {
+  // Cell text is colored by the role worked that day (r.roles, when the client
+  // sent it) — off cells stay dimmed grey italic em-dashes.
+  const shiftCell = (label, role, i) => {
     const off = !label || label === "Off";
     return `<td style="padding:7px 2px;text-align:center;border-bottom:1px solid #efefef;${tint(i)}font-family:${sans};font-size:10px;${
-      off ? "font-style:italic;color:#b9b9b9;" : "color:#3a3a3a;font-weight:bold;"
+      off ? "font-style:italic;color:#cccccc;" : `color:${ROLE_COLOR[role] || "#3a3a3a"};font-weight:bold;`
     }">${off ? "—" : escHtml(label)}</td>`;
   };
   const groupBlock = (g) => {
@@ -113,7 +119,7 @@ export function buildScheduleEmailHtml(payload) {
       .map(
         (r) =>
           `<tr><td style="padding:7px 10px;border-bottom:1px solid #efefef;font-family:${sans};font-weight:bold;font-size:11px;color:#2b2b2b;">${escHtml(r.name)}</td>${(r.shifts || [])
-            .map(shiftCell)
+            .map((label, i) => shiftCell(label, r.roles ? r.roles[i] : null, i))
             .join("")}</tr>`
       )
       .join("");
@@ -128,7 +134,7 @@ export function buildScheduleEmailHtml(payload) {
           .map((names, i) =>
             names && names.length
               ? `<td style="padding:5px 2px;text-align:center;border-bottom:1px solid #efefef;${tint(i)}">${names.map(pill).join("<br>")}</td>`
-              : `<td style="padding:7px 2px;text-align:center;border-bottom:1px solid #efefef;${tint(i)}font-family:${sans};font-size:10px;font-style:italic;color:#b9b9b9;">—</td>`
+              : `<td style="padding:7px 2px;text-align:center;border-bottom:1px solid #efefef;${tint(i)}font-family:${sans};font-size:10px;font-style:italic;color:#cccccc;">—</td>`
           )
           .join("")}</tr>`
       : "";
@@ -173,7 +179,7 @@ export function buildScheduleEmailHtml(payload) {
           todayIdx >= 0
             ? `<span style="display:inline-block;width:9px;height:9px;background:${C.orange};border-radius:2px;">&nbsp;</span>&nbsp;Today&nbsp;&nbsp;&nbsp;`
             : ""
-        }<span style="font-style:italic;color:#b9b9b9;">—</span>&nbsp;Day off</td>
+        }<span style="font-style:italic;color:#cccccc;">—</span>&nbsp;Day off</td>
         <td style="font-family:${sans};font-size:9px;color:#7a7a7a;text-align:right;">${legendDots}</td>
       </tr></table>
     </td></tr>

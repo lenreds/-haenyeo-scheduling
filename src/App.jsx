@@ -145,6 +145,39 @@ const SHEET_GROUP_COLOR = {
   Bar: SHEET.orange, Servers: SHEET.green, "Busser/Runner": SHEET.blue,
   Host: SHEET.purple, Kitchen: SHEET.orange, BOH: SHEET.blue,
 };
+
+/* ---- Role-color cells (ROLE-COLOR-CELLS-BRIEF) ---- */
+// A shift cell is colored by the role actually worked that day (from the shift
+// code's prefix), not the section row it sits in — Akira covering Bar shows
+// orange inside the Busser/Runner group. One map drives the live grid, the PDF
+// sheet, and (mirrored in api/_lib/emails.js) the schedule email.
+const ROLE_COLOR = {
+  Bar: SHEET.orange, Servers: SHEET.green, "Busser/Runner": SHEET.blue,
+  Host: SHEET.purple, Expo: SHEET.orange, Kitchen: SHEET.orange, BOH: SHEET.blue,
+  Management: "#888888",
+};
+// Role worked for a stored code. Section-scoped codes (BOH_*/KITCHEN/FM) name
+// their role directly; prefix codes go through roleFromCode; codes with no role
+// of their own (MID_12_8, unmigrated legacy) fall back to the row's role.
+function roleForCell(code, fallbackRole) {
+  if (!code || code === "OFF" || code === "GAP") return null;
+  if (code === "FM") return "Management";
+  if (code === "BOH_STD" || code === "BOH_AM") return "BOH";
+  if (code === "KITCHEN") return "Kitchen";
+  return roleFromCode(code) || fallbackRole || null;
+}
+// Readable chip triple (text/border/tint) per role accent for the live grid.
+const CELL_STYLE_BY_ACCENT = {
+  "#c8956c": { color: "#7d5433", borderColor: "#c8956c", background: "#f7eee3" },
+  "#5a8a6a": { color: "#3d6149", borderColor: "#5a8a6a", background: "#e9f0ea" },
+  "#4a7a9b": { color: "#35576e", borderColor: "#4a7a9b", background: "#e7eef3" },
+  "#8a5a9b": { color: "#63406f", borderColor: "#8a5a9b", background: "#f0e9f3" },
+  "#888888": { color: "#555555", borderColor: "#888888", background: "#ededed" },
+};
+function roleCellStyle(role) {
+  const accent = ROLE_COLOR[role];
+  return accent ? CELL_STYLE_BY_ACCENT[accent] : undefined;
+}
 const escHtml = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 // Build the offscreen DOM for one schedule sheet. Fully inline-styled and
@@ -163,11 +196,13 @@ function buildScheduleSheetNode({ sectionTitle, weekLabel, days, todayIdx, group
         : `<th style="padding:11px 6px;color:#8c8c8c;font-family:${mono};font-weight:700;font-size:11px;letter-spacing:1.5px;text-align:center;border-bottom:1.5px solid #e4e4e4;">${d.dow} ${d.date}</th>`
     )
     .join("");
-  const shiftCell = (label, i) => {
+  // Cell text takes the color of the role worked that day (r.roles), not the
+  // section's color — off days stay dimmed grey italic em-dashes.
+  const shiftCell = (label, role, i) => {
     const off = !label || label === "Off";
     return `<td style="padding:8px 6px;text-align:center;border-bottom:1px solid #efefef;${dayTint(i)}${
-      off ? `font-style:italic;color:#b9b9b9;` : `color:#3a3a3a;`
-    }font-family:${sans};font-size:12px;${off ? "" : "font-weight:600;"}">${off ? "—" : escHtml(label)}</td>`;
+      off ? `font-style:italic;color:#cccccc;` : `color:${ROLE_COLOR[role] || "#3a3a3a"};`
+    }font-family:${sans};font-size:12px;${off ? "" : "font-weight:700;"}">${off ? "—" : escHtml(label)}</td>`;
   };
   const groupBlock = (g) => {
     const color = SHEET_GROUP_COLOR[g.label] || SHEET.grey;
@@ -179,7 +214,7 @@ function buildScheduleSheetNode({ sectionTitle, weekLabel, days, todayIdx, group
       .map(
         (r) => `<tr>
         <td style="padding:8px 12px;border-bottom:1px solid #efefef;font-family:${sans};font-weight:600;font-size:12.5px;color:#2b2b2b;white-space:nowrap;">${escHtml(r.name)}</td>
-        ${r.shifts.map(shiftCell).join("")}
+        ${r.shifts.map((label, i) => shiftCell(label, r.roles?.[i], i)).join("")}
       </tr>`
       )
       .join("");
@@ -198,7 +233,7 @@ function buildScheduleSheetNode({ sectionTitle, weekLabel, days, todayIdx, group
           .map((names, i) =>
             names.length
               ? `<td style="padding:6px 4px;text-align:center;border-bottom:1px solid #efefef;${dayTint(i)}">${names.map(pill).join(" ")}</td>`
-              : `<td style="padding:8px 6px;text-align:center;border-bottom:1px solid #efefef;${dayTint(i)}font-style:italic;color:#b9b9b9;font-family:${sans};font-size:12px;">—</td>`
+              : `<td style="padding:8px 6px;text-align:center;border-bottom:1px solid #efefef;${dayTint(i)}font-style:italic;color:#cccccc;font-family:${sans};font-size:12px;">—</td>`
           )
           .join("")}
       </tr>`
@@ -237,7 +272,7 @@ function buildScheduleSheetNode({ sectionTitle, weekLabel, days, todayIdx, group
       <tbody>${groups.map(groupBlock).join("")}${managerRow}</tbody>
     </table>
     <div style="display:flex;align-items:center;margin-top:12px;padding:0 4px;font-family:${sans};font-size:10.5px;color:#7a7a7a;">
-      <div>${todaySwatch}<span style="white-space:nowrap;"><span style="font-style:italic;color:#b9b9b9;">—</span>&nbsp; Day off</span></div>
+      <div>${todaySwatch}<span style="white-space:nowrap;"><span style="font-style:italic;color:#cccccc;">—</span>&nbsp; Day off</span></div>
       <div style="margin-left:auto;">${legendDots}</div>
     </div>`;
   return node;
@@ -1526,7 +1561,6 @@ export default function SchedulingHub({ session, onSignOut }) {
         {WEEKDAY_LABELS.map((w, wi) => {
           const realWeekday = WEEKDAY_ORDER[wi];
           const type = row[realWeekday] || "OFF";
-          const meta = SHIFT_META[type] || SHIFT_META.OFF;
           const value = opts.some((o) => o.code === type) ? type : "OFF";
           const blockLabel = value === "OFF" ? crossSectionBlock(personName, groupKey, realWeekday) : null;
           if (blockLabel) {
@@ -1544,7 +1578,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                 className="cell-select shift-select"
                 value={value}
                 disabled={scheduleLocked}
-                style={value === "OFF" ? undefined : { color: meta.fg, borderColor: meta.border, background: meta.bg }}
+                style={value === "OFF" ? undefined : roleCellStyle(roleForCell(value, GROUP_ROLE[groupKey]))}
                 onChange={(e) => setPlaceholderShift(groupKey, idx, realWeekday, e.target.value)}
               >
                 {opts.map((o) => (
@@ -1955,16 +1989,22 @@ export default function SchedulingHub({ session, onSignOut }) {
     );
   }
   // FOH rows grouped by role, in the on-screen group order (for the branded
-  // PDF sheet + HTML email).
+  // PDF sheet + HTML email). `roles` carries the role actually worked per day
+  // (from the shift code, e.g. Akira's BAR_6CL day is "Bar") so cells color by
+  // role worked, not by the section row.
   function buildFohSheetGroups(week) {
     return fohRoleGroups.map((role) => ({
       label: role,
       rows: fohRoster
         .filter((p) => p.role === role)
-        .map((p) => ({
-          name: p.name,
-          shifts: week.map((d) => shiftLabelForType(personShiftFor(p.name, d, patterns, overrides).type)),
-        })),
+        .map((p) => {
+          const types = week.map((d) => personShiftFor(p.name, d, patterns, overrides).type);
+          return {
+            name: p.name,
+            shifts: types.map(shiftLabelForType),
+            roles: types.map((t) => roleForCell(t, p.role)),
+          };
+        }),
     }));
   }
   // FOH schedule-email payload: 7 day headers + per-person shifts. `rows` stays
@@ -1993,10 +2033,14 @@ export default function SchedulingHub({ session, onSignOut }) {
     return SHIFT_META[code]?.label || code;
   }
   function buildGroupRows(gk, week) {
-    return (groupRosters[gk] || []).map((personName, idx) => ({
-      name: personName,
-      shifts: week.map((d) => placeholderShiftLabel(gk, personName, placeholderPatterns[gk]?.[idx]?.[d.weekday] || "OFF")),
-    }));
+    return (groupRosters[gk] || []).map((personName, idx) => {
+      const codes = week.map((d) => placeholderPatterns[gk]?.[idx]?.[d.weekday] || "OFF");
+      return {
+        name: personName,
+        shifts: codes.map((c) => placeholderShiftLabel(gk, personName, c)),
+        roles: codes.map((c) => roleForCell(c, GROUP_ROLE[gk])),
+      };
+    });
   }
   // BOH+Kitchen email payload: Kitchen group first, then BOH (rendered with a divider).
   function buildBohKitchenPayload(week) {
@@ -3029,7 +3073,6 @@ export default function SchedulingHub({ session, onSignOut }) {
                                 const cellRole = cellRoleSel[selKey] || roleFromCode(code) || personRoles[0];
                                 const opts = roleOptions[cellRole] || [{ code: "OFF", label: "Off" }];
                                 const value = opts.some((o) => o.code === code) ? code : "OFF";
-                                const meta = SHIFT_META[value] || SHIFT_META.OFF;
                                 const timeOff = approvedOffFor(p.name, weekday);
                                 return (
                                   <td key={w} className="shift-cell">
@@ -3051,7 +3094,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                                         className="cell-select shift-select"
                                         value={value}
                                         disabled={scheduleLocked}
-                                        style={value === "OFF" ? undefined : { color: meta.fg, borderColor: meta.border, background: meta.bg }}
+                                        style={value === "OFF" ? undefined : roleCellStyle(roleForCell(value, cellRole))}
                                         onChange={(e) => setCellShift(p.name, weekday, e.target.value)}
                                       >
                                         {opts.map((o) => (
@@ -3137,7 +3180,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                                 {mgmtTimeOff && <span className="cell-timeoff-flag" title="Approved time off" />}
                                 <button
                                   className="shift-chip chip-btn"
-                                  style={{ color: meta.fg, borderColor: meta.border, background: meta.bg }}
+                                  style={type === "OFF" ? { color: meta.fg, borderColor: meta.border, background: meta.bg } : roleCellStyle("Management")}
                                   onClick={() => toggleManagementCell(idx, realWeekday)}
                                 >
                                   {meta.label}
