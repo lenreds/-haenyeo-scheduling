@@ -76,13 +76,19 @@ export function buildRawEmail({ to, subject, inReplyTo, body }) {
 
 const wrap76 = (b64) => b64.replace(/(.{76})/g, "$1\r\n");
 
+// Strip anything that could break out of a MIME header (CR/LF/quotes).
+const sanitizeFilename = (name) => String(name || "file").replace(/[\r\n"\\]/g, "").slice(0, 200);
+
 // HTML email with a plain-text alternative and inline CID images (Gmail blocks
 // data: URIs in HTML bodies, so the logo travels as a multipart/related part
 // referenced via <img src="cid:...">). images: [{ cid, b64, mime? }].
-// Structure: multipart/related( multipart/alternative(text, html), images… ).
-export function buildHtmlRawEmail({ to, subject, text, html, images = [] }) {
+// attachments: [{ filename, b64, mime? }] — downloadable files (e.g. PDFs).
+// Structure without attachments: multipart/related( alternative(text,html), images… ).
+// With attachments: multipart/mixed( <that related part>, attachment parts… ).
+export function buildHtmlRawEmail({ to, subject, text, html, images = [], attachments = [] }) {
   const rel = "haenyeo-rel-8f3a1c";
   const alt = "haenyeo-alt-8f3a1c";
+  const mixed = "haenyeo-mix-8f3a1c";
   const altPart = [
     `--${alt}`,
     'Content-Type: text/plain; charset="UTF-8"',
@@ -109,10 +115,9 @@ export function buildHtmlRawEmail({ to, subject, text, html, images = [] }) {
       ].join("\r\n")
     )
     .join("\r\n");
-  const raw = [
-    `To: ${to}`,
-    `Subject: ${encodeSubject(subject)}`,
-    "MIME-Version: 1.0",
+  // The multipart/related block (its own Content-Type header + body), reused
+  // whether or not there are attachments.
+  const relatedLines = [
     `Content-Type: multipart/related; boundary="${rel}"`,
     "",
     `--${rel}`,
@@ -121,7 +126,35 @@ export function buildHtmlRawEmail({ to, subject, text, html, images = [] }) {
     altPart,
     imageParts,
     `--${rel}--`,
-    "",
-  ].join("\r\n");
+  ];
+  const headers = [`To: ${to}`, `Subject: ${encodeSubject(subject)}`, "MIME-Version: 1.0"];
+
+  const atts = (attachments || []).filter((a) => a && a.b64);
+  let raw;
+  if (!atts.length) {
+    raw = [...headers, ...relatedLines, ""].join("\r\n");
+  } else {
+    const attachParts = atts.map((a) => {
+      const name = sanitizeFilename(a.filename);
+      return [
+        `--${mixed}`,
+        `Content-Type: ${a.mime || "application/pdf"}; name="${name}"`,
+        "Content-Transfer-Encoding: base64",
+        `Content-Disposition: attachment; filename="${name}"`,
+        "",
+        wrap76(a.b64),
+      ].join("\r\n");
+    });
+    raw = [
+      ...headers,
+      `Content-Type: multipart/mixed; boundary="${mixed}"`,
+      "",
+      `--${mixed}`,
+      ...relatedLines,
+      ...attachParts,
+      `--${mixed}--`,
+      "",
+    ].join("\r\n");
+  }
   return toBase64Url(Buffer.from(raw, "utf8"));
 }

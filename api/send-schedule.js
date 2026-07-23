@@ -1,7 +1,10 @@
-// POST /api/send-schedule — emails a week's schedule to registered staff.
-// Manager-JWT auth. Body: { weekLabel, dayHeaders:[7], rows:[{name,shifts:[7]}]
-// OR groups:[{label,rows}], sectionLabel?, sections?:["FOH"|"BOH"|"Kitchen"],
-// days?:[{dow,date}×7], todayIdx?, managerOn?:[names[]×7] }.
+// POST /api/send-schedule — emails one or more weeks' schedule to registered staff.
+// Manager-JWT auth. Body: { weeks:[weekPayload,…], sections?:["FOH"|"BOH"|"Kitchen"],
+// attachments?:[{filename,b64}] } where each weekPayload is
+// { weekLabel, dayHeaders:[7], rows:[{name,shifts:[7],roles?,primaryRole?}] OR
+// groups:[{label,rows}], sectionLabel?, days?:[{dow,date}×7], todayIdx?, managerOn? }.
+// Legacy single-week bodies (those same fields at the top level, no `weeks`) still
+// work. 2+ weeks stack in one email; `attachments` are PDF files (one per week).
 // `sections` restricts recipients by staff.section (case-insensitive); omitted =
 // all registered. Sends the branded HTML sheet (plain-text alternative + the
 // real icon as an inline CID image). Same email to each; tagged Sent/Schedules.
@@ -9,7 +12,7 @@
 import { GMAIL_REFRESH_TOKEN } from "./_lib/config.js";
 import { getAccessToken, sendMessage, modifyMessage } from "./_lib/google.js";
 import { buildHtmlRawEmail } from "./_lib/reply.js";
-import { buildScheduleEmailHtml } from "./_lib/emails.js";
+import { buildScheduleEmailHtml, buildMultiWeekScheduleHtml } from "./_lib/emails.js";
 import { HAENYEO_ICON_B64 } from "./_lib/brand.js";
 import { makeLabeler, LABELS } from "./_lib/labels.js";
 import { getGmailToken, isManager, fetchRegisteredStaff } from "./_lib/store.js";
@@ -24,10 +27,18 @@ export default async function handler(req, res) {
   const token = (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
   if (!(await isManager(token))) return res.status(401).json({ error: "unauthorized" });
 
-  const { weekLabel, dayHeaders, rows, groups, sectionLabel, sections, days, todayIdx, managerOn } = readBody(req);
-  if (!weekLabel || !Array.isArray(dayHeaders) || (!Array.isArray(rows) && !Array.isArray(groups))) {
-    return res.status(400).json({ error: "weekLabel, dayHeaders, and rows or groups required" });
+  const body = readBody(req);
+  const { sections, attachments } = body;
+  // New clients send a `weeks` array; legacy single-week bodies carry the week
+  // fields at the top level — wrap them so the rest of the flow is uniform.
+  const weeks = Array.isArray(body.weeks) && body.weeks.length
+    ? body.weeks
+    : [{ weekLabel: body.weekLabel, dayHeaders: body.dayHeaders, rows: body.rows, groups: body.groups, sectionLabel: body.sectionLabel, days: body.days, todayIdx: body.todayIdx, managerOn: body.managerOn }];
+  const w0 = weeks[0] || {};
+  if (!w0.weekLabel || !Array.isArray(w0.dayHeaders) || (!Array.isArray(w0.rows) && !Array.isArray(w0.groups))) {
+    return res.status(400).json({ error: "weeks[0] needs weekLabel, dayHeaders, and rows or groups" });
   }
+  const sectionLabel = w0.sectionLabel;
 
   try {
     const tokenRow = await getGmailToken();
@@ -40,9 +51,12 @@ export default async function handler(req, res) {
       const want = sections.map((s) => String(s).toLowerCase());
       recipients = recipients.filter((r) => want.includes(String(r.section || "").toLowerCase()));
     }
-    const { subject, text, html } = buildScheduleEmailHtml({
-      weekLabel, dayHeaders, rows, groups, sectionLabel, days, todayIdx, managerOn,
-    });
+    const { subject, text, html } = weeks.length > 1
+      ? buildMultiWeekScheduleHtml({ weeks, sectionLabel })
+      : buildScheduleEmailHtml(weeks[0]);
+    const pdfAttachments = (Array.isArray(attachments) ? attachments : [])
+      .filter((a) => a && a.b64 && a.filename)
+      .map((a) => ({ filename: a.filename, b64: a.b64, mime: "application/pdf" }));
     const labeler = makeLabeler(accessToken);
     let labelId = null;
     try { labelId = await labeler.ensure(LABELS.sentSchedules); } catch { /* non-fatal */ }
@@ -54,6 +68,7 @@ export default async function handler(req, res) {
         const raw = buildHtmlRawEmail({
           to: r.personal_email, subject, text, html,
           images: [{ cid: "haenyeo-icon", b64: HAENYEO_ICON_B64 }],
+          attachments: pdfAttachments,
         });
         const msg = await sendMessage(accessToken, { raw });
         if (labelId && msg?.id) await modifyMessage(accessToken, msg.id, { addLabelIds: [labelId] }).catch(() => {});

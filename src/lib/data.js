@@ -77,6 +77,8 @@ export async function denyInfoUpdate(id) {
 
 /* ------------------------------------------------ schedule / tip sends ----- */
 
+// payload: { weeks: [weekPayload,…], sections, attachments: [{filename,b64}] }.
+// Multiple weeks stack in one email with one PDF attached per week.
 export async function triggerSchedulePublish(payload, accessToken) {
   try {
     const res = await fetch("/api/send-schedule", {
