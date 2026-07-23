@@ -627,6 +627,7 @@ export default function SchedulingHub({ session, onSignOut }) {
   const [deleting, setDeleting] = useState(false);
   const [qrPrintUrls, setQrPrintUrls] = useState({}); // all 7 QR images for the print sheet
   const [qrPrinting, setQrPrinting] = useState(false);
+  const [timeOffBlock, setTimeOffBlock] = useState(null); // { name, dayLabel, onOverride } | null
   const [publishModal, setPublishModal] = useState(null); // { weekIdx } | null
   const [publishBusy, setPublishBusy] = useState(false);
   const [tipFinalized, setTipFinalized] = useState(false);
@@ -1139,8 +1140,7 @@ export default function SchedulingHub({ session, onSignOut }) {
   }, [tipDateIso]);
   // BOH / Kitchen dropdown cells write straight through; Management keeps the
   // click interaction but toggles Off <-> FM only.
-  function setPlaceholderShift(groupKey, slotIdx, weekday, newType) {
-    if (scheduleLocked) return;
+  function writePlaceholderShift(groupKey, slotIdx, weekday, newType) {
     setPlaceholderPatterns((prev) => {
       const rows = (prev[groupKey] || []).map((row) => [...row]);
       while (rows.length <= slotIdx) rows.push([...ALL_OFF_WEEK]);
@@ -1148,6 +1148,19 @@ export default function SchedulingHub({ session, onSignOut }) {
       return { ...prev, [groupKey]: rows };
     });
     upsertPlaceholder(groupKey, slotIdx, weekday, newType).catch((e) => console.error("Save placeholder failed:", e));
+  }
+  function setPlaceholderShift(groupKey, slotIdx, weekday, newType) {
+    if (scheduleLocked) return;
+    const personName = (groupRosters[groupKey] || [])[slotIdx];
+    const blk = newType !== "OFF" && personName ? approvedOffFor(personName, weekday) : null;
+    if (blk) {
+      setTimeOffBlock({
+        name: personName, dayLabel: blk.dayLabel,
+        onOverride: () => { writePlaceholderShift(groupKey, slotIdx, weekday, newType); overwriteApprovedOverride(personName, blk.iso, newType, blk.override.railId); },
+      });
+      return;
+    }
+    writePlaceholderShift(groupKey, slotIdx, weekday, newType);
   }
   // Cross-scheduling (item 2): a person can't be scheduled in two sections the
   // same day. Returns the label of another section where `name` is already
@@ -1199,8 +1212,10 @@ export default function SchedulingHub({ session, onSignOut }) {
               </td>
             );
           }
+          const timeOff = approvedOffFor(personName, realWeekday);
           return (
             <td key={w} className="shift-cell">
+              {timeOff && <span className="cell-timeoff-flag" title="Approved time off" />}
               <select
                 className="cell-select shift-select"
                 value={value}
@@ -1228,6 +1243,30 @@ export default function SchedulingHub({ session, onSignOut }) {
     setLog((l) => [{ id: `l-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, text, time: timeNow(), tone }, ...l]);
   }
 
+  // Approved time-off block (item 2): for a cell's weekday, map to the actual
+  // date in the displayed week and return the override iff it's an APPROVED
+  // Rail-sourced Off (type 'OFF' + railId). Manual Off / pending / non-Off → null.
+  function approvedOffFor(name, weekday) {
+    if (!activeWeek) return null;
+    const day = activeWeek.find((d) => d.weekday === weekday);
+    if (!day) return null;
+    const ov = overrides[`${name}|${day.iso}`];
+    if (ov && ov.type === "OFF" && ov.railId) {
+      return { iso: day.iso, override: ov, dayLabel: day.date.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" }) };
+    }
+    return null;
+  }
+  // On "Override": replace the Off override with the chosen shift, keeping the
+  // rail_request_id link (the request stays approved; no email is sent).
+  async function overwriteApprovedOverride(name, isoStr, code, railId) {
+    setOverrides((o) => ({ ...o, [`${name}|${isoStr}`]: { type: code, swap: false, railId: railId || null } }));
+    const staffId = nameToId[name];
+    if (staffId) {
+      try { await upsertScheduleOverride({ staffId, dateIso: isoStr, overrideType: code, isSwap: false, railRequestId: railId || null }); }
+      catch (e) { console.error("Override write failed:", e); }
+    }
+  }
+
   // Warn before clobbering an existing override on the same person+date.
   function confirmOverwrite(name, isoStr) {
     if (!overrides[`${name}|${isoStr}`]) return true;
@@ -1248,7 +1287,7 @@ export default function SchedulingHub({ session, onSignOut }) {
     for (const isoStr of isoDates) {
       if (!confirmOverwrite(item.name, isoStr)) continue;
       await upsertScheduleOverride({ staffId, dateIso: isoStr, overrideType: "OFF", isSwap: false, railRequestId: item.id });
-      setOverrides((o) => ({ ...o, [`${item.name}|${isoStr}`]: { type: "OFF", swap: false } }));
+      setOverrides((o) => ({ ...o, [`${item.name}|${isoStr}`]: { type: "OFF", swap: false, railId: item.id } }));
     }
   }
 
@@ -1279,7 +1318,7 @@ export default function SchedulingHub({ session, onSignOut }) {
       for (const isoStr of dates) {
         if (!confirmOverwrite(item.name, isoStr)) continue;
         await upsertScheduleOverride({ staffId, dateIso: isoStr, overrideType, isSwap: false, railRequestId: item.id });
-        setOverrides((o) => ({ ...o, [`${item.name}|${isoStr}`]: { type: overrideType, swap: false } }));
+        setOverrides((o) => ({ ...o, [`${item.name}|${isoStr}`]: { type: overrideType, swap: false, railId: item.id } }));
       }
     } else if (item.type === "SHIFT SWAP") {
       const partner = findSwapPartner(item);
@@ -1298,8 +1337,8 @@ export default function SchedulingHub({ session, onSignOut }) {
       await upsertScheduleOverride({ staffId: bId, dateIso: isoStr, overrideType: aShift, isSwap: true, railRequestId: item.id });
       setOverrides((o) => ({
         ...o,
-        [`${item.name}|${isoStr}`]: { type: bShift, swap: true },
-        [`${partner.name}|${isoStr}`]: { type: aShift, swap: true },
+        [`${item.name}|${isoStr}`]: { type: bShift, swap: true, railId: item.id },
+        [`${partner.name}|${isoStr}`]: { type: aShift, swap: true, railId: item.id },
       }));
     }
   }
@@ -1519,8 +1558,7 @@ export default function SchedulingHub({ session, onSignOut }) {
   }
 
   // FOH dropdown cell: write the picked shift code (which carries its role)
-  function setCellShift(name, weekday, code) {
-    if (scheduleLocked) return;
+  function writeCellShift(name, weekday, code) {
     setPatterns((prev) => ({
       ...prev,
       [name]: (prev[name] || ALL_OFF_WEEK).map((c, i) => (i === weekday ? code : c)),
@@ -1535,6 +1573,18 @@ export default function SchedulingHub({ session, onSignOut }) {
     if (staffId) {
       upsertPattern(staffId, weekday, code).catch((e) => console.error("Save pattern failed:", e));
     }
+  }
+  function setCellShift(name, weekday, code) {
+    if (scheduleLocked) return;
+    const blk = code !== "OFF" ? approvedOffFor(name, weekday) : null;
+    if (blk) {
+      setTimeOffBlock({
+        name, dayLabel: blk.dayLabel,
+        onOverride: () => { writeCellShift(name, weekday, code); overwriteApprovedOverride(name, blk.iso, code, blk.override.railId); },
+      });
+      return;
+    }
+    writeCellShift(name, weekday, code);
   }
   // role picker changed: remember the choice and reset the cell's shift if the
   // current code belongs to a different role
@@ -1558,22 +1608,56 @@ export default function SchedulingHub({ session, onSignOut }) {
     if (!type || type === "OFF") return "Off";
     return SHIFT_META[type]?.label || type;
   }
-  // Build the schedule-email payload for a week: 7 day headers + per-person shifts.
+  function weekDayHeaders(week) {
+    return week.map((d) => `${JS_WEEKDAY_NAMES[d.weekday]} ${d.date.getMonth() + 1}/${d.date.getDate()}`);
+  }
+  function weekRangeLabel(week) {
+    return `${week[0].date.toLocaleDateString(undefined, MONTH_FMT)} – ${week[6].date.toLocaleDateString(undefined, MONTH_FMT)}`;
+  }
+  // FOH schedule-email payload: 7 day headers + per-person shifts.
   function buildSchedulePayload(week) {
-    const dayHeaders = week.map((d) => `${JS_WEEKDAY_NAMES[d.weekday]} ${d.date.getMonth() + 1}/${d.date.getDate()}`);
     const rows = fohRoster.map((p) => ({
       name: p.name,
       shifts: week.map((d) => shiftLabelForType(personShiftFor(p.name, d, patterns, overrides).type)),
     }));
-    const weekLabel = `${week[0].date.toLocaleDateString(undefined, MONTH_FMT)} – ${week[6].date.toLocaleDateString(undefined, MONTH_FMT)}`;
-    return { weekLabel, dayHeaders, rows };
+    return { weekLabel: weekRangeLabel(week), dayHeaders: weekDayHeaders(week), rows };
   }
-  // Registered active staff with an email (who the schedule actually reaches).
-  const publishRecipients = useMemo(
-    () => staffList.filter((s) => s.active !== false && s.registered && s.personal_email),
-    [staffList]
-  );
-  const activeStaffCount = useMemo(() => staffList.filter((s) => s.active !== false).length, [staffList]);
+  // Display label for a placeholder (BOH/Kitchen) shift code, incl. the Jenny/
+  // Ajuma "Yes" rule used on the grid.
+  function placeholderShiftLabel(gk, personName, code) {
+    if (!code || code === "OFF") return "Off";
+    if (gk === "kitchen" && code === "KITCHEN" && (personName.startsWith("Jenny") || personName.startsWith("Ajuma"))) return "Yes";
+    return SHIFT_META[code]?.label || code;
+  }
+  function buildGroupRows(gk, week) {
+    return (groupRosters[gk] || []).map((personName, idx) => ({
+      name: personName,
+      shifts: week.map((d) => placeholderShiftLabel(gk, personName, placeholderPatterns[gk]?.[idx]?.[d.weekday] || "OFF")),
+    }));
+  }
+  // BOH+Kitchen email payload: Kitchen group first, then BOH (rendered with a divider).
+  function buildBohKitchenPayload(week) {
+    return {
+      weekLabel: weekRangeLabel(week),
+      dayHeaders: weekDayHeaders(week),
+      sectionLabel: "BOH & Kitchen",
+      groups: [
+        { label: "Kitchen", rows: buildGroupRows("kitchen", week) },
+        { label: "BOH", rows: buildGroupRows("boh", week) },
+      ],
+    };
+  }
+
+  // Recipient counts per audience for the preview modal.
+  const publishCounts = useMemo(() => {
+    const inSec = (s, secs) => secs.includes(s.section);
+    const build = (secs) => {
+      const active = staffList.filter((s) => s.active !== false && inSec(s, secs));
+      const registered = active.filter((s) => s.registered && s.personal_email);
+      return { total: active.length, registered: registered.length, skipped: active.length - registered.length };
+    };
+    return { foh: build(["FOH"]), bk: build(["BOH", "Kitchen"]) };
+  }, [staffList]);
 
   function publishWeek() {
     setPublishModal({ weekIdx: weekIndex });
@@ -1584,10 +1668,14 @@ export default function SchedulingHub({ session, onSignOut }) {
     const idx = publishModal.weekIdx;
     const week = weeks[idx];
     try {
-      const res = await triggerSchedulePublish(buildSchedulePayload(week), session?.access_token);
+      const [fohRes, bkRes] = await Promise.all([
+        triggerSchedulePublish({ ...buildSchedulePayload(week), sections: ["FOH"] }, session?.access_token),
+        triggerSchedulePublish({ ...buildBohKitchenPayload(week), sections: ["BOH", "Kitchen"] }, session?.access_token),
+      ]);
       setPublishedWeeks((s) => new Set(s).add(idx));
-      if (res?.error) addLog(`Publish email failed (${res.error}) — schedule marked published`, "warn");
-      else addLog(`Published week of ${week[0].date.toLocaleDateString(undefined, MONTH_FMT)} — emailed ${res?.sent ?? 0} staff`, "good");
+      const err = fohRes?.error || bkRes?.error;
+      if (err) addLog(`Publish email issue (${err}) — schedule marked published`, "warn");
+      else addLog(`Published week of ${week[0].date.toLocaleDateString(undefined, MONTH_FMT)} — FOH ${fohRes?.sent ?? 0}, BOH & Kitchen ${bkRes?.sent ?? 0}`, "good");
     } catch (e) {
       addLog(`Publish failed: ${e.message}`, "warn");
     }
@@ -1908,6 +1996,9 @@ export default function SchedulingHub({ session, onSignOut }) {
         .role-select { font-size: 9px; padding: 2px 2px; color: #6b6355; background: #F1EFE6; border-color: rgba(43,42,37,0.18); }
         .cell-blocked { font-family: 'Space Mono', monospace; font-size: 11px; color: #b0a892; text-align: center; padding: 5px 2px; border-radius: 4px; background: repeating-linear-gradient(45deg, rgba(43,42,37,0.04), rgba(43,42,37,0.04) 4px, transparent 4px, transparent 8px); cursor: not-allowed; }
         .section-divider { height: 10px; border-bottom: 2px solid rgba(201,138,63,0.35); padding: 0 !important; }
+        /* approved time-off passive indicator (item 2) */
+        .week-table td.shift-cell { position: relative; }
+        .cell-timeoff-flag { position: absolute; top: 2px; right: 2px; width: 8px; height: 8px; border-radius: 50%; background: #7B93A3; box-shadow: 0 0 0 2px rgba(123,147,163,0.25); pointer-events: none; z-index: 1; }
 
         /* ---- manager-on-shift banner (FOH) ---- */
         .fm-banner { display: flex; gap: 6px; align-items: stretch; margin: 2px 0 16px; flex-wrap: wrap; }
@@ -2366,7 +2457,7 @@ export default function SchedulingHub({ session, onSignOut }) {
           {publishModal && (() => {
             const week = weeks[publishModal.weekIdx];
             const payload = buildSchedulePayload(week);
-            const skipped = activeStaffCount - publishRecipients.length;
+            const { foh, bk } = publishCounts;
             return (
               <div className="day-popup-backdrop" onClick={() => !publishBusy && setPublishModal(null)}>
                 <div className="publish-modal" onClick={(e) => e.stopPropagation()}>
@@ -2375,8 +2466,8 @@ export default function SchedulingHub({ session, onSignOut }) {
                     <button className="day-popup-close" disabled={publishBusy} onClick={() => setPublishModal(null)}><X size={15} /></button>
                   </div>
                   <div className="publish-count">
-                    Sending to <b>{publishRecipients.length}</b> of {activeStaffCount} staff
-                    {skipped > 0 && <span className="publish-skip"> ({skipped} not yet registered — will be skipped)</span>}
+                    <div>FOH: Sending to <b>{foh.registered}</b> of {foh.total} staff{foh.skipped > 0 && <span className="publish-skip"> ({foh.skipped} not yet registered)</span>}</div>
+                    <div>BOH+Kitchen: Sending to <b>{bk.registered}</b> of {bk.total} staff{bk.skipped > 0 && <span className="publish-skip"> ({bk.skipped} not yet registered)</span>}</div>
                   </div>
                   <div className="publish-preview">
                     <table className="publish-table">
@@ -2492,8 +2583,10 @@ export default function SchedulingHub({ session, onSignOut }) {
                                 const opts = roleOptions[cellRole] || [{ code: "OFF", label: "Off" }];
                                 const value = opts.some((o) => o.code === code) ? code : "OFF";
                                 const meta = SHIFT_META[value] || SHIFT_META.OFF;
+                                const timeOff = approvedOffFor(p.name, weekday);
                                 return (
                                   <td key={w} className="shift-cell">
+                                    {timeOff && <span className="cell-timeoff-flag" title="Approved time off" />}
                                     <div className="cell-stack">
                                       {personRoles.length > 1 && (
                                         <select
@@ -2591,8 +2684,10 @@ export default function SchedulingHub({ session, onSignOut }) {
                                 </td>
                               );
                             }
+                            const mgmtTimeOff = approvedOffFor(personName, realWeekday);
                             return (
                               <td key={w} className="shift-cell">
+                                {mgmtTimeOff && <span className="cell-timeoff-flag" title="Approved time off" />}
                                 <button
                                   className="shift-chip chip-btn"
                                   style={{ color: meta.fg, borderColor: meta.border, background: meta.bg }}
@@ -3086,6 +3181,21 @@ export default function SchedulingHub({ session, onSignOut }) {
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {timeOffBlock && (
+        <div className="day-popup-backdrop" onClick={() => setTimeOffBlock(null)}>
+          <div className="delete-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="delete-modal-title">Approved time off</div>
+            <div className="delete-modal-body">
+              <b>{timeOffBlock.name}</b> has approved time off on {timeOffBlock.dayLabel}. Their request was approved — are you sure you want to schedule them anyway?
+            </div>
+            <div className="delete-modal-actions">
+              <button className="nr-btn nr-btn-deny" onClick={() => setTimeOffBlock(null)}>Keep Time Off</button>
+              <button className="delete-confirm-btn" onClick={() => { const fn = timeOffBlock.onOverride; setTimeOffBlock(null); fn && fn(); }}>Override</button>
+            </div>
+          </div>
         </div>
       )}
 

@@ -35,20 +35,22 @@ ${SIG}`;
 }
 
 // weekLabel: "Jun 29 – Jul 5"; dayHeaders: 7 short labels ("Mon 6/29");
-// rows: [{ name, shifts: [7 shift labels] }].
-export function buildScheduleEmail({ weekLabel, dayHeaders, rows }) {
-  const subject = `Haenyeo Schedule — Week of ${weekLabel}`;
-  const lines = (rows || []).map((r) => {
-    const days = (r.shifts || []).map((s, i) => `  ${dayHeaders[i]}: ${s || "Off"}`).join("\n");
-    return `${r.name}\n${days}`;
-  });
-  const body =
-`Haenyeo — Front of House schedule
-Week of ${weekLabel}
-
-${lines.join("\n\n")}
-
-${SIG}`;
+// Flat FOH schedule: rows = [{ name, shifts: [7 labels] }]. For BOH+Kitchen pass
+// `groups` = [{ label, rows }] (rendered with a divider) and `sectionLabel`
+// ("BOH & Kitchen") which also tags the subject.
+export function buildScheduleEmail({ weekLabel, dayHeaders, rows, groups, sectionLabel }) {
+  const subject = sectionLabel
+    ? `Haenyeo Schedule — ${sectionLabel} — Week of ${weekLabel}`
+    : `Haenyeo Schedule — Week of ${weekLabel}`;
+  const renderPeople = (people) =>
+    (people || [])
+      .map((r) => `${r.name}\n${(r.shifts || []).map((s, i) => `  ${dayHeaders[i]}: ${s || "Off"}`).join("\n")}`)
+      .join("\n\n");
+  const bodyMain = groups
+    ? groups.map((g) => `${g.label}\n${"—".repeat(24)}\n${renderPeople(g.rows)}`).join("\n\n\n")
+    : renderPeople(rows);
+  const heading = sectionLabel ? `Haenyeo — ${sectionLabel} schedule` : "Haenyeo — Front of House schedule";
+  const body = `${heading}\nWeek of ${weekLabel}\n\n${bodyMain}\n\n${SIG}`;
   return { subject, body };
 }
 

@@ -1,6 +1,8 @@
-// POST /api/send-schedule — emails the week's FOH schedule to every registered
-// staff member. Manager-JWT auth. Body: { weekLabel, dayHeaders:[7], rows:[{name,
-// shifts:[7]}] }. Same email to all; tagged Sent/Schedules.
+// POST /api/send-schedule — emails a week's schedule to registered staff.
+// Manager-JWT auth. Body: { weekLabel, dayHeaders:[7], rows:[{name,shifts:[7]}]
+// OR groups:[{label,rows}], sectionLabel?, sections?:["FOH"|"BOH"|"Kitchen"] }.
+// `sections` restricts recipients by staff.section (case-insensitive); omitted =
+// all registered. Same email to each; tagged Sent/Schedules.
 
 import { GMAIL_REFRESH_TOKEN } from "./_lib/config.js";
 import { getAccessToken, sendMessage, modifyMessage } from "./_lib/google.js";
@@ -19,9 +21,9 @@ export default async function handler(req, res) {
   const token = (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
   if (!(await isManager(token))) return res.status(401).json({ error: "unauthorized" });
 
-  const { weekLabel, dayHeaders, rows } = readBody(req);
-  if (!weekLabel || !Array.isArray(dayHeaders) || !Array.isArray(rows)) {
-    return res.status(400).json({ error: "weekLabel, dayHeaders, rows required" });
+  const { weekLabel, dayHeaders, rows, groups, sectionLabel, sections } = readBody(req);
+  if (!weekLabel || !Array.isArray(dayHeaders) || (!Array.isArray(rows) && !Array.isArray(groups))) {
+    return res.status(400).json({ error: "weekLabel, dayHeaders, and rows or groups required" });
   }
 
   try {
@@ -30,8 +32,12 @@ export default async function handler(req, res) {
     if (!refreshToken) return res.status(200).json({ sent: 0, error: "gmail_not_connected" });
 
     const accessToken = await getAccessToken(refreshToken);
-    const recipients = await fetchRegisteredStaff();
-    const { subject, body } = buildScheduleEmail({ weekLabel, dayHeaders, rows });
+    let recipients = await fetchRegisteredStaff();
+    if (Array.isArray(sections) && sections.length) {
+      const want = sections.map((s) => String(s).toLowerCase());
+      recipients = recipients.filter((r) => want.includes(String(r.section || "").toLowerCase()));
+    }
+    const { subject, body } = buildScheduleEmail({ weekLabel, dayHeaders, rows, groups, sectionLabel });
     const labeler = makeLabeler(accessToken);
     let labelId = null;
     try { labelId = await labeler.ensure(LABELS.sentSchedules); } catch { /* non-fatal */ }

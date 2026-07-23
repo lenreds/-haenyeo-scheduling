@@ -231,15 +231,22 @@ export async function upsertPlaceholder(groupKey, slotIndex, weekday, shiftType)
 // -> { "name|YYYY-MM-DD": { type, swap } }, matching the prototype OVERRIDES.
 
 export async function fetchOverrides(idToName) {
-  const { data, error } = await supabase
+  // rail_request_id (railId) marks an override as approved-Rail-sourced — used by
+  // the approved-time-off block. Fall back if the column is absent (pre-0004).
+  let { data, error } = await supabase
     .from("schedule_overrides")
-    .select("staff_id, date, override_type, is_swap");
-  if (error) throw error;
+    .select("staff_id, date, override_type, is_swap, rail_request_id");
+  if (error) {
+    ({ data, error } = await supabase
+      .from("schedule_overrides")
+      .select("staff_id, date, override_type, is_swap"));
+    if (error) throw error;
+  }
   const overrides = {};
   (data || []).forEach((row) => {
     const name = idToName[row.staff_id];
     if (!name) return;
-    overrides[`${name}|${row.date}`] = { type: row.override_type || undefined, swap: !!row.is_swap };
+    overrides[`${name}|${row.date}`] = { type: row.override_type || undefined, swap: !!row.is_swap, railId: row.rail_request_id || null };
   });
   return overrides;
 }

@@ -56,7 +56,7 @@ export async function fetchStaffMinimal() {
 export async function fetchRegisteredStaff() {
   const { data, error } = await admin()
     .from("staff")
-    .select("id, name, personal_email, registered, active")
+    .select("id, name, personal_email, registered, active, section")
     .eq("registered", true);
   if (error) throw error;
   return (data || []).filter((s) => s.active !== false && s.personal_email);
