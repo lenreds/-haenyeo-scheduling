@@ -68,6 +68,14 @@ const GROUP_COLOR = {
 // day (rows carry a `roles` array resolved client-side from the shift code
 // prefix), not the section it appears in. Mirrors ROLE_COLOR in src/App.jsx.
 const ROLE_COLOR = { ...GROUP_COLOR, Expo: SHEET_COLORS.orange, Management: "#888888" };
+// Lighter shade per accent for the small cross-role label under a shift worked
+// outside the row's primary role. Mirrors ROLE_COLOR_MUTED in src/App.jsx.
+const ROLE_COLOR_MUTED = {
+  Bar: "#d6b294", Expo: "#d6b294", Kitchen: "#d6b294",
+  Servers: "#85a891", "Busser/Runner": "#7ea0b8", BOH: "#7ea0b8",
+  Host: "#ab86b8", Management: "#a6a6a6",
+};
+const crossRoleLabelText = (role) => (role === "Servers" ? "Server" : role);
 const escHtml = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -105,12 +113,17 @@ export function buildScheduleEmailHtml(payload) {
 
   const tint = (i) => (i === todayIdx ? `background:${C.tint};` : "");
   // Cell text is colored by the role worked that day (r.roles, when the client
-  // sent it) — off cells stay dimmed grey italic em-dashes.
-  const shiftCell = (label, role, i) => {
+  // sent it) — off cells stay dimmed grey italic em-dashes. A shift worked
+  // outside the row's primary role gets a small muted role name underneath.
+  const shiftCell = (label, role, primary, i) => {
     const off = !label || label === "Off";
+    const cross = !off && role && primary && role !== primary;
+    const crossLine = cross
+      ? `<div style="font-size:9px;line-height:1.1;margin-top:1px;font-weight:bold;font-family:${sans};color:${ROLE_COLOR_MUTED[role] || "#a6a6a6"};">${escHtml(crossRoleLabelText(role))}</div>`
+      : "";
     return `<td style="padding:7px 2px;text-align:center;border-bottom:1px solid #efefef;${tint(i)}font-family:${sans};font-size:10px;${
       off ? "font-style:italic;color:#cccccc;" : `color:${ROLE_COLOR[role] || "#3a3a3a"};font-weight:bold;`
-    }">${off ? "—" : escHtml(label)}</td>`;
+    }">${off ? "—" : escHtml(label)}${crossLine}</td>`;
   };
   const groupBlock = (g) => {
     const color = GROUP_COLOR[g.label] || C.grey;
@@ -119,7 +132,7 @@ export function buildScheduleEmailHtml(payload) {
       .map(
         (r) =>
           `<tr><td style="padding:7px 10px;border-bottom:1px solid #efefef;font-family:${sans};font-weight:bold;font-size:11px;color:#2b2b2b;">${escHtml(r.name)}</td>${(r.shifts || [])
-            .map((label, i) => shiftCell(label, r.roles ? r.roles[i] : null, i))
+            .map((label, i) => shiftCell(label, r.roles ? r.roles[i] : null, r.primaryRole || null, i))
             .join("")}</tr>`
       )
       .join("");

@@ -178,6 +178,18 @@ function roleCellStyle(role) {
   const accent = ROLE_COLOR[role];
   return accent ? CELL_STYLE_BY_ACCENT[accent] : undefined;
 }
+// Cross-role label (CROSS-ROLE-LABEL-BRIEF): when someone works outside their
+// primary role, a small role name renders under the shift in a lighter shade
+// of the same accent. Mirrored in api/_lib/emails.js for the schedule email.
+const ROLE_COLOR_MUTED = {
+  Bar: "#d6b294", Expo: "#d6b294", Kitchen: "#d6b294",
+  Servers: "#85a891", "Busser/Runner": "#7ea0b8", BOH: "#7ea0b8",
+  Host: "#ab86b8", Management: "#a6a6a6",
+};
+// Label wording per the brief: "Server" (singular); other roles verbatim.
+function crossRoleLabelText(role) {
+  return role === "Servers" ? "Server" : role;
+}
 const escHtml = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 // Build the offscreen DOM for one schedule sheet. Fully inline-styled and
@@ -197,12 +209,17 @@ function buildScheduleSheetNode({ sectionTitle, weekLabel, days, todayIdx, group
     )
     .join("");
   // Cell text takes the color of the role worked that day (r.roles), not the
-  // section's color — off days stay dimmed grey italic em-dashes.
-  const shiftCell = (label, role, i) => {
+  // section's color — off days stay dimmed grey italic em-dashes. Working
+  // outside the row's primary role adds a small muted role name underneath.
+  const shiftCell = (label, role, primary, i) => {
     const off = !label || label === "Off";
+    const cross = !off && role && primary && role !== primary;
+    const crossLine = cross
+      ? `<div style="font-size:9px;line-height:1.1;margin-top:1px;font-weight:700;color:${ROLE_COLOR_MUTED[role] || "#a6a6a6"};">${escHtml(crossRoleLabelText(role))}</div>`
+      : "";
     return `<td style="padding:8px 6px;text-align:center;border-bottom:1px solid #efefef;${dayTint(i)}${
       off ? `font-style:italic;color:#cccccc;` : `color:${ROLE_COLOR[role] || "#3a3a3a"};`
-    }font-family:${sans};font-size:12px;${off ? "" : "font-weight:700;"}">${off ? "—" : escHtml(label)}</td>`;
+    }font-family:${sans};font-size:12px;${off ? "" : "font-weight:700;"}">${off ? "—" : escHtml(label)}${crossLine}</td>`;
   };
   const groupBlock = (g) => {
     const color = SHEET_GROUP_COLOR[g.label] || SHEET.grey;
@@ -214,7 +231,7 @@ function buildScheduleSheetNode({ sectionTitle, weekLabel, days, todayIdx, group
       .map(
         (r) => `<tr>
         <td style="padding:8px 12px;border-bottom:1px solid #efefef;font-family:${sans};font-weight:600;font-size:12.5px;color:#2b2b2b;white-space:nowrap;">${escHtml(r.name)}</td>
-        ${r.shifts.map((label, i) => shiftCell(label, r.roles?.[i], i)).join("")}
+        ${r.shifts.map((label, i) => shiftCell(label, r.roles?.[i], r.primaryRole, i)).join("")}
       </tr>`
       )
       .join("");
@@ -1562,6 +1579,7 @@ export default function SchedulingHub({ session, onSignOut }) {
           const realWeekday = WEEKDAY_ORDER[wi];
           const type = row[realWeekday] || "OFF";
           const value = opts.some((o) => o.code === type) ? type : "OFF";
+          const workedRole = value === "OFF" ? null : roleForCell(value, GROUP_ROLE[groupKey]);
           const blockLabel = value === "OFF" ? crossSectionBlock(personName, groupKey, realWeekday) : null;
           if (blockLabel) {
             return (
@@ -1578,7 +1596,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                 className="cell-select shift-select"
                 value={value}
                 disabled={scheduleLocked}
-                style={value === "OFF" ? undefined : roleCellStyle(roleForCell(value, GROUP_ROLE[groupKey]))}
+                style={value === "OFF" ? undefined : roleCellStyle(workedRole)}
                 onChange={(e) => setPlaceholderShift(groupKey, idx, realWeekday, e.target.value)}
               >
                 {opts.map((o) => (
@@ -1587,6 +1605,11 @@ export default function SchedulingHub({ session, onSignOut }) {
                   </option>
                 ))}
               </select>
+              {workedRole && !isPrimaryRole(personName, workedRole) && (
+                <div className="cross-role-label" style={{ color: ROLE_COLOR_MUTED[workedRole] }}>
+                  {crossRoleLabelText(workedRole)}
+                </div>
+              )}
             </td>
           );
         })}
@@ -1988,6 +2011,24 @@ export default function SchedulingHub({ session, onSignOut }) {
       )
     );
   }
+  // Primary role per person for the cross-role label. FOH people: their roster
+  // row's role (the group they sit under — DEFAULT_STAFF_ROLES first entry).
+  // BOH+Kitchen: BOH membership wins (Freddy is in both rosters and is
+  // BOH-primary), else Kitchen (covers Jon, who's Kitchen-primary here even
+  // though his staff section is Management).
+  function primaryRoleFor(name) {
+    const foh = fohRoster.find((p) => p.name === name);
+    if (foh) return foh.role;
+    if ((groupRosters.boh || []).includes(name)) return "BOH";
+    if ((groupRosters.kitchen || []).includes(name)) return "Kitchen";
+    return null;
+  }
+  // No label when the person has no known primary or is working it.
+  function isPrimaryRole(name, roleWorked) {
+    const primary = primaryRoleFor(name);
+    return !primary || !roleWorked || primary === roleWorked;
+  }
+
   // FOH rows grouped by role, in the on-screen group order (for the branded
   // PDF sheet + HTML email). `roles` carries the role actually worked per day
   // (from the shift code, e.g. Akira's BAR_6CL day is "Bar") so cells color by
@@ -2001,6 +2042,7 @@ export default function SchedulingHub({ session, onSignOut }) {
           const types = week.map((d) => personShiftFor(p.name, d, patterns, overrides).type);
           return {
             name: p.name,
+            primaryRole: p.role,
             shifts: types.map(shiftLabelForType),
             roles: types.map((t) => roleForCell(t, p.role)),
           };
@@ -2037,6 +2079,7 @@ export default function SchedulingHub({ session, onSignOut }) {
       const codes = week.map((d) => placeholderPatterns[gk]?.[idx]?.[d.weekday] || "OFF");
       return {
         name: personName,
+        primaryRole: primaryRoleFor(personName),
         shifts: codes.map((c) => placeholderShiftLabel(gk, personName, c)),
         roles: codes.map((c) => roleForCell(c, GROUP_ROLE[gk])),
       };
@@ -2413,6 +2456,8 @@ export default function SchedulingHub({ session, onSignOut }) {
 
         /* ---- compact schedule dropdowns ---- */
         .cell-stack { display: flex; flex-direction: column; gap: 3px; align-items: center; }
+        /* small role name under a cross-role shift (color set inline per role) */
+        .cross-role-label { font-family: 'Manrope', sans-serif; font-size: 9px; font-weight: 700; line-height: 1.05; margin-top: 1px; letter-spacing: 0.2px; text-align: center; }
         .cell-select { font-family: 'Space Mono', monospace; font-size: 10px; font-weight: 700; padding: 4px 3px; border-radius: 4px; border: 1px solid #d6cfbb; background: #FBF8EF; color: #8c8574; cursor: pointer; max-width: 100%; width: auto; }
         .cell-select:disabled { opacity: 0.55; cursor: not-allowed; }
         .role-select { font-size: 9px; padding: 2px 2px; color: #6b6355; background: #F1EFE6; border-color: rgba(43,42,37,0.18); }
@@ -3073,6 +3118,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                                 const cellRole = cellRoleSel[selKey] || roleFromCode(code) || personRoles[0];
                                 const opts = roleOptions[cellRole] || [{ code: "OFF", label: "Off" }];
                                 const value = opts.some((o) => o.code === code) ? code : "OFF";
+                                const workedRole = value === "OFF" ? null : roleForCell(value, cellRole);
                                 const timeOff = approvedOffFor(p.name, weekday);
                                 return (
                                   <td key={w} className="shift-cell">
@@ -3094,13 +3140,18 @@ export default function SchedulingHub({ session, onSignOut }) {
                                         className="cell-select shift-select"
                                         value={value}
                                         disabled={scheduleLocked}
-                                        style={value === "OFF" ? undefined : roleCellStyle(roleForCell(value, cellRole))}
+                                        style={value === "OFF" ? undefined : roleCellStyle(workedRole)}
                                         onChange={(e) => setCellShift(p.name, weekday, e.target.value)}
                                       >
                                         {opts.map((o) => (
                                           <option key={o.code} value={o.code}>{o.label}</option>
                                         ))}
                                       </select>
+                                      {workedRole && !isPrimaryRole(p.name, workedRole) && (
+                                        <div className="cross-role-label" style={{ color: ROLE_COLOR_MUTED[workedRole] }}>
+                                          {crossRoleLabelText(workedRole)}
+                                        </div>
+                                      )}
                                     </div>
                                   </td>
                                 );
