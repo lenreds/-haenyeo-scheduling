@@ -102,6 +102,39 @@ export async function insertGmailRail({ staffId, unmatchedName, type, dates, not
   return { duplicate: false };
 }
 
+// Manual Rail entry from the "+ Add Request" form. No gmail ids (the reply
+// flow already skips rows without a thread). Retries without logged_by if
+// migration 0008 hasn't been run yet.
+export async function insertManualRail({ staffId, type, dates, note, loggedBy }) {
+  const row = {
+    staff_id: staffId,
+    type,
+    dates,
+    note: note || null,
+    status: "pending",
+    urgent: false,
+    source: "manual",
+    logged_by: loggedBy || null,
+  };
+  let { data, error } = await admin().from("rail_requests").insert(row).select("id").single();
+  if (error && error.code === "42703") {
+    const { logged_by, ...pre0008 } = row;
+    ({ data, error } = await admin().from("rail_requests").insert(pre0008).select("id").single());
+  }
+  if (error) throw error;
+  return data; // { id }
+}
+
+export async function getStaffById(id) {
+  const { data, error } = await admin()
+    .from("staff")
+    .select("id, name, personal_email, registered, active")
+    .eq("id", id)
+    .maybeSingle();
+  if (error) throw error;
+  return data || null;
+}
+
 export async function gmailMessageExists(messageId) {
   const { data, error } = await admin()
     .from("rail_requests")

@@ -105,6 +105,22 @@ export async function triggerTipSheetSend(payload, accessToken) {
   }
 }
 
+// Manual Rail entry ("+ Add Request"): the server inserts the pending row and
+// sends the paper-trail + staff confirmation emails.
+export async function submitManualRail({ staffId, type, dates, note, loggedBy }, accessToken) {
+  try {
+    const res = await fetch("/api/manual-rail", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}) },
+      body: JSON.stringify({ staffId, type, dates, note, loggedBy }),
+    });
+    if (!res.ok) return { ok: false, error: `HTTP ${res.status}` };
+    return await res.json();
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
 export async function insertStaff({ name, role, section }) {
   const { data, error } = await supabase
     .from("staff")

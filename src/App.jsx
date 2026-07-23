@@ -1,5 +1,5 @@
-import React, { useState, useMemo, useEffect } from "react";
-import { Check, X, AlertTriangle, Users, Package, Clock, ChevronLeft, ChevronRight, Printer, Calendar, Lock, Unlock, LogOut } from "lucide-react";
+import React, { useState, useMemo, useEffect, useRef } from "react";
+import { Check, X, AlertTriangle, Users, Package, Clock, ChevronLeft, ChevronRight, Printer, FileDown, Calendar, Lock, Unlock, LogOut } from "lucide-react";
 import {
   fetchInitial,
   fetchRailRequests,
@@ -21,6 +21,7 @@ import {
   denyInfoUpdate,
   triggerSchedulePublish,
   triggerTipSheetSend,
+  submitManualRail,
 } from "./lib/data.js";
 import QRCode from "qrcode";
 
@@ -29,6 +30,108 @@ function numOrNull(v) {
   if (v === "" || v === null || v === undefined) return null;
   const n = Number(v);
   return Number.isNaN(n) ? null : n;
+}
+
+/* ---- Save as PDF ---- */
+// Snapshot a DOM node print-style and download it as a PDF (no print dialog).
+// html2canvas + jsPDF load on demand so they stay out of the main bundle. In
+// the offscreen clone: interactive chrome is stripped, <select>/<input> become
+// plain text (html2canvas doesn't paint a select's chosen option), and an
+// optional logo header is prepended. Tall captures paginate onto extra pages.
+const PDF_STRIP_ALWAYS = [".subject-preview", ".published-badge", ".publish-btn", ".print-btn", ".today-btn", ".back-btn"];
+async function exportNodeAsPdf(node, filename, { header, orientation = "portrait", strip = [] } = {}) {
+  const [{ default: html2canvas }, { jsPDF }] = await Promise.all([import("html2canvas"), import("jspdf")]);
+  // Cloned selects/inputs lose their JS-set values — read them from the live
+  // node (querySelectorAll order matches the structurally identical clone).
+  const liveSelects = Array.from(node.querySelectorAll("select"));
+  const liveInputs = Array.from(node.querySelectorAll("input"));
+  node.setAttribute("data-pdf-root", "1");
+  let canvas;
+  try {
+    canvas = await html2canvas(node, {
+      scale: 2,
+      backgroundColor: "#ffffff",
+      onclone: (doc) => {
+        const root = doc.querySelector('[data-pdf-root="1"]');
+        if (!root) return;
+        root.querySelectorAll([...PDF_STRIP_ALWAYS, ...strip].join(", ")).forEach((el) => el.remove());
+        root.querySelectorAll("select").forEach((sel, i) => {
+          const live = liveSelects[i];
+          const span = doc.createElement("span");
+          span.style.cssText = "font-family:'Space Mono',monospace;font-size:10px;font-weight:700;color:#2B2A25;";
+          span.textContent = live && live.selectedIndex >= 0 ? (live.options[live.selectedIndex]?.text || "") : "";
+          sel.replaceWith(span);
+        });
+        root.querySelectorAll("input").forEach((inp, i) => {
+          const span = doc.createElement("span");
+          span.style.cssText = "font-family:inherit;font-size:12px;color:#2B2A25;";
+          span.textContent = liveInputs[i] ? String(liveInputs[i].value || "") : "";
+          inp.replaceWith(span);
+        });
+        if (header) {
+          const h = doc.createElement("div");
+          h.style.cssText = "text-align:center;margin-bottom:14px;";
+          const img = doc.createElement("img");
+          img.src = HAENYEO_LOGO;
+          img.alt = "Haenyeo";
+          img.style.cssText = "max-width:230px;max-height:86px;object-fit:contain;";
+          h.appendChild(img);
+          if (header.title) {
+            const t = doc.createElement("div");
+            t.style.cssText = "font-family:'Space Mono',monospace;font-weight:700;font-size:13px;color:#2B2A25;margin-top:6px;letter-spacing:0.5px;";
+            t.textContent = header.title;
+            h.appendChild(t);
+          }
+          root.prepend(h);
+        }
+      },
+    });
+  } finally {
+    node.removeAttribute("data-pdf-root");
+  }
+
+  // Stripping chrome makes the clone shorter than the live node, so the canvas
+  // ends in blank rows — scan up from the bottom and crop them off.
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  let bottom = canvas.height;
+  const maxScan = Math.min(canvas.height - 1, 4000);
+  for (let scanned = 0; scanned < maxScan; scanned++) {
+    const row = ctx.getImageData(0, bottom - 1, canvas.width, 1).data;
+    let content = false;
+    for (let x = 0; x < row.length; x += 4) {
+      if (row[x + 3] !== 0 && (row[x] < 246 || row[x + 1] < 246 || row[x + 2] < 246)) { content = true; break; }
+    }
+    if (content) break;
+    bottom--;
+  }
+  let out = canvas;
+  const outH = Math.min(canvas.height, bottom + 24);
+  if (outH < canvas.height - 4) {
+    out = document.createElement("canvas");
+    out.width = canvas.width;
+    out.height = outH;
+    out.getContext("2d").drawImage(canvas, 0, 0);
+  }
+
+  const pdf = new jsPDF({ orientation, unit: "pt", format: "letter" });
+  const pageW = pdf.internal.pageSize.getWidth();
+  const pageH = pdf.internal.pageSize.getHeight();
+  const margin = 26;
+  const availW = pageW - margin * 2;
+  const availH = pageH - margin * 2;
+  const imgW = availW;
+  const imgH = (out.height / out.width) * imgW;
+  const data = out.toDataURL("image/png");
+  const pages = Math.max(1, Math.ceil(imgH / availH));
+  for (let p = 0; p < pages; p++) {
+    if (p > 0) pdf.addPage();
+    pdf.addImage(data, "PNG", margin, margin - p * availH, imgW, imgH);
+    // Mask the margins so page n's overflow doesn't bleed into page n±1's edges.
+    pdf.setFillColor(255, 255, 255);
+    pdf.rect(0, 0, pageW, margin, "F");
+    pdf.rect(0, pageH - margin, pageW, margin + 1, "F");
+  }
+  pdf.save(filename);
 }
 
 const HAENYEO_LOGO = "data:image/png;base64,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";
@@ -619,6 +722,13 @@ export default function SchedulingHub({ session, onSignOut }) {
   const [railBusy, setRailBusy] = useState(null); // id being resolved (disables its buttons)
   const [partialOpen, setPartialOpen] = useState({}); // TIME OFF id -> partial-approve field open
   const [partialDates, setPartialDates] = useState({}); // TIME OFF id -> approved-dates text
+  const [manualOpen, setManualOpen] = useState(false); // "+ Add Request" modal
+  const [manualForm, setManualForm] = useState({ staffId: "", type: "REQUEST OFF", dates: "", note: "", loggedBy: "" });
+  const [manualBusy, setManualBusy] = useState(false);
+  const [manualError, setManualError] = useState(null);
+  const [pdfBusy, setPdfBusy] = useState(null); // "schedule" | "tips" while exporting
+  const scheduleCardRef = useRef(null);
+  const tipCardRef = useRef(null);
   const [infoUpdates, setInfoUpdates] = useState([]); // pending staff_info_updates
   const [staffProfile, setStaffProfile] = useState(null); // open staff id in directory
   const [qrModal, setQrModal] = useState(null); // open QR key
@@ -1085,6 +1195,39 @@ export default function SchedulingHub({ session, onSignOut }) {
     }
   }, [qrPrinting, qrPrintUrls]);
 
+  // Save-as-PDF (item 2): export the visible schedule sub-tab / tip sheet.
+  async function exportSchedulePdf() {
+    if (pdfBusy || !scheduleCardRef.current) return;
+    setPdfBusy("schedule");
+    try {
+      const [fileSection, labelSection] = {
+        foh: ["FOH", "Front of House"],
+        bohkitchen: ["BOH-Kitchen", "BOH & Kitchen"],
+        management: ["Management", "Management"],
+      }[scheduleView] || ["Schedule", "Schedule"];
+      const fmt = (d) => `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      const range = activeWeek ? `${fmt(activeWeek[0].date)}-to-${fmt(activeWeek[6].date)}` : "week";
+      await exportNodeAsPdf(scheduleCardRef.current, `Haenyeo-Schedule-${fileSection}-${range}.pdf`, {
+        orientation: "landscape",
+        header: { title: `${labelSection} — ${formatWeekRange(activeWeek)}` },
+        strip: [".print-header", ".subtabs", ".cal-legend", ".template-note", ".template-icon"],
+      });
+    } catch (e) {
+      console.error("Schedule PDF export failed:", e);
+    }
+    setPdfBusy(null);
+  }
+  async function exportTipSheetPdf() {
+    if (pdfBusy || !tipCardRef.current) return;
+    setPdfBusy("tips");
+    try {
+      await exportNodeAsPdf(tipCardRef.current, `Haenyeo-TipSheet-${tipDateIso}.pdf`, { orientation: "portrait" });
+    } catch (e) {
+      console.error("Tip sheet PDF export failed:", e);
+    }
+    setPdfBusy(null);
+  }
+
   // Re-pull rail requests from the DB (used after a manual Gmail poll so new
   // auto-created pending entries show up without a full reload).
   function reloadRail() {
@@ -1109,6 +1252,28 @@ export default function SchedulingHub({ session, onSignOut }) {
     } finally {
       setGmailChecking(false);
     }
+  }
+
+  // Manual Rail entry: submit the "+ Add Request" form. The server inserts the
+  // pending row and sends the paper-trail + staff confirmation emails; the
+  // reload pulls the new entry into the pending queue.
+  async function submitManualEntry() {
+    const f = manualForm;
+    if (manualBusy || !f.staffId || !f.dates.trim() || !f.loggedBy) return;
+    setManualBusy(true);
+    setManualError(null);
+    const res = await submitManualRail(
+      { staffId: f.staffId, type: f.type, dates: f.dates.trim(), note: f.note.trim(), loggedBy: f.loggedBy },
+      session?.access_token
+    );
+    if (res?.ok) {
+      await reloadRail();
+      setManualOpen(false);
+      setManualForm({ staffId: "", type: "REQUEST OFF", dates: "", note: "", loggedBy: "" });
+    } else {
+      setManualError(res?.error || "Couldn't save the request. Try again.");
+    }
+    setManualBusy(false);
   }
 
   // Load the saved tip sheet for the selected date (or clear the form if none).
@@ -2069,6 +2234,10 @@ export default function SchedulingHub({ session, onSignOut }) {
         .delete-modal-body { font-size: 13.5px; color: #4a473d; line-height: 1.5; }
         .delete-modal-warn { font-size: 12.5px; color: #B23A2F; background: #FBEDEA; border: 1px solid #e6c3bc; border-radius: 7px; padding: 8px 11px; margin: 12px 0 4px; line-height: 1.45; }
         .delete-modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
+        .manual-add-btn { margin-left: auto; font-family: 'Plus Jakarta Sans', sans-serif; font-weight: 700; font-size: 11.5px; padding: 5px 12px; border-radius: 8px; border: 1px solid rgba(47,52,50,0.15); background: #2F3432; color: #F5F0E3; cursor: pointer; text-transform: none; letter-spacing: 0; }
+        .manual-field-label { display: block; font-family: 'Space Mono', monospace; font-size: 10.5px; letter-spacing: 0.6px; text-transform: uppercase; color: #85897F; margin: 12px 0 4px; }
+        .manual-field { width: 100%; box-sizing: border-box; font-family: 'Plus Jakarta Sans', sans-serif; font-size: 13px; color: #2B2A25; background: #FDFBF4; border: 1px solid #d8d2c2; border-radius: 7px; padding: 8px 10px; }
+        textarea.manual-field { resize: vertical; min-height: 64px; }
         .delete-confirm-btn { font-family: 'Plus Jakarta Sans', sans-serif; font-weight: 700; font-size: 12.5px; padding: 8px 18px; border-radius: 9px; border: none; background: #B23A2F; color: #fff; cursor: pointer; }
         .delete-confirm-btn:hover:not(:disabled) { background: #9c3128; }
         .delete-confirm-btn:disabled { opacity: 0.6; cursor: not-allowed; }
@@ -2157,6 +2326,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         <button className={`tab-btn ${tab === "template" ? "active" : ""}`} onClick={() => setTab("template")}>Set Schedule</button>
         <button className={`tab-btn ${tab === "tips" ? "active" : ""}`} onClick={() => setTab("tips")}>Tip Sheet</button>
         <button className={`tab-btn ${tab === "staff" ? "active" : ""}`} onClick={() => setTab("staff")}>Staff</button>
+        <button className={`tab-btn ${tab === "invoices" ? "active" : ""}`} onClick={() => setTab("invoices")}>Invoices</button>
       </div>
 
       {tab === "rail" && (
@@ -2196,7 +2366,10 @@ export default function SchedulingHub({ session, onSignOut }) {
             </div>
             <div className="nr-grid">
               <div>
-                <div className="nr-label"><Clock size={13} /> Pending Decisions <span className="nr-count">{pending.length}</span></div>
+                <div className="nr-label">
+                  <Clock size={13} /> Pending Decisions <span className="nr-count">{pending.length}</span>
+                  <button className="manual-add-btn" onClick={() => { setManualError(null); setManualOpen(true); }} title="Manually log a scheduling request made in person">+ Add Request</button>
+                </div>
                 {pending.length === 0 && <div className="nr-empty">Nothing waiting on you right now.</div>}
                 {pending.map((item) => {
                   const style = TYPE_STYLES[item.type] || { badge: "#7B93A3", label: item.type };
@@ -2309,6 +2482,64 @@ export default function SchedulingHub({ session, onSignOut }) {
               </div>
             </div>
           </div>
+
+          {manualOpen && (
+            <div className="day-popup-backdrop" onClick={() => !manualBusy && setManualOpen(false)}>
+              <div className="delete-modal" onClick={(e) => e.stopPropagation()}>
+                <div className="delete-modal-title">Add Request</div>
+                <div className="delete-modal-body">
+                  Log a scheduling request made in person. A paper-trail copy goes to the scheduling inbox, and the staff member gets a confirmation email if they're registered.
+                </div>
+                <label className="manual-field-label" htmlFor="manual-staff">Staff member</label>
+                <select id="manual-staff" className="manual-field" value={manualForm.staffId} disabled={manualBusy}
+                  onChange={(e) => setManualForm((f) => ({ ...f, staffId: e.target.value }))}>
+                  <option value="">Select staff…</option>
+                  {staffList.filter((s) => s.id && s.active !== false).map((s) => (
+                    <option key={s.id} value={s.id}>{s.name}</option>
+                  ))}
+                </select>
+                <label className="manual-field-label" htmlFor="manual-type">Type</label>
+                <select id="manual-type" className="manual-field" value={manualForm.type} disabled={manualBusy}
+                  onChange={(e) => setManualForm((f) => ({ ...f, type: e.target.value }))}>
+                  {["REQUEST OFF", "SHIFT SWAP", "COVERAGE REQUEST", "TIME OFF"].map((t) => (
+                    <option key={t} value={t}>{TYPE_STYLES[t].label}</option>
+                  ))}
+                </select>
+                <label className="manual-field-label" htmlFor="manual-dates">Dates</label>
+                <input id="manual-dates" className="manual-field" type="text" disabled={manualBusy}
+                  placeholder='e.g. "Jul 28", "Jul 28 to Aug 4", or "Jul 28, Jul 30"'
+                  value={manualForm.dates}
+                  onChange={(e) => setManualForm((f) => ({ ...f, dates: e.target.value }))} />
+                <label className="manual-field-label" htmlFor="manual-note">Note</label>
+                <textarea id="manual-note" className="manual-field" rows={3} disabled={manualBusy}
+                  placeholder="Any context or details (optional)…"
+                  value={manualForm.note}
+                  onChange={(e) => setManualForm((f) => ({ ...f, note: e.target.value }))} />
+                <label className="manual-field-label" htmlFor="manual-loggedby">Logged by</label>
+                {(() => {
+                  const mgrs = staffList
+                    .filter((s) => (s.section || "") === "Management" && s.active !== false)
+                    .map((s) => s.name);
+                  const names = mgrs.length ? mgrs : ["Lenis", "Jon"];
+                  return (
+                    <select id="manual-loggedby" className="manual-field" value={manualForm.loggedBy} disabled={manualBusy}
+                      onChange={(e) => setManualForm((f) => ({ ...f, loggedBy: e.target.value }))}>
+                      <option value="">Select manager…</option>
+                      {names.map((n) => <option key={n} value={n}>{n}</option>)}
+                    </select>
+                  );
+                })()}
+                {manualError && <div className="delete-modal-warn">{manualError}</div>}
+                <div className="delete-modal-actions">
+                  <button className="nr-btn nr-btn-deny" disabled={manualBusy} onClick={() => setManualOpen(false)}>Cancel</button>
+                  <button className="nr-btn nr-btn-approve" disabled={manualBusy || !manualForm.staffId || !manualForm.dates.trim() || !manualForm.loggedBy}
+                    onClick={submitManualEntry}>
+                    {manualBusy ? "Saving…" : "Submit"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -2499,10 +2730,13 @@ export default function SchedulingHub({ session, onSignOut }) {
 
       {tab === "template" && (
         <div className="cal-wrap" key="template">
-          <div className="cal-card">
+          <div className="cal-card" ref={scheduleCardRef}>
             <div className="print-header">
               <div style={{ display: "flex", gap: 8 }}>
                 <button className="print-btn" onClick={() => window.print()}><Printer size={13} /> Print</button>
+                <button className="print-btn" disabled={pdfBusy === "schedule"} onClick={exportSchedulePdf}>
+                  <FileDown size={13} /> {pdfBusy === "schedule" ? "Saving…" : "Save as PDF"}
+                </button>
                 <button className={`print-btn ${scheduleLocked ? "lock-active" : ""}`} onClick={() => setScheduleLocked((l) => !l)}>
                   {scheduleLocked ? <Lock size={13} /> : <Unlock size={13} />} {scheduleLocked ? "Locked" : "Lock Schedule"}
                 </button>
@@ -2711,7 +2945,7 @@ export default function SchedulingHub({ session, onSignOut }) {
 
       {tab === "tips" && (
         <div className="cal-wrap" key="tips">
-          <div className="cal-card">
+          <div className="cal-card" ref={tipCardRef}>
             {tipFinalized && (
               <div className="tip-finalized-banner">
                 <Lock size={14} /> FINALIZED{tipFinalizedAt ? ` — ${new Date(tipFinalizedAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}` : ""}
@@ -2946,6 +3180,9 @@ export default function SchedulingHub({ session, onSignOut }) {
                         <Lock size={13} /> {finalizing ? "Finalizing…" : "Finalize"}
                       </button>
                     )}
+                    <button className="print-btn" disabled={pdfBusy === "tips"} onClick={exportTipSheetPdf}>
+                      <FileDown size={13} /> {pdfBusy === "tips" ? "Saving…" : "Save as PDF"}
+                    </button>
                     <button className="print-btn" onClick={() => window.print()}><Printer size={13} /> Print</button>
                   </div>
                 </div>
@@ -3181,6 +3418,16 @@ export default function SchedulingHub({ session, onSignOut }) {
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {tab === "invoices" && (
+        <div className="cal-wrap" key="invoices">
+          <div className="cal-card" style={{ textAlign: "center", padding: "56px 24px 64px" }}>
+            <img src={HAENYEO_LOGO} alt="Haenyeo" style={{ maxWidth: 220, maxHeight: 84, objectFit: "contain" }} />
+            <h2 style={{ fontFamily: "'Space Mono', monospace", fontSize: 22, letterSpacing: 1, color: "#2B2A25", margin: "20px 0 8px" }}>Invoices</h2>
+            <div style={{ fontFamily: "'Manrope', sans-serif", fontSize: 13.5, color: "#85897F" }}>Invoice tracking coming soon.</div>
+          </div>
         </div>
       )}
 

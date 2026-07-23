@@ -54,6 +54,32 @@ export function buildScheduleEmail({ weekLabel, dayHeaders, rows, groups, sectio
   return { subject, body };
 }
 
+// Manual Rail entry ("+ Add Request"): paper-trail copy to the scheduling
+// inbox. type is the canonical uppercase rail type ("REQUEST OFF" etc.).
+export function buildManualEntryInboxEmail({ managerName, staffName, type, dates, note }) {
+  const subject = `[MANUAL ENTRY] – ${type} – ${staffName} – ${dates}`;
+  const body =
+`A scheduling request was manually logged by ${managerName}.
+
+Staff: ${staffName}
+Type: ${type}
+Dates: ${dates}${note ? `\nNote: ${note}` : ""}
+
+This entry is now pending in the Rail.
+${SIG}`;
+  return { subject, body };
+}
+
+// Manual Rail entry: confirmation to the staff member (registered only).
+export function buildManualEntryStaffEmail({ staffName, type, dates, note }) {
+  const subject = "Your scheduling request has been logged";
+  const body =
+`Hi ${staffName}, just confirming that your ${String(type || "").toLowerCase()} request for ${dates} has been logged in the system. You'll hear back once it's been reviewed.
+
+${note ? `${note}\n\n` : ""}${SIG}`;
+  return { subject, body };
+}
+
 // dayDateLabel: "Thursday, Jul 24"; rows: [{ name, position, points, hours, final }];
 // recipientName/recipientPayout personalize the highlighted line per email.
 export function buildTipSheetEmail({ dayDateLabel, floorPool, rows, barTipOut, barRecipients, floorCheckText, recipientName, recipientPayout }) {
