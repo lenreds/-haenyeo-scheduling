@@ -1,13 +1,16 @@
 // POST /api/send-schedule — emails a week's schedule to registered staff.
 // Manager-JWT auth. Body: { weekLabel, dayHeaders:[7], rows:[{name,shifts:[7]}]
-// OR groups:[{label,rows}], sectionLabel?, sections?:["FOH"|"BOH"|"Kitchen"] }.
+// OR groups:[{label,rows}], sectionLabel?, sections?:["FOH"|"BOH"|"Kitchen"],
+// days?:[{dow,date}×7], todayIdx?, managerOn?:[names[]×7] }.
 // `sections` restricts recipients by staff.section (case-insensitive); omitted =
-// all registered. Same email to each; tagged Sent/Schedules.
+// all registered. Sends the branded HTML sheet (plain-text alternative + the
+// real icon as an inline CID image). Same email to each; tagged Sent/Schedules.
 
 import { GMAIL_REFRESH_TOKEN } from "./_lib/config.js";
 import { getAccessToken, sendMessage, modifyMessage } from "./_lib/google.js";
-import { buildRawEmail } from "./_lib/reply.js";
-import { buildScheduleEmail } from "./_lib/emails.js";
+import { buildHtmlRawEmail } from "./_lib/reply.js";
+import { buildScheduleEmailHtml } from "./_lib/emails.js";
+import { HAENYEO_ICON_B64 } from "./_lib/brand.js";
 import { makeLabeler, LABELS } from "./_lib/labels.js";
 import { getGmailToken, isManager, fetchRegisteredStaff } from "./_lib/store.js";
 
@@ -21,7 +24,7 @@ export default async function handler(req, res) {
   const token = (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
   if (!(await isManager(token))) return res.status(401).json({ error: "unauthorized" });
 
-  const { weekLabel, dayHeaders, rows, groups, sectionLabel, sections } = readBody(req);
+  const { weekLabel, dayHeaders, rows, groups, sectionLabel, sections, days, todayIdx, managerOn } = readBody(req);
   if (!weekLabel || !Array.isArray(dayHeaders) || (!Array.isArray(rows) && !Array.isArray(groups))) {
     return res.status(400).json({ error: "weekLabel, dayHeaders, and rows or groups required" });
   }
@@ -37,7 +40,9 @@ export default async function handler(req, res) {
       const want = sections.map((s) => String(s).toLowerCase());
       recipients = recipients.filter((r) => want.includes(String(r.section || "").toLowerCase()));
     }
-    const { subject, body } = buildScheduleEmail({ weekLabel, dayHeaders, rows, groups, sectionLabel });
+    const { subject, text, html } = buildScheduleEmailHtml({
+      weekLabel, dayHeaders, rows, groups, sectionLabel, days, todayIdx, managerOn,
+    });
     const labeler = makeLabeler(accessToken);
     let labelId = null;
     try { labelId = await labeler.ensure(LABELS.sentSchedules); } catch { /* non-fatal */ }
@@ -46,7 +51,10 @@ export default async function handler(req, res) {
     const failures = [];
     for (const r of recipients) {
       try {
-        const raw = buildRawEmail({ to: r.personal_email, subject, body });
+        const raw = buildHtmlRawEmail({
+          to: r.personal_email, subject, text, html,
+          images: [{ cid: "haenyeo-icon", b64: HAENYEO_ICON_B64 }],
+        });
         const msg = await sendMessage(accessToken, { raw });
         if (labelId && msg?.id) await modifyMessage(accessToken, msg.id, { addLabelIds: [labelId] }).catch(() => {});
         sent++;

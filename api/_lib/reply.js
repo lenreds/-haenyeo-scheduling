@@ -73,3 +73,55 @@ export function buildRawEmail({ to, subject, inReplyTo, body }) {
   const raw = `${headers.join("\r\n")}\r\n\r\n${encodedBody}`;
   return toBase64Url(Buffer.from(raw, "utf8"));
 }
+
+const wrap76 = (b64) => b64.replace(/(.{76})/g, "$1\r\n");
+
+// HTML email with a plain-text alternative and inline CID images (Gmail blocks
+// data: URIs in HTML bodies, so the logo travels as a multipart/related part
+// referenced via <img src="cid:...">). images: [{ cid, b64, mime? }].
+// Structure: multipart/related( multipart/alternative(text, html), images… ).
+export function buildHtmlRawEmail({ to, subject, text, html, images = [] }) {
+  const rel = "haenyeo-rel-8f3a1c";
+  const alt = "haenyeo-alt-8f3a1c";
+  const altPart = [
+    `--${alt}`,
+    'Content-Type: text/plain; charset="UTF-8"',
+    "Content-Transfer-Encoding: base64",
+    "",
+    wrap76(Buffer.from(text, "utf8").toString("base64")),
+    `--${alt}`,
+    'Content-Type: text/html; charset="UTF-8"',
+    "Content-Transfer-Encoding: base64",
+    "",
+    wrap76(Buffer.from(html, "utf8").toString("base64")),
+    `--${alt}--`,
+  ].join("\r\n");
+  const imageParts = images
+    .map((img) =>
+      [
+        `--${rel}`,
+        `Content-Type: ${img.mime || "image/png"}`,
+        "Content-Transfer-Encoding: base64",
+        `Content-ID: <${img.cid}>`,
+        `Content-Disposition: inline; filename="${img.cid}.png"`,
+        "",
+        wrap76(img.b64),
+      ].join("\r\n")
+    )
+    .join("\r\n");
+  const raw = [
+    `To: ${to}`,
+    `Subject: ${encodeSubject(subject)}`,
+    "MIME-Version: 1.0",
+    `Content-Type: multipart/related; boundary="${rel}"`,
+    "",
+    `--${rel}`,
+    `Content-Type: multipart/alternative; boundary="${alt}"`,
+    "",
+    altPart,
+    imageParts,
+    `--${rel}--`,
+    "",
+  ].join("\r\n");
+  return toBase64Url(Buffer.from(raw, "utf8"));
+}
