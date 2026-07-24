@@ -270,17 +270,17 @@ function buildScheduleSheetNode({ sectionTitle, weekLabel, days, todayIdx, group
   const node = document.createElement("div");
   node.style.cssText = "position:absolute;left:-10000px;top:0;width:1560px;background:#ffffff;padding:0 0 6px;";
   node.innerHTML = `
-    <div style="background:${SHEET.dark};border-radius:14px 14px 0 0;padding:20px 26px;display:flex;align-items:center;justify-content:space-between;">
+    <div style="background:#ffffff;border-bottom:2px solid #2b2a25;padding:16px 26px;display:flex;align-items:center;justify-content:space-between;">
       <div style="display:flex;align-items:center;gap:14px;">
-        <img src="${HAENYEO_ICON}" alt="" style="width:38px;height:38px;object-fit:contain;" />
+        <img src="${HAENYEO_ICON}" alt="" style="width:36px;height:36px;object-fit:contain;" />
         <div>
-          <div style="font-family:${mono};font-weight:700;font-size:21px;letter-spacing:7px;color:#ffffff;">HAENYEO</div>
-          <div style="font-family:${mono};font-weight:700;font-size:10.5px;letter-spacing:3px;color:${SHEET.orange};margin-top:3px;">${escHtml(sectionTitle)}</div>
+          <div style="font-family:${mono};font-weight:700;font-size:20px;letter-spacing:6px;color:#2b2a25;">HAENYEO</div>
+          <div style="font-family:${mono};font-weight:700;font-size:10px;letter-spacing:2.5px;color:${SHEET.orange};margin-top:2px;">${escHtml(sectionTitle)}</div>
         </div>
       </div>
       <div style="text-align:right;">
-        <div style="font-family:${mono};font-weight:700;font-size:15px;letter-spacing:1px;color:#ffffff;">${escHtml(weekLabel)}</div>
-        <div style="font-family:${sans};font-size:10.5px;color:#9a9a9a;margin-top:3px;">Printed ${printedOn}</div>
+        <div style="font-family:${mono};font-weight:700;font-size:14px;letter-spacing:1px;color:#2b2a25;">${escHtml(weekLabel)}</div>
+        <div style="font-family:${sans};font-size:10px;color:#8a8a8a;margin-top:2px;">Printed ${printedOn}</div>
       </div>
     </div>
     <table style="width:100%;border-collapse:collapse;table-layout:fixed;">
@@ -575,11 +575,20 @@ const SECTIONS = ["FOH", "BOH", "Kitchen", "Management"];
 // time shows a visible placeholder so it's obvious the env var wasn't set.
 const SCHEDULE_INBOX = "haenyeo.schedule@gmail.com";
 const REGISTER_CODE = import.meta.env.VITE_STAFF_REGISTER_CODE || "CODEWORD-NOT-SET";
+// RFC 6068: mailto: links must encode spaces as %20 (not +), newlines as %0A,
+// and other reserved chars accordingly. URLSearchParams uses + for spaces, so we
+// manually encode to the mailto spec instead.
 function mailtoLink(subject, body) {
-  const p = new URLSearchParams();
-  p.set("subject", subject);
-  if (body) p.set("body", body);
-  return `mailto:${SCHEDULE_INBOX}?${p.toString()}`;
+  const encode = (s) => {
+    if (!s) return "";
+    return encodeURIComponent(s)
+      .replace(/\(/g, "%28")
+      .replace(/\)/g, "%29")
+      .replace(/'/g, "%27");
+  };
+  const parts = [`subject=${encode(subject)}`];
+  if (body) parts.push(`body=${encode(body)}`);
+  return `mailto:${SCHEDULE_INBOX}?${parts.join("&")}`;
 }
 const QR_CODES = [
   { key: "register", label: "Register", printLabel: "Register", instruction: 'Replace "Your Name Here" with your full name, add your phone number, and send', subject: `[REGISTER] – Your Name Here – ${REGISTER_CODE}`, body: "My best phone number is: " },
@@ -915,6 +924,7 @@ export default function SchedulingHub({ session, onSignOut }) {
   const [nameToId, setNameToId] = useState({});
   const [calView, setCalView] = useState("month"); // 'month' | 'week'
   const [weekIndex, setWeekIndex] = useState(0);
+  const [calMonthView, setCalMonthView] = useState(1); // 1 or 3 months
   const [patterns, setPatterns] = useState(() => normalizePatterns(PERSON_PATTERNS, DEFAULT_PRIMARY_ROLE));
   const [overrides, setOverrides] = useState(OVERRIDES);
   const [staffList, setStaffList] = useState(() =>
@@ -2366,6 +2376,10 @@ export default function SchedulingHub({ session, onSignOut }) {
         .legend-swatch { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
 
         .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
+        .cal-grid.multi-month { display: grid; grid-template-columns: repeat(3, minmax(350px, 1fr)); gap: 20px; }
+        .cal-grid.multi-month > .cal-month { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+        .cal-grid.multi-month .cal-weekday { font-size: 9.5px; padding-bottom: 4px; min-height: 18px; }
+        .cal-grid.multi-month .cal-day { min-height: 56px; padding: 5px 4px 6px; font-size: 12px; }
         .cal-weekday { font-family: 'Space Mono', monospace; font-size: 10.5px; letter-spacing: 1.5px; text-transform: uppercase; color: #8c8574; text-align: center; padding-bottom: 6px; }
         .cal-day { background: #FBF8EF; border: 1px solid rgba(43,42,37,0.08); border-radius: 6px; padding: 8px 8px 10px; min-height: 84px; cursor: pointer; transition: transform 0.12s ease, box-shadow 0.12s ease; position: relative; }
         .cal-day:hover { transform: translateY(-2px); box-shadow: 0 6px 14px rgba(0,0,0,0.18); }
@@ -2706,6 +2720,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         <button className={`tab-btn ${tab === "tips" ? "active" : ""}`} onClick={() => setTab("tips")}>Tip Sheet</button>
         <button className={`tab-btn ${tab === "staff" ? "active" : ""}`} onClick={() => setTab("staff")}>Staff</button>
         <button className={`tab-btn ${tab === "invoices" ? "active" : ""}`} onClick={() => setTab("invoices")}>Invoices</button>
+        <button className={`tab-btn ${tab === "menu" ? "active" : ""}`} onClick={() => setTab("menu")}>Menu</button>
       </div>
 
       {tab === "rail" && (
@@ -2925,15 +2940,32 @@ export default function SchedulingHub({ session, onSignOut }) {
       {tab === "calendar" && calView === "month" && (
         <div className="cal-wrap" key="month">
           <div className="cal-card">
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16, paddingBottom: 12, borderBottom: "1px solid #e4e4e4" }}>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button className="back-btn" onClick={() => setWeekIndex((i) => Math.max(0, i - calMonthView))}><ChevronLeft size={14} /> Prev</button>
+                <span style={{ fontFamily: "'Space Mono', monospace", fontSize: 12, color: "#6b6355", alignSelf: "center", minWidth: 120 }}>
+                  {calMonthView === 1
+                    ? weeks[weekIndex]?.[0]?.date?.toLocaleDateString(undefined, { month: "short", year: "numeric" })
+                    : `${weeks[weekIndex]?.[0]?.date?.toLocaleDateString(undefined, { month: "short" })} – ${weeks[Math.min(weekIndex + calMonthView - 1, weeks.length - 1)]?.[6]?.date?.toLocaleDateString(undefined, { month: "short", year: "numeric" })}`}
+                </span>
+                <button className="back-btn" onClick={() => setWeekIndex((i) => Math.min(weeks.length - calMonthView, i + calMonthView))}>Next <ChevronRight size={14} /></button>
+              </div>
+              <div style={{ display: "flex", gap: 6 }}>
+                <button className={`subtab-btn ${calMonthView === 1 ? "active" : ""}`} onClick={() => setCalMonthView(1)} style={{ padding: "5px 11px", fontSize: 11 }}>1 Month</button>
+                <button className={`subtab-btn ${calMonthView === 3 ? "active" : ""}`} onClick={() => setCalMonthView(3)} style={{ padding: "5px 11px", fontSize: 11 }}>3 Months</button>
+              </div>
+            </div>
             <div className="cal-legend">
               <span className="legend-item"><span className="legend-swatch" style={{ background: "#B3695E" }}></span>Holiday</span>
               <span className="legend-item"><span className="legend-swatch" style={{ background: "#7B93A3" }}></span>Time off</span>
               <span className="legend-item"><AlertTriangle size={11} color="#B23A2F" />Open shift</span>
               <span className="legend-item" style={{ marginLeft: "auto" }}>Click a day for requests, time off & the week view</span>
             </div>
-            <div className="cal-grid">
-              {WEEKDAY_LABELS.map((w) => <div className="cal-weekday" key={w}>{w}</div>)}
-              {weeks.flat().map((d, i) => {
+            <div className={`cal-grid ${calMonthView === 3 ? "multi-month" : ""}`}>
+              {calMonthView === 1 ? (
+                <>
+                  {WEEKDAY_LABELS.map((w) => <div className="cal-weekday" key={w}>{w}</div>)}
+                  {weeks.flat().map((d, i) => {
                 const s = daySummary(d, patterns, overrides, fohRoster);
                 const holiday = holidayFor(d.iso);
                 const offNames = timeOffNamesForDate(d.iso);
@@ -2956,7 +2988,50 @@ export default function SchedulingHub({ session, onSignOut }) {
                     {hasOtherRail && <div className="cal-rail-dot" title="Swap / coverage request touches this day" />}
                   </div>
                 );
-              })}
+                  })}
+                </>
+              ) : (
+                <>
+                  {[0, 1, 2].map((monthIdx) => {
+                    const startIdx = weekIndex + monthIdx;
+                    const monthWeeks = weeks.slice(startIdx, Math.min(startIdx + 5, weeks.length));
+                    if (!monthWeeks.length) return null;
+                    const firstDay = monthWeeks[0][0];
+                    const monthLabel = firstDay?.date?.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+                    return (
+                      <div key={monthIdx} style={{ display: "contents" }}>
+                        <div style={{ gridColumn: "1 / -1", fontSize: 13, fontWeight: 700, color: "#2b2a25", marginTop: monthIdx > 0 ? 12 : 0 }}>{monthLabel}</div>
+                        {WEEKDAY_LABELS.map((w) => <div className="cal-weekday" key={`${monthIdx}-${w}`} style={{ fontSize: 8.5 }}>{w}</div>)}
+                        {monthWeeks.flat().map((d, i) => {
+                          const s = daySummary(d, patterns, overrides, fohRoster);
+                          const holiday = holidayFor(d.iso);
+                          const offNames = timeOffNamesForDate(d.iso);
+                          const hasOtherRail = railItemsForDate(d.iso).some((it) => it.type !== "REQUEST OFF");
+                          return (
+                            <div
+                              key={`${monthIdx}-${d.iso}`}
+                              className={`cal-day ${!d.inMonth ? "dim" : ""} ${d.isToday ? "today" : ""}`}
+                              onClick={() => setDayPopup({ day: d, weekIdx: startIdx + Math.floor(i / 7) })}
+                              style={{ fontSize: 11, padding: "4px 2px 5px" }}
+                            >
+                              {s.gap && <AlertTriangle size={10} className="cal-gap-flag" />}
+                              <div className="cal-day-num" style={{ fontSize: 11 }}>{d.day}</div>
+                              {holiday && <div className="cal-holiday-label" style={{ fontSize: 7 }}>{holiday}</div>}
+                              {offNames.length > 0 && (
+                                <div className="cal-off-chips">
+                                  {offNames.slice(0, 1).map((n) => <span className="cal-off-chip" key={n} style={{ fontSize: 7 }}>{n}</span>)}
+                                  {offNames.length > 1 && <span className="cal-off-chip cal-off-more" style={{ fontSize: 7 }}>+{offNames.length - 1}</span>}
+                                </div>
+                              )}
+                              {hasOtherRail && <div className="cal-rail-dot" title="Swap / coverage request touches this day" />}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  })}
+                </>
+              )}
             </div>
           </div>
 
@@ -3840,6 +3915,16 @@ export default function SchedulingHub({ session, onSignOut }) {
             <img src={HAENYEO_LOGO} alt="Haenyeo" style={{ maxWidth: 220, maxHeight: 84, objectFit: "contain" }} />
             <h2 style={{ fontFamily: "'Space Mono', monospace", fontSize: 22, letterSpacing: 1, color: "#2B2A25", margin: "20px 0 8px" }}>Invoices</h2>
             <div style={{ fontFamily: "'Manrope', sans-serif", fontSize: 13.5, color: "#85897F" }}>Invoice tracking coming soon.</div>
+          </div>
+        </div>
+      )}
+
+      {tab === "menu" && (
+        <div className="cal-wrap" key="menu">
+          <div className="cal-card" style={{ textAlign: "center", padding: "56px 24px 64px" }}>
+            <img src={HAENYEO_LOGO} alt="Haenyeo" style={{ maxWidth: 220, maxHeight: 84, objectFit: "contain" }} />
+            <h2 style={{ fontFamily: "'Space Mono', monospace", fontSize: 22, letterSpacing: 1, color: "#2B2A25", margin: "20px 0 8px" }}>Menu</h2>
+            <div style={{ fontFamily: "'Manrope', sans-serif", fontSize: 13.5, color: "#85897F" }}>Coming soon.</div>
           </div>
         </div>
       )}

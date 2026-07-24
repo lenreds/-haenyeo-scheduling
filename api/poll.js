@@ -43,6 +43,10 @@ const emailAddr = (h) => {
 export default async function handler(req, res) {
   if (!(await authorize(req))) return res.status(401).json({ error: "unauthorized" });
 
+  if (!STAFF_REGISTER_CODE) {
+    console.error("[poll] STAFF_REGISTER_CODE not set in environment");
+  }
+
   const s = { connected: false, processed: 0, railCreated: 0, registered: 0, infoUpdates: 0, duplicates: 0, skipped: 0, unmatched: 0 };
   try {
     const tokenRow = await getGmailToken();
@@ -90,21 +94,34 @@ export default async function handler(req, res) {
         // ---- [REGISTER] ----
         if (/^\s*\[REGISTER\]/i.test(subject)) {
           const parsed = parseRegisterSubject(subject);
-          if (!parsed || !codeMatches(parsed.code, STAFF_REGISTER_CODE)) {
-            // malformed or wrong code word → ignore silently
+          if (!parsed) {
+            console.warn(`[poll] [REGISTER] malformed subject: "${subject}"`);
+            s.skipped++;
+            await finish(id, null);
+            continue;
+          }
+          if (!codeMatches(parsed.code, STAFF_REGISTER_CODE)) {
+            console.warn(`[poll] [REGISTER] wrong code for ${parsed.name}: got "${parsed.code}", expected "${STAFF_REGISTER_CODE}"`);
             s.skipped++;
             await finish(id, null);
             continue;
           }
           const match = matchStaffFuzzy(parsed.name, staff);
           if (match) {
-            const phone = parsePhoneFromBody(extractPlainText(msg));
-            await registerStaffContact(match.id, { email: senderEmail, phone });
-            const welcome = buildWelcomeEmail(match.name);
-            await sendTagged({ to: senderEmail, subject: welcome.subject, body: welcome.body }, LABELS.sentWelcome)
-              .catch((e) => console.error(`[poll] welcome send failed: ${e.message}`));
-            s.registered++;
+            try {
+              const phone = parsePhoneFromBody(extractPlainText(msg));
+              await registerStaffContact(match.id, { email: senderEmail, phone });
+              const welcome = buildWelcomeEmail(match.name);
+              await sendTagged({ to: senderEmail, subject: welcome.subject, body: welcome.body }, LABELS.sentWelcome)
+                .catch((e) => console.error(`[poll] welcome send failed for ${match.name}: ${e.message}`));
+              s.registered++;
+              console.log(`[poll] [REGISTER] registered ${match.name} (${senderEmail})`);
+            } catch (e) {
+              console.error(`[poll] [REGISTER] registration failed for ${parsed.name}: ${e.message}`);
+              s.skipped++;
+            }
           } else {
+            console.warn(`[poll] [REGISTER] no fuzzy match for "${parsed.name}" from ${senderEmail}`);
             const nm = buildNameNotMatchedReply(parsed.name);
             const subj = /^re:/i.test(subject) ? subject : `Re: ${subject}`;
             await sendTagged({ to: senderEmail, subject: subj, body: nm.body, threadId: msg.threadId, inReplyTo: messageId }, LABELS.sentReplies)
