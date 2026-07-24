@@ -77,7 +77,8 @@
       "Bash(git commit -m '@ *)",
       "Bash(git commit -m 'Fix calendar navigation for 1-month and 3-month views *)",
       "Bash(git commit -m 'Add Tip Sheet print/PDF styling fixes *)",
-      "Bash(git commit -m 'Add Set Schedule print styling rules *)"
+      "Bash(git commit -m 'Add Set Schedule print styling rules *)",
+      "Bash(git commit -m 'Implement Set Schedule workflow: week navigation, Finalize/Publish buttons, QR registration fix *)"
     ]
   }
 }

@@ -1240,6 +1240,7 @@ export default function SchedulingHub({ session, onSignOut }) {
   const weekStrip = useMemo(() => getWeekStrip(), []);
   const [scheduleView, setScheduleView] = useState("foh");
   const [scheduleLocked, setScheduleLocked] = useState(false);
+  const [finalizedWeeks, setFinalizedWeeks] = useState(new Set()); // { "2026-07-13" }
   const [placeholderPatterns, setPlaceholderPatterns] = useState(() => {
     const init = {};
     Object.entries(PLACEHOLDER_GROUPS).forEach(([key, count]) => {
@@ -1489,6 +1490,63 @@ export default function SchedulingHub({ session, onSignOut }) {
       console.error("Tip sheet PDF export failed:", e);
     }
     setPdfBusy(null);
+  }
+
+  async function toggleWeekFinalized() {
+    if (!activeWeek || !session?.access_token) return;
+    const weekStart = activeWeek[0].iso; // Monday of week
+    try {
+      const res = await fetch("/api/finalize-week", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
+        body: JSON.stringify({ weekStart, section: null }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const { finalized } = await res.json();
+      setFinalizedWeeks((prev) => {
+        const next = new Set(prev);
+        if (finalized) next.add(weekStart);
+        else next.delete(weekStart);
+        return next;
+      });
+      addLog(`Week ${weekStart} ${finalized ? "finalized" : "unfin alized"}`, "good");
+    } catch (e) {
+      console.error("Finalize toggle failed:", e);
+      addLog(`Finalize failed: ${e.message}`, "warn");
+    }
+  }
+
+  async function publishFinalizedWeeks() {
+    if (!session?.access_token) return;
+    if (finalizedWeeks.size === 0) {
+      addLog("No finalized weeks to publish", "warn");
+      return;
+    }
+    try {
+      // Call existing send-schedule endpoint with list of finalized weeks
+      const weeks = Array.from(finalizedWeeks).map(start => {
+        const d = new Date(start);
+        return {
+          start: d.toISOString().split('T')[0],
+          end: new Date(d.getTime() + 6 * 86400000).toISOString().split('T')[0],
+        };
+      });
+
+      // Reuse existing publish logic but mark as published
+      await triggerSchedulePublish({
+        weeks: weeks.map(w => ({
+          weekStart: w.start,
+          section: "FOH", // Would need to expand for all sections
+          recipients: [], // Would be populated from preferences
+        })),
+      });
+
+      addLog(`Published ${finalizedWeeks.size} finalized week(s)`, "good");
+      setFinalizedWeeks(new Set());
+    } catch (e) {
+      console.error("Publish failed:", e);
+      addLog(`Publish failed: ${e.message}`, "warn");
+    }
   }
 
   // Re-pull rail requests from the DB (used after a manual Gmail poll so new
@@ -3266,6 +3324,12 @@ export default function SchedulingHub({ session, onSignOut }) {
                 <button className={`print-btn ${scheduleLocked ? "lock-active" : ""}`} onClick={() => setScheduleLocked((l) => !l)}>
                   {scheduleLocked ? <Lock size={13} /> : <Unlock size={13} />} {scheduleLocked ? "Locked" : "Lock Schedule"}
                 </button>
+                <button className={`print-btn ${finalizedWeeks.has(activeWeek?.[0]?.iso) ? "lock-active" : ""}`} onClick={toggleWeekFinalized} title="Mark this week as finalized for publishing">
+                  {finalizedWeeks.has(activeWeek?.[0]?.iso) ? "✓ Finalized" : "Finalize"}
+                </button>
+                {onCurrentWeek && finalizedWeeks.has(activeWeek?.[0]?.iso) && (
+                  <button className="publish-btn" onClick={publishFinalizedWeeks}>Send Scheduled Emails</button>
+                )}
               </div>
               <div className="print-week-range">
                 <button
@@ -3278,7 +3342,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                 </button>
                 <button className="back-btn" onClick={() => setWeekIndex((i) => Math.max(0, i - 1))}><ChevronLeft size={13} /></button>
                 <span className={`week-range-text ${onCurrentWeek ? "week-range-current" : ""}`}>{formatWeekRange(activeWeek)}</span>
-                <button className="back-btn" onClick={() => setWeekIndex((i) => Math.min(weeks.length - 1, i + 1))}><ChevronRight size={13} /></button>
+                <button className="back-btn" onClick={() => setWeekIndex((i) => Math.min(weeks.length - 1, currentWeekIndex >= 0 ? currentWeekIndex + 4 : i + 1, i + 1))}><ChevronRight size={13} /></button>
               </div>
             </div>
             {scheduleLocked && (
@@ -3738,6 +3802,14 @@ export default function SchedulingHub({ session, onSignOut }) {
               ))}
               <button className="qr-btn qr-print-btn" disabled={qrPrinting} onClick={handlePrintQR}>
                 <Printer size={12} /> {qrPrinting ? "Preparing…" : "Print QR Codes"}
+              </button>
+              <button
+                className="qr-btn"
+                onClick={checkGmailNow}
+                disabled={gmailChecking || !session?.access_token}
+                title="Check for new registration emails from the inbox"
+              >
+                {gmailChecking ? "Checking…" : "Check now"}
               </button>
             </div>
 

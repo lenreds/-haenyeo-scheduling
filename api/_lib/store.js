@@ -168,3 +168,64 @@ export async function isManager(token) {
     return false;
   }
 }
+
+/* ---- schedule_weeks (finalize/publish state) ----
+   Schema: week_start (date), section (text, nullable), finalized (bool), published (bool),
+           finalized_at (timestamptz), published_at (timestamptz)
+*/
+
+export async function toggleWeekFinalized(weekStart, section = null) {
+  // Get current finalized state
+  let query = admin().from("schedule_weeks").select("finalized").eq("week_start", weekStart);
+  if (section) query = query.eq("section", section);
+  else query = query.is("section", null);
+
+  const { data: existing } = await query.maybeSingle();
+  const newFinalized = !(existing?.finalized ?? false);
+  const now = new Date().toISOString();
+
+  const row = {
+    week_start: weekStart,
+    section: section || null,
+    finalized: newFinalized,
+    finalized_at: newFinalized ? now : null,
+  };
+
+  const { error } = await admin()
+    .from("schedule_weeks")
+    .upsert(row, { onConflict: "week_start" });
+  if (error) throw error;
+  return newFinalized;
+}
+
+export async function fetchWeekFinalized(weekStart, section = null) {
+  let query = admin().from("schedule_weeks").select("finalized").eq("week_start", weekStart);
+  if (section) query = query.eq("section", section);
+  else query = query.is("section", null);
+
+  const { data, error } = await query.maybeSingle();
+  if (error) throw error;
+  return data?.finalized ?? false;
+}
+
+export async function fetchFinalizedWeeks() {
+  const { data, error } = await admin()
+    .from("schedule_weeks")
+    .select("week_start, section, published")
+    .eq("finalized", true)
+    .order("week_start", { ascending: true });
+  if (error) throw error;
+  return data || [];
+}
+
+export async function markWeeksPublished(weekStarts) {
+  const now = new Date().toISOString();
+  const updates = weekStarts.map(ws => ({
+    week_start: ws,
+    published: true,
+    published_at: now,
+  }));
+
+  const { error } = await admin().from("schedule_weeks").upsert(updates, { onConflict: "week_start" });
+  if (error) throw error;
+}
