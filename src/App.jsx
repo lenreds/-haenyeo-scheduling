@@ -828,9 +828,16 @@ function autoAssignSlots(dateInfo, patterns, overrides, roster) {
   });
 }
 
-// build a 5-week grid (35 days) around July 2026, starting Monday
-function buildMonth() {
-  const start = new Date(2026, 5, 29); // Jun 29, 2026 is a Monday
+// build a 5-week grid (35 days) around a given month, starting Monday
+function buildMonth(viewDate) {
+  const year = viewDate.getFullYear();
+  const month = viewDate.getMonth();
+  // Find the first Monday of the month
+  const first = new Date(year, month, 1);
+  const firstDayOfWeek = first.getDay(); // 0=Sun, 1=Mon, ...
+  const daysBeforeMonthStart = firstDayOfWeek === 0 ? 6 : firstDayOfWeek - 1; // days to go back to Monday
+  const start = new Date(year, month, 1 - daysBeforeMonthStart);
+
   const days = [];
   for (let i = 0; i < 35; i++) {
     const d = new Date(start);
@@ -840,7 +847,7 @@ function buildMonth() {
       iso: iso(d),
       day: d.getDate(),
       weekday: d.getDay(),
-      inMonth: d.getMonth() === 6, // July = index 6
+      inMonth: d.getMonth() === month,
       isToday: iso(d) === TODAY_ISO,
     });
   }
@@ -923,7 +930,8 @@ export default function SchedulingHub({ session, onSignOut }) {
   const [log, setLog] = useState(initialLog);
   const [nameToId, setNameToId] = useState({});
   const [calView, setCalView] = useState("month"); // 'month' | 'week'
-  const [weekIndex, setWeekIndex] = useState(0);
+  const [calDate, setCalDate] = useState(new Date(2026, 6, 1)); // month/year being viewed
+  const [weekIndex, setWeekIndex] = useState(0); // selected week for week view
   const [calMonthView, setCalMonthView] = useState(1); // 1 or 3 months
   const [patterns, setPatterns] = useState(() => normalizePatterns(PERSON_PATTERNS, DEFAULT_PRIMARY_ROLE));
   const [overrides, setOverrides] = useState(OVERRIDES);
@@ -1218,7 +1226,14 @@ export default function SchedulingHub({ session, onSignOut }) {
     catch (e) { console.error("Unlock save failed:", e); }
   }
 
-  const weeks = useMemo(() => buildMonth(), []);
+  const weeks = useMemo(() => buildMonth(calDate), [calDate]);
+  const threeMonthWeeks = useMemo(() => {
+    if (calMonthView !== 3) return [];
+    return [0, 1, 2].map((monthIdx) => {
+      const monthDate = new Date(calDate.getFullYear(), calDate.getMonth() + monthIdx, 1);
+      return buildMonth(monthDate);
+    });
+  }, [calDate, calMonthView]);
   // Index of the week that contains today (-1 if today falls outside the grid).
   const currentWeekIndex = useMemo(() => weeks.findIndex((w) => w.some((d) => d.iso === TODAY_ISO)), [weeks]);
   const onCurrentWeek = weekIndex === currentWeekIndex;
@@ -2942,13 +2957,12 @@ export default function SchedulingHub({ session, onSignOut }) {
           <div className="cal-card">
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16, paddingBottom: 12, borderBottom: "1px solid #e4e4e4" }}>
               <div style={{ display: "flex", gap: 8 }}>
-                <button className="back-btn" onClick={() => setWeekIndex((i) => Math.max(0, i - calMonthView))}><ChevronLeft size={14} /> Prev</button>
-                <span style={{ fontFamily: "'Space Mono', monospace", fontSize: 12, color: "#6b6355", alignSelf: "center", minWidth: 120 }}>
-                  {calMonthView === 1
-                    ? weeks[weekIndex]?.[0]?.date?.toLocaleDateString(undefined, { month: "short", year: "numeric" })
-                    : `${weeks[weekIndex]?.[0]?.date?.toLocaleDateString(undefined, { month: "short" })} – ${weeks[Math.min(weekIndex + calMonthView - 1, weeks.length - 1)]?.[6]?.date?.toLocaleDateString(undefined, { month: "short", year: "numeric" })}`}
+                <button className="back-btn" onClick={() => setCalDate((d) => new Date(d.getFullYear(), d.getMonth() - (calMonthView === 1 ? 1 : 3), 1))}><ChevronLeft size={14} /> Prev</button>
+                <span style={{ fontFamily: "'Space Mono', monospace", fontSize: 12, color: "#6b6355", alignSelf: "center", minWidth: 150 }}>
+                  {calDate.toLocaleDateString(undefined, { month: "short", year: "numeric" })}
+                  {calMonthView === 3 && " – 3 months"}
                 </span>
-                <button className="back-btn" onClick={() => setWeekIndex((i) => Math.min(weeks.length - calMonthView, i + calMonthView))}>Next <ChevronRight size={14} /></button>
+                <button className="back-btn" onClick={() => setCalDate((d) => new Date(d.getFullYear(), d.getMonth() + (calMonthView === 1 ? 1 : 3), 1))}>Next <ChevronRight size={14} /></button>
               </div>
               <div style={{ display: "flex", gap: 6 }}>
                 <button className={`subtab-btn ${calMonthView === 1 ? "active" : ""}`} onClick={() => setCalMonthView(1)} style={{ padding: "5px 11px", fontSize: 11 }}>1 Month</button>
@@ -2992,11 +3006,8 @@ export default function SchedulingHub({ session, onSignOut }) {
                 </>
               ) : (
                 <>
-                  {[0, 1, 2].map((monthIdx) => {
-                    const startIdx = weekIndex + monthIdx;
-                    const monthWeeks = weeks.slice(startIdx, Math.min(startIdx + 5, weeks.length));
-                    if (!monthWeeks.length) return null;
-                    const firstDay = monthWeeks[0][0];
+                  {threeMonthWeeks.map((monthWeeks, monthIdx) => {
+                    const firstDay = monthWeeks[0]?.[0];
                     const monthLabel = firstDay?.date?.toLocaleDateString(undefined, { month: "long", year: "numeric" });
                     return (
                       <div key={monthIdx} style={{ display: "contents" }}>
@@ -3011,7 +3022,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                             <div
                               key={`${monthIdx}-${d.iso}`}
                               className={`cal-day ${!d.inMonth ? "dim" : ""} ${d.isToday ? "today" : ""}`}
-                              onClick={() => setDayPopup({ day: d, weekIdx: startIdx + Math.floor(i / 7) })}
+                              onClick={() => setDayPopup({ day: d, weekIdx: Math.floor(i / 7) })}
                               style={{ fontSize: 11, padding: "4px 2px 5px" }}
                             >
                               {s.gap && <AlertTriangle size={10} className="cal-gap-flag" />}
@@ -3078,7 +3089,15 @@ export default function SchedulingHub({ session, onSignOut }) {
 
                   <button
                     className="publish-btn day-popup-week-btn"
-                    onClick={() => { const idx = dayPopup.weekIdx; setDayPopup(null); zoomToWeek(idx); }}
+                    onClick={() => {
+                      const d = dayPopup.day;
+                      const monthDate = new Date(d.date.getFullYear(), d.date.getMonth(), 1);
+                      const monthWeeks = buildMonth(monthDate);
+                      const weekIdx = monthWeeks.findIndex((week) => week.some((day) => day.iso === d.iso));
+                      setCalDate(monthDate);
+                      setDayPopup(null);
+                      if (weekIdx >= 0) zoomToWeek(weekIdx);
+                    }}
                   >
                     View week
                   </button>
