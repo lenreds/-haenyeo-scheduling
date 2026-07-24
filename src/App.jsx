@@ -2517,7 +2517,25 @@ export default function SchedulingHub({ session, onSignOut }) {
           .hub { background: #fff !important; padding: 0 !important; }
           .tabs, .print-btn, .custom-toggle, .publish-btn, .published-badge, .back-btn, .subject-preview { display: none !important; }
           .cal-card { box-shadow: none !important; }
-          /* printing the QR sheet: show ONLY the sheet, hide the rest of the app */
+          /* Tip Sheet print: hide helper text, buttons, navigation, finalized banner; outline-only boxes; fit one page */
+          .footer-note, .recon-note, .fm-banner, .week-header, .tip-finalized-banner { display: none !important; }
+          .check-box { background: transparent !important; }
+          .check-box.match { border-color: #7BA37E; }
+          .check-box.mismatch { border-color: #C98A3E; }
+          .cash-recon { background: transparent !important; border: 1px solid rgba(43,42,37,0.2) !important; }
+          .tip-page-split { font-size: 85%; gap: 12px !important; }
+          .tip-left-col { width: 260px !important; }
+          .week-table { font-size: 10px !important; }
+          .week-table td { padding: 4px 3px !important; }
+          .point-reference { font-size: 8px !important; }
+          .tip-top-row { gap: 12px !important; flex-wrap: nowrap !important; }
+          .tip-inputs { gap: 12px !important; margin-bottom: 6px !important; }
+          .tip-field label { font-size: 9px !important; }
+          .tip-stat { font-size: 13px !important; }
+          .denom-table { font-size: 10px !important; }
+          .recon-row { padding: 2px 0 !important; }
+          .hero-stat { gap: 8px !important; margin: 8px 0 !important; }
+          .hero-item { padding: 4px !important; }
           body.printing-qr .hub > *:not(.qr-print-sheet) { display: none !important; }
           body.printing-qr .qr-print-sheet { display: block !important; }
         }
