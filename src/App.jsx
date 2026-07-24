@@ -1522,7 +1522,7 @@ export default function SchedulingHub({ session, onSignOut }) {
     tipCardRef.current.classList.add("tip-pdf-mode");
     try {
       await exportNodeAsPdf(tipCardRef.current, `Haenyeo-TipSheet-${tipDateIso}.pdf`, {
-        orientation: "portrait",
+        orientation: "landscape",
         // Drop helper/hint text and the Custom Schedule toggle from the PDF.
         strip: [".footer-note", ".recon-note", ".custom-toggle", ".fm-banner"],
       });
@@ -2629,10 +2629,10 @@ export default function SchedulingHub({ session, onSignOut }) {
           .check-box.match { border-color: #7BA37E; }
           .check-box.mismatch { border-color: #C98A3E; }
           .cash-recon { background: transparent !important; border: 1px solid rgba(43,42,37,0.2) !important; }
-          .tip-page-split { font-size: 85%; gap: 12px !important; }
-          .tip-left-col { width: 260px !important; }
+          .tip-page-split { font-size: 85%; gap: 18px !important; }
+          .tip-left-col { width: 300px !important; }
           .week-table { font-size: 10px !important; }
-          .week-table td { padding: 4px 3px !important; }
+          .week-table td { padding: 3px 3px !important; }
           .point-reference { font-size: 8px !important; }
           .tip-top-row { gap: 12px !important; flex-wrap: nowrap !important; }
           .tip-inputs { gap: 12px !important; margin-bottom: 6px !important; }
@@ -2640,14 +2640,15 @@ export default function SchedulingHub({ session, onSignOut }) {
           .tip-stat { font-size: 13px !important; }
           .denom-table { font-size: 10px !important; }
           .recon-row { padding: 2px 0 !important; }
-          .hero-stat { gap: 10px !important; margin: 10px 0 !important; }
+          .hero-stat { gap: 10px !important; margin: 8px 0 !important; }
           /* amber summary boxes -> outline only (amber border, white bg) */
-          .hero-item { padding: 10px 12px !important; background: transparent !important; border-color: #C98A3E !important; }
-          .hero-value { font-size: 20px !important; }
+          .hero-item { padding: 8px 12px !important; background: transparent !important; border-color: #C98A3E !important; }
+          .hero-value { font-size: 18px !important; }
           .hero-label { margin-bottom: 2px !important; }
-          /* breathing room below the logo, and trim its huge reserved height */
-          .tip-logo-space { min-height: 96px !important; margin-bottom: 12px !important; }
-          .tip-logo-img { max-height: 92px !important; }
+          /* breathing room below the logo, and trim its reserved height so the
+             two columns fit the shorter landscape page */
+          .tip-logo-space { min-height: 70px !important; margin-bottom: 8px !important; }
+          .tip-logo-img { max-height: 66px !important; }
           /* Set Schedule print: swap the live interactive grid for the branded
              sheet node (same renderer as the PDF). Only the portal shows. */
           body.printing-schedule .hub > *:not(.schedule-print-portal) { display: none !important; }
@@ -2655,16 +2656,22 @@ export default function SchedulingHub({ session, onSignOut }) {
           body.printing-qr .hub > *:not(.qr-print-sheet) { display: none !important; }
           body.printing-qr .qr-print-sheet { display: block !important; }
         }
-        /* Named print pages so schedule prints landscape without forcing the tip
-           sheet / QR sheet (which stay portrait) into the same orientation. */
-        @page { size: portrait; margin: 0.4in; }
+        /* Tip sheet + schedule print landscape by default; the QR sheet keeps its
+           branded portrait layout via a named page. */
+        @page { size: landscape; margin: 0.35in; }
         @page scheduleLandscape { size: landscape; margin: 0.35in; }
+        @page qrPortrait { size: portrait; margin: 0.4in; }
+        body.printing-qr .qr-print-sheet { page: qrPortrait; }
         .schedule-print-portal { display: none; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
         /* PDF capture (html2canvas on the live card) doesn't see @media print, so
-           this class is toggled on during tip-sheet PDF export for outline-only boxes. */
+           this class is toggled on during tip-sheet PDF export for outline-only
+           boxes + vertical compaction that keeps it to one landscape page. */
         .tip-pdf-mode .check-box, .tip-pdf-mode .cash-recon, .tip-pdf-mode .hero-item { background: transparent !important; }
         .tip-pdf-mode .cash-recon { border: 1px solid rgba(43,42,37,0.2) !important; }
-        .tip-pdf-mode .hero-item { border-color: #C98A3E !important; }
+        .tip-pdf-mode .hero-item { border-color: #C98A3E !important; padding: 12px 14px !important; }
+        .tip-pdf-mode .tip-logo-space { min-height: 74px !important; margin-bottom: 8px !important; }
+        .tip-pdf-mode .tip-logo-img { max-height: 70px !important; }
+        .tip-pdf-mode .recon-row { padding: 3px 0 !important; }
 
         /* QR print sheet — branded single portrait page. Colors are accents on
            white (B&W friendly); color-adjust keeps the dark band + pills from
