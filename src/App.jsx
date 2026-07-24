@@ -961,6 +961,7 @@ export default function SchedulingHub({ session, onSignOut }) {
   const [pdfBusy, setPdfBusy] = useState(null); // "schedule" | "tips" while exporting
   const scheduleCardRef = useRef(null);
   const tipCardRef = useRef(null);
+  const schedulePrintRef = useRef(null); // print-only mount for the branded schedule sheet
   const [infoUpdates, setInfoUpdates] = useState([]); // pending staff_info_updates
   const [staffProfile, setStaffProfile] = useState(null); // open staff id in directory
   const [qrModal, setQrModal] = useState(null); // open QR key
@@ -1481,13 +1482,54 @@ export default function SchedulingHub({ session, onSignOut }) {
     }
     setPdfBusy(null);
   }
+  // Print the current sub-tab with the SAME branded renderer as the PDF/email
+  // (white header + logo, role colors, today highlight, em-dash off days) —
+  // never the live interactive grid. Mount an offscreen sheet node into the
+  // print portal, flip body.printing-schedule, print, then tear it down.
+  function scheduleSheetNodeForCurrentView(week) {
+    if (scheduleView === "foh") return scheduleSheetNodeFor("FOH", week);
+    if (scheduleView === "bohkitchen") return scheduleSheetNodeFor("BOHKITCHEN", week);
+    return buildScheduleSheetNode({
+      sectionTitle: "MANAGEMENT SCHEDULE",
+      weekLabel: weekRangeLabel(week),
+      days: sheetDays(week),
+      todayIdx: sheetTodayIdx(week),
+      groups: [{ label: "Management", rows: buildGroupRows("management", week) }],
+      managerOn: null,
+    });
+  }
+  function printSchedule() {
+    const portal = schedulePrintRef.current;
+    if (!portal || !activeWeek) { window.print(); return; }
+    const node = scheduleSheetNodeForCurrentView(activeWeek);
+    // The sheet node renders offscreen at a fixed width for canvas capture;
+    // reset that positioning so it flows normally on the printed page.
+    node.style.position = "static";
+    node.style.left = "auto";
+    node.style.top = "auto";
+    node.style.width = "100%";
+    portal.innerHTML = "";
+    portal.appendChild(node);
+    document.body.classList.add("printing-schedule");
+    window.print();
+    document.body.classList.remove("printing-schedule");
+    portal.innerHTML = "";
+  }
   async function exportTipSheetPdf() {
     if (pdfBusy || !tipCardRef.current) return;
     setPdfBusy("tips");
+    // Outline-only boxes for the PDF (html2canvas can't read @media print).
+    tipCardRef.current.classList.add("tip-pdf-mode");
     try {
-      await exportNodeAsPdf(tipCardRef.current, `Haenyeo-TipSheet-${tipDateIso}.pdf`, { orientation: "portrait" });
+      await exportNodeAsPdf(tipCardRef.current, `Haenyeo-TipSheet-${tipDateIso}.pdf`, {
+        orientation: "portrait",
+        // Drop helper/hint text and the Custom Schedule toggle from the PDF.
+        strip: [".footer-note", ".recon-note", ".custom-toggle", ".fm-banner"],
+      });
     } catch (e) {
       console.error("Tip sheet PDF export failed:", e);
+    } finally {
+      tipCardRef.current.classList.remove("tip-pdf-mode");
     }
     setPdfBusy(null);
   }
@@ -2449,10 +2491,16 @@ export default function SchedulingHub({ session, onSignOut }) {
         .legend-swatch { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
 
         .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
-        .cal-grid.multi-month { display: grid; grid-template-columns: repeat(3, minmax(350px, 1fr)); gap: 20px; }
-        .cal-grid.multi-month > .cal-month { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
-        .cal-grid.multi-month .cal-weekday { font-size: 9.5px; padding-bottom: 4px; min-height: 18px; }
-        .cal-grid.multi-month .cal-day { min-height: 56px; padding: 5px 4px 6px; font-size: 12px; }
+        /* 3-month view: three side-by-side month grids, flat/open (no card backgrounds) */
+        .cal-grid.multi-month { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 22px; }
+        .cal-grid.multi-month .cal-month { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; align-content: start; }
+        .cal-grid.multi-month .cal-month-label { grid-column: 1 / -1; font-family: 'Space Mono', monospace; font-size: 11px; letter-spacing: 2px; text-transform: uppercase; font-weight: 700; color: #8c8574; text-align: center; margin-bottom: 3px; }
+        .cal-grid.multi-month .cal-month-label.current { color: #C98A3E; }
+        .cal-grid.multi-month .cal-weekday { font-size: 8.5px; padding-bottom: 3px; min-height: 15px; letter-spacing: 0.5px; }
+        .cal-grid.multi-month .cal-day { min-height: 46px; padding: 4px 3px 5px; font-size: 11px; }
+        .cal-grid.multi-month .cal-day-num { font-size: 11px; }
+        .cal-grid.multi-month .cal-day.today .cal-day-num { width: 18px; height: 18px; }
+        @media (max-width: 900px) { .cal-grid.multi-month { grid-template-columns: 1fr; } }
         .cal-weekday { font-family: 'Space Mono', monospace; font-size: 10.5px; letter-spacing: 1.5px; text-transform: uppercase; color: #8c8574; text-align: center; padding-bottom: 6px; }
         .cal-day { background: #FBF8EF; border: 1px solid rgba(43,42,37,0.08); border-radius: 6px; padding: 8px 8px 10px; min-height: 84px; cursor: pointer; transition: transform 0.12s ease, box-shadow 0.12s ease; position: relative; }
         .cal-day:hover { transform: translateY(-2px); box-shadow: 0 6px 14px rgba(0,0,0,0.18); }
@@ -2592,17 +2640,31 @@ export default function SchedulingHub({ session, onSignOut }) {
           .tip-stat { font-size: 13px !important; }
           .denom-table { font-size: 10px !important; }
           .recon-row { padding: 2px 0 !important; }
-          .hero-stat { gap: 8px !important; margin: 8px 0 !important; }
-          .hero-item { padding: 4px !important; }
-          /* Set Schedule print: show only current sub-tab content, hide all UI chrome */
-          .week-table { margin: 0 !important; }
-          .week-table th, .week-table td { padding: 4px 3px !important; font-size: 11px !important; }
-          .week-table select { display: none !important; }
-          .week-table .shift-cell { white-space: nowrap; }
-          .role-header { background: #f5f5f5 !important; font-weight: 700 !important; }
+          .hero-stat { gap: 10px !important; margin: 10px 0 !important; }
+          /* amber summary boxes -> outline only (amber border, white bg) */
+          .hero-item { padding: 10px 12px !important; background: transparent !important; border-color: #C98A3E !important; }
+          .hero-value { font-size: 20px !important; }
+          .hero-label { margin-bottom: 2px !important; }
+          /* breathing room below the logo, and trim its huge reserved height */
+          .tip-logo-space { min-height: 96px !important; margin-bottom: 12px !important; }
+          .tip-logo-img { max-height: 92px !important; }
+          /* Set Schedule print: swap the live interactive grid for the branded
+             sheet node (same renderer as the PDF). Only the portal shows. */
+          body.printing-schedule .hub > *:not(.schedule-print-portal) { display: none !important; }
+          body.printing-schedule .schedule-print-portal { display: block !important; page: scheduleLandscape; }
           body.printing-qr .hub > *:not(.qr-print-sheet) { display: none !important; }
           body.printing-qr .qr-print-sheet { display: block !important; }
         }
+        /* Named print pages so schedule prints landscape without forcing the tip
+           sheet / QR sheet (which stay portrait) into the same orientation. */
+        @page { size: portrait; margin: 0.4in; }
+        @page scheduleLandscape { size: landscape; margin: 0.35in; }
+        .schedule-print-portal { display: none; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+        /* PDF capture (html2canvas on the live card) doesn't see @media print, so
+           this class is toggled on during tip-sheet PDF export for outline-only boxes. */
+        .tip-pdf-mode .check-box, .tip-pdf-mode .cash-recon, .tip-pdf-mode .hero-item { background: transparent !important; }
+        .tip-pdf-mode .cash-recon { border: 1px solid rgba(43,42,37,0.2) !important; }
+        .tip-pdf-mode .hero-item { border-color: #C98A3E !important; }
 
         /* QR print sheet — branded single portrait page. Colors are accents on
            white (B&W friendly); color-adjust keeps the dark band + pills from
@@ -3089,12 +3151,13 @@ export default function SchedulingHub({ session, onSignOut }) {
               ) : (
                 <>
                   {threeMonthWeeks.map((monthWeeks, monthIdx) => {
-                    const firstDay = monthWeeks[0]?.[0];
-                    const monthLabel = firstDay?.date?.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+                    const firstInMonth = monthWeeks.flat().find((d) => d.inMonth) || monthWeeks[0]?.[0];
+                    const monthLabel = firstInMonth?.date?.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+                    const isCurrentMonth = monthWeeks.flat().some((d) => d.iso === TODAY_ISO);
                     return (
-                      <div key={monthIdx} style={{ display: "contents" }}>
-                        <div style={{ gridColumn: "1 / -1", fontSize: 13, fontWeight: 700, color: "#2b2a25", marginTop: monthIdx > 0 ? 12 : 0 }}>{monthLabel}</div>
-                        {WEEKDAY_LABELS.map((w) => <div className="cal-weekday" key={`${monthIdx}-${w}`} style={{ fontSize: 8.5 }}>{w}</div>)}
+                      <div className="cal-month" key={monthIdx}>
+                        <div className={`cal-month-label ${isCurrentMonth ? "current" : ""}`}>{monthLabel}</div>
+                        {WEEKDAY_LABELS.map((w) => <div className="cal-weekday" key={`${monthIdx}-${w}`}>{w}</div>)}
                         {monthWeeks.flat().map((d, i) => {
                           const s = daySummary(d, patterns, overrides, fohRoster);
                           const holiday = holidayFor(d.iso);
@@ -3105,10 +3168,9 @@ export default function SchedulingHub({ session, onSignOut }) {
                               key={`${monthIdx}-${d.iso}`}
                               className={`cal-day ${!d.inMonth ? "dim" : ""} ${d.isToday ? "today" : ""}`}
                               onClick={() => setDayPopup({ day: d, weekIdx: Math.floor(i / 7) })}
-                              style={{ fontSize: 11, padding: "4px 2px 5px" }}
                             >
                               {s.gap && <AlertTriangle size={10} className="cal-gap-flag" />}
-                              <div className="cal-day-num" style={{ fontSize: 11 }}>{d.day}</div>
+                              <div className="cal-day-num">{d.day}</div>
                               {holiday && <div className="cal-holiday-label" style={{ fontSize: 7 }}>{holiday}</div>}
                               {offNames.length > 0 && (
                                 <div className="cal-off-chips">
@@ -3317,7 +3379,7 @@ export default function SchedulingHub({ session, onSignOut }) {
           <div className="cal-card" ref={scheduleCardRef}>
             <div className="print-header">
               <div style={{ display: "flex", gap: 8 }}>
-                <button className="print-btn" onClick={() => window.print()}><Printer size={13} /> Print</button>
+                <button className="print-btn" onClick={printSchedule}><Printer size={13} /> Print</button>
                 <button className="print-btn" disabled={pdfBusy === "schedule"} onClick={exportSchedulePdf}>
                   <FileDown size={13} /> {pdfBusy === "schedule" ? "Saving…" : "Save as PDF"}
                 </button>
@@ -4058,6 +4120,11 @@ export default function SchedulingHub({ session, onSignOut }) {
           </div>
         </div>
       )}
+
+      {/* Print-only mount for the branded schedule sheet (direct child of .hub —
+          shown only when body.printing-schedule is set, see @media print rules).
+          printSchedule() fills this with the same renderer used for the PDF. */}
+      <div className="schedule-print-portal" ref={schedulePrintRef} aria-hidden="true" />
 
       {/* Print-only sheet of all 7 QR codes (direct child of .hub — shown only
           when body.printing-qr is set, see @media print rules). Branded layout
