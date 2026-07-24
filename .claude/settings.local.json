@@ -76,7 +76,8 @@
       "PowerShell(git add src/App.jsx src/lib/data.js api/_lib/emails.js api/_lib/reply.js api/send-schedule.js MULTI-WEEK-PUBLISH-BRIEF.md)",
       "Bash(git commit -m '@ *)",
       "Bash(git commit -m 'Fix calendar navigation for 1-month and 3-month views *)",
-      "Bash(git commit -m 'Add Tip Sheet print/PDF styling fixes *)"
+      "Bash(git commit -m 'Add Tip Sheet print/PDF styling fixes *)",
+      "Bash(git commit -m 'Add Set Schedule print styling rules *)"
     ]
   }
 }

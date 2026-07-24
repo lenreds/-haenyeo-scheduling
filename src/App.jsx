@@ -2536,6 +2536,12 @@ export default function SchedulingHub({ session, onSignOut }) {
           .recon-row { padding: 2px 0 !important; }
           .hero-stat { gap: 8px !important; margin: 8px 0 !important; }
           .hero-item { padding: 4px !important; }
+          /* Set Schedule print: show only current sub-tab content, hide all UI chrome */
+          .week-table { margin: 0 !important; }
+          .week-table th, .week-table td { padding: 4px 3px !important; font-size: 11px !important; }
+          .week-table select { display: none !important; }
+          .week-table .shift-cell { white-space: nowrap; }
+          .role-header { background: #f5f5f5 !important; font-weight: 700 !important; }
           body.printing-qr .hub > *:not(.qr-print-sheet) { display: none !important; }
           body.printing-qr .qr-print-sheet { display: block !important; }
         }
