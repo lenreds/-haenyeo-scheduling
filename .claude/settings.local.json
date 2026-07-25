@@ -81,7 +81,8 @@
       "Bash(git commit -m 'Implement Set Schedule workflow: week navigation, Finalize/Publish buttons, QR registration fix *)",
       "Bash(npm test *)",
       "Bash(git commit -m 'Fix 3-month calendar layout, reuse PDF renderer for schedule print, fix tip sheet print *)",
-      "Bash(git commit -m 'Tip Sheet print/PDF: switch to landscape orientation *)"
+      "Bash(git commit -m 'Tip Sheet print/PDF: switch to landscape orientation *)",
+      "Bash(git commit -m 'Tip Sheet print/PDF: fill page without gap, pin PDF to 1280px capture *)"
     ]
   }
 }

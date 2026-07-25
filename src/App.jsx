@@ -1518,10 +1518,16 @@ export default function SchedulingHub({ session, onSignOut }) {
   async function exportTipSheetPdf() {
     if (pdfBusy || !tipCardRef.current) return;
     setPdfBusy("tips");
+    const card = tipCardRef.current;
+    const origW = card.style.width;
     // Outline-only boxes for the PDF (html2canvas can't read @media print).
-    tipCardRef.current.classList.add("tip-pdf-mode");
+    // Pin the capture width to 1280px so the layout is consistent and fits one
+    // landscape page regardless of the browser window size.
+    card.classList.add("tip-pdf-mode");
+    card.style.width = "1280px";
+    card.style.maxWidth = "none";
     try {
-      await exportNodeAsPdf(tipCardRef.current, `Haenyeo-TipSheet-${tipDateIso}.pdf`, {
+      await exportNodeAsPdf(card, `Haenyeo-TipSheet-${tipDateIso}.pdf`, {
         orientation: "landscape",
         // Drop helper/hint text and the Custom Schedule toggle from the PDF.
         strip: [".footer-note", ".recon-note", ".custom-toggle", ".fm-banner"],
@@ -1529,7 +1535,9 @@ export default function SchedulingHub({ session, onSignOut }) {
     } catch (e) {
       console.error("Tip sheet PDF export failed:", e);
     } finally {
-      tipCardRef.current.classList.remove("tip-pdf-mode");
+      card.classList.remove("tip-pdf-mode");
+      card.style.width = origW;
+      card.style.maxWidth = "";
     }
     setPdfBusy(null);
   }
@@ -2629,26 +2637,27 @@ export default function SchedulingHub({ session, onSignOut }) {
           .check-box.match { border-color: #7BA37E; }
           .check-box.mismatch { border-color: #C98A3E; }
           .cash-recon { background: transparent !important; border: 1px solid rgba(43,42,37,0.2) !important; }
-          .tip-page-split { font-size: 85%; gap: 18px !important; }
-          .tip-left-col { width: 300px !important; }
-          .week-table { font-size: 10px !important; }
-          .week-table td { padding: 3px 3px !important; }
-          .point-reference { font-size: 8px !important; }
-          .tip-top-row { gap: 12px !important; flex-wrap: nowrap !important; }
-          .tip-inputs { gap: 12px !important; margin-bottom: 6px !important; }
-          .tip-field label { font-size: 9px !important; }
-          .tip-stat { font-size: 13px !important; }
-          .denom-table { font-size: 10px !important; }
-          .recon-row { padding: 2px 0 !important; }
-          .hero-stat { gap: 10px !important; margin: 8px 0 !important; }
+          /* Print fills landscape page: expand fonts + spacing to use ~90% of
+             page height, leaving small margin. Scales to ~700pt at print width */
+          .tip-page-split { font-size: 92%; gap: 22px !important; }
+          .tip-left-col { width: 340px !important; }
+          .week-table { font-size: 11px !important; }
+          .week-table td { padding: 5px 4px !important; }
+          .point-reference { font-size: 9.5px !important; }
+          .tip-top-row { gap: 16px !important; flex-wrap: nowrap !important; }
+          .tip-inputs { gap: 13px !important; margin-bottom: 8px !important; }
+          .tip-field label { font-size: 10px !important; }
+          .tip-stat { font-size: 14px !important; }
+          .denom-table { font-size: 10.5px !important; }
+          .recon-row { padding: 5px 0 !important; }
+          .hero-stat { gap: 13px !important; margin: 13px 0 !important; }
           /* amber summary boxes -> outline only (amber border, white bg) */
-          .hero-item { padding: 8px 12px !important; background: transparent !important; border-color: #C98A3E !important; }
-          .hero-value { font-size: 18px !important; }
-          .hero-label { margin-bottom: 2px !important; }
-          /* breathing room below the logo, and trim its reserved height so the
-             two columns fit the shorter landscape page */
-          .tip-logo-space { min-height: 70px !important; margin-bottom: 8px !important; }
-          .tip-logo-img { max-height: 66px !important; }
+          .hero-item { padding: 12px 14px !important; background: transparent !important; border-color: #C98A3E !important; }
+          .hero-value { font-size: 21px !important; }
+          .hero-label { margin-bottom: 3px !important; font-size: 9px !important; }
+          /* Logo breathing room for landscape */
+          .tip-logo-space { min-height: 95px !important; margin-bottom: 14px !important; }
+          .tip-logo-img { max-height: 91px !important; }
           /* Set Schedule print: swap the live interactive grid for the branded
              sheet node (same renderer as the PDF). Only the portal shows. */
           body.printing-schedule .hub > *:not(.schedule-print-portal) { display: none !important; }
@@ -2664,14 +2673,26 @@ export default function SchedulingHub({ session, onSignOut }) {
         body.printing-qr .qr-print-sheet { page: qrPortrait; }
         .schedule-print-portal { display: none; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
         /* PDF capture (html2canvas on the live card) doesn't see @media print, so
-           this class is toggled on during tip-sheet PDF export for outline-only
-           boxes + vertical compaction that keeps it to one landscape page. */
+           this class provides outline-only boxes + compaction for one landscape page
+           at the fixed 1280px capture width. Rules are independent, not relying on
+           @media print or base styles. */
         .tip-pdf-mode .check-box, .tip-pdf-mode .cash-recon, .tip-pdf-mode .hero-item { background: transparent !important; }
         .tip-pdf-mode .cash-recon { border: 1px solid rgba(43,42,37,0.2) !important; }
-        .tip-pdf-mode .hero-item { border-color: #C98A3E !important; padding: 12px 14px !important; }
-        .tip-pdf-mode .tip-logo-space { min-height: 74px !important; margin-bottom: 8px !important; }
-        .tip-pdf-mode .tip-logo-img { max-height: 70px !important; }
+        .tip-pdf-mode .hero-item { border-color: #C98A3E !important; padding: 10px 12px !important; }
+        .tip-pdf-mode .hero-stat { gap: 10px !important; margin: 10px 0 !important; }
+        .tip-pdf-mode .hero-value { font-size: 18px !important; }
+        .tip-pdf-mode .hero-label { margin-bottom: 2px !important; font-size: 8.5px !important; }
+        .tip-pdf-mode .tip-logo-space { min-height: 80px !important; margin-bottom: 10px !important; }
+        .tip-pdf-mode .tip-logo-img { max-height: 76px !important; }
+        .tip-pdf-mode .tip-page-split { font-size: 87%; gap: 18px !important; }
+        .tip-pdf-mode .tip-left-col { width: 310px !important; }
+        .tip-pdf-mode .week-table { font-size: 10px !important; }
+        .tip-pdf-mode .week-table td { padding: 4px 3px !important; }
+        .tip-pdf-mode .tip-stat { font-size: 12px !important; }
+        .tip-pdf-mode .denom-table { font-size: 10px !important; }
         .tip-pdf-mode .recon-row { padding: 3px 0 !important; }
+        .tip-pdf-mode .tip-inputs { gap: 12px !important; margin-bottom: 6px !important; }
+        .tip-pdf-mode .tip-top-row { gap: 14px !important; }
 
         /* QR print sheet — branded single portrait page. Colors are accents on
            white (B&W friendly); color-adjust keeps the dark band + pills from
