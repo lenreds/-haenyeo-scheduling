@@ -592,11 +592,11 @@ function mailtoLink(subject, body) {
 }
 const QR_CODES = [
   { key: "register", label: "Register", printLabel: "Register", instruction: 'Replace "Your Name Here" with your full name, add your phone number, and send', subject: `[REGISTER] – Your Name Here – ${REGISTER_CODE}`, body: "My best phone number is: " },
-  { key: "reqoff", label: "Request Off", printLabel: "Request Off", instruction: 'Replace "Your Name" with your name, add the date, and send', subject: "[SCHEDULING] – REQUEST OFF – Your Name – Date" },
-  { key: "timeoff-c", label: "Time Off (consecutive)", printLabel: "Time Off — Date Range", instruction: 'Replace "Your Name" with your name, add your start and end dates, and send', subject: "[SCHEDULING] – TIME OFF – Your Name – Start Date to End Date" },
-  { key: "timeoff-n", label: "Time Off (non-consecutive)", printLabel: "Time Off — Specific Dates", instruction: 'Replace "Your Name" with your name, list each date separated by commas, and send', subject: "[SCHEDULING] – TIME OFF – Your Name – Date, Date, Date" },
-  { key: "swap", label: "Shift Swap", printLabel: "Shift Swap", instruction: 'Replace "Your Name" with your name, add the date, and mention who you\'re swapping with in the body', subject: "[SCHEDULING] – SHIFT SWAP – Your Name – Date", body: "I'd like to swap with: " },
-  { key: "coverage", label: "Coverage Request", printLabel: "Coverage Request", instruction: 'Replace "Your Name" with your name, add the date, and send', subject: "[SCHEDULING] – COVERAGE REQUEST – Your Name – Date" },
+  { key: "reqoff", label: "Request Off", printLabel: "Request Off", instruction: 'Replace "Your Name" with your name, add the date, and send', subject: "RO Your Name – Date" },
+  { key: "timeoff-c", label: "Time Off (consecutive)", printLabel: "Time Off — Date Range", instruction: 'Replace "Your Name" with your name, add your start and end dates, and send', subject: "RO Your Name – Start Date to End Date" },
+  { key: "timeoff-n", label: "Time Off (non-consecutive)", printLabel: "Time Off — Specific Dates", instruction: 'Replace "Your Name" with your name, list each date separated by commas, and send', subject: "RO Your Name – Date, Date, Date" },
+  { key: "swap", label: "Shift Swap", printLabel: "Shift Swap", instruction: 'Replace "Your Name" with your name, add the date, and say who you\'re swapping with in the body', subject: "swap Your Name – Date", body: "I would like to swap with: " },
+  { key: "coverage", label: "Coverage Request", printLabel: "Coverage Request", instruction: 'Replace "Your Name" with your name, add the date, say who is covering you, and CC that person\'s email', subject: "coverage Your Name – Date", body: "The person covering me will be: " },
   { key: "update", label: "Update My Info", printLabel: "Update Contact Info", instruction: 'Replace "Your Name" with your name and fill in your new email and/or phone number', subject: `[UPDATE INFO] – Your Name – ${REGISTER_CODE}`, body: "My new email is: \nMy new phone is: " },
 ];
 
@@ -607,7 +607,7 @@ const QR_PRINT_CARDS = [
   { key: "timeoff-c", title: "Time Off — Date Range", color: SHEET.green, text: "Multiple days in a row — add start and end dates" },
   { key: "timeoff-n", title: "Time Off — Specific Days", color: SHEET.green, text: "Scattered dates — list each one separated by commas" },
   { key: "swap", title: "Shift Swap", color: SHEET.blue, text: "Add the date + say who you're swapping with" },
-  { key: "coverage", title: "Coverage Request", color: SHEET.blue, text: "Need your shift covered — add your name and date" },
+  { key: "coverage", title: "Coverage Request", color: SHEET.blue, text: "Add the date + who is covering you — CC them on the email" },
   { key: "update", title: "Update My Info", color: SHEET.purple, text: "New email or phone? Fill in what changed" },
 ];
 

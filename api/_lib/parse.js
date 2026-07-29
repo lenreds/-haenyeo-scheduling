@@ -161,7 +161,8 @@ export function parseSchedulingKeywords(subject) {
   if (/\b(cover|covering|coverage|need someone)\b/.test(lower)) {
     return { type: "COVERAGE REQUEST" };
   }
-  if (/\boff\b/.test(lower)) {
+  // "ro" is the short form the registration email teaches ("RO july 28").
+  if (/\b(off|ro)\b/.test(lower)) {
     // "time off" across more than one date is the multi-day TIME OFF type;
     // a single date (or none) is an ordinary REQUEST OFF.
     if (/\btime off\b/.test(lower) && extractDatesFromSubject(subject).length > 1) {
@@ -173,27 +174,38 @@ export function parseSchedulingKeywords(subject) {
   return null;
 }
 
-// Extract any dates from subject. Returns array of ISO date strings or [].
-export function extractDatesFromSubject(subject) {
-  const dates = new Set();
+const MONTH_INDEX = {
+  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+  jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+};
+
+// Extract any dates from a subject. Handles both numeric "8/14" / "8/14/26" and
+// month-name "july 28" forms — the registration email tells staff to write the
+// latter ("RO july 28"), so numeric-only parsing would leave those cards blank.
+// Years are inferred: the reference year, rolled forward if the date would land
+// more than ~2 months in the past (a request typed near year-end). Mirrors
+// parseRailDates() in src/App.jsx. Returns sorted ISO dates, or [].
+export function extractDatesFromSubject(subject, ref = new Date()) {
   if (!subject) return [];
-
-  const numeric = /(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/g;
+  const s = String(subject);
+  const refY = ref.getFullYear();
+  const out = new Set();
+  const push = (m, d, y) => {
+    if (m < 1 || m > 12 || d < 1 || d > 31) return;
+    const yr = y != null
+      ? (y < 100 ? 2000 + y : y)
+      : ((new Date(refY, m - 1, d) - ref) / 86400000 < -60 ? refY + 1 : refY);
+    out.add(`${yr}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`);
+  };
   let mm;
-  while ((mm = numeric.exec(subject))) {
-    const m = Number(mm[1]);
-    const d = Number(mm[2]);
-    const y = mm[3] ? Number(mm[3]) : null;
-    if (m < 1 || m > 12 || d < 1 || d > 31) continue;
-
-    const refYear = new Date().getFullYear();
-    const cand = new Date(refYear, m - 1, d);
-    const yearFinal = (cand - new Date()) / 86400000 < -60 ? refYear + 1 : refYear;
-    const isoDate = `${yearFinal}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
-    dates.add(isoDate);
+  const numeric = /(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/g;
+  while ((mm = numeric.exec(s))) push(Number(mm[1]), Number(mm[2]), mm[3] ? Number(mm[3]) : null);
+  const named = /\b([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:,?\s*(\d{4}))?/g;
+  while ((mm = named.exec(s))) {
+    const mi = MONTH_INDEX[mm[1].slice(0, 3).toLowerCase()];
+    if (mi) push(mi, Number(mm[2]), mm[3] ? Number(mm[3]) : null);
   }
-
-  return [...dates].sort();
+  return [...out].sort();
 }
 
 // Match sender email against registered staff's personal_email field.

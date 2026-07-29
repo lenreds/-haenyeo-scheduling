@@ -5,19 +5,42 @@
 const SIG = "— Haenyeo Management";
 
 export function buildWelcomeEmail(name) {
-  const subject = "You're registered — here's how scheduling works at Haenyeo";
+  const subject = "You're in — here's how scheduling works at Haenyeo";
   const body =
-`Hi ${name}, you're all set on the Haenyeo scheduling system! From now on, your weekly schedule will come straight to this email.
+`Hi ${name}, you're all set! Here's everything you need to know about submitting scheduling requests going forward.
 
-To send any scheduling requests, email haenyeo.schedule@gmail.com using these subject line formats:
+Send all requests to: haenyeo.schedule@gmail.com
 
-Single day off: [SCHEDULING] – REQUEST OFF – [Your Name] – [Date]
-Consecutive time off: [SCHEDULING] – TIME OFF – [Your Name] – Jul 28 to Aug 4
-Non-consecutive days: [SCHEDULING] – TIME OFF – [Your Name] – Jul 28, Jul 30, Aug 2
-Shift swap: [SCHEDULING] – SHIFT SWAP – [Your Name] – [Date] (mention who you're swapping with in the body)
-Coverage needed: [SCHEDULING] – COVERAGE REQUEST – [Your Name] – [Date]
+Just write a normal email — keep it simple. Here's what to include:
 
-You'll hear back once your request is reviewed. If your contact info ever changes, scan the "Update My Info" QR code posted at the restaurant.
+Time off (single day):
+Subject: RO july 28
+Body: any details or reason (optional)
+
+Time off (multiple days in a row):
+Subject: RO july 28 to august 4
+
+Time off (specific scattered days):
+Subject: RO july 28, july 30, august 2
+
+Shift swap:
+Subject: swap august 3
+Body: mention who you want to swap with
+
+Need your shift covered:
+First find someone who can cover you, then email it in and CC the person covering your shift.
+Subject: coverage august 3
+Body: mention who will be covering you
+
+You'll get an automatic reply confirming we received it. Once it's reviewed you'll hear back with an approval or denial.
+
+A few things to know:
+
+- Your request goes directly to management — no one else sees it
+- The weekly schedule will also be sent to this email once it's published
+- If your email or phone number ever changes, let a manager know so we can update it
+
+Questions? Ask Lenis or Jon directly.
 
 ${SIG}`;
   return { subject, body };
