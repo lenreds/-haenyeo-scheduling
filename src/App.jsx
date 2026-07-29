@@ -3,8 +3,6 @@ import { Check, X, AlertTriangle, Users, Package, Clock, ChevronLeft, ChevronRig
 import {
   fetchInitial,
   fetchRailRequests,
-  upsertPattern,
-  upsertPlaceholder,
   updateRailStatus,
   upsertScheduleOverride,
   sendRailReply,
@@ -22,6 +20,19 @@ import {
   triggerSchedulePublish,
   triggerTipSheetSend,
   submitManualRail,
+  fetchWeeklySchedule,
+  fetchWeeklyPlaceholders,
+  upsertWeeklyShift,
+  upsertWeeklyPlaceholder,
+  seedWeeklySchedule,
+  seedWeeklyPlaceholders,
+  fetchScheduleNotes,
+  insertScheduleNote,
+  updateScheduleNote,
+  deleteScheduleNote,
+  notesTableAvailable,
+  fetchScheduleWeeks,
+  setWeekPublished,
 } from "./lib/data.js";
 import QRCode from "qrcode";
 
@@ -1008,12 +1019,10 @@ export default function SchedulingHub({ session, onSignOut }) {
   const [qrPrintUrls, setQrPrintUrls] = useState({}); // all 7 QR images for the print sheet
   const [qrPrinting, setQrPrinting] = useState(false);
   const [timeOffBlock, setTimeOffBlock] = useState(null); // { name, dayLabel, onOverride } | null
-  const [publishModal, setPublishModal] = useState(null); // { weekIdx } | null
   const [publishBusy, setPublishBusy] = useState(false);
   const [tipFinalized, setTipFinalized] = useState(false);
   const [tipFinalizedAt, setTipFinalizedAt] = useState(null);
   const [finalizing, setFinalizing] = useState(false);
-  const [publishedWeeks, setPublishedWeeks] = useState(new Set());
   const [tipDateIso, setTipDateIso] = useState("2026-07-02");
   const [floorCash, setFloorCash] = useState("");
   const [floorCredit, setFloorCredit] = useState("");
@@ -1051,9 +1060,171 @@ export default function SchedulingHub({ session, onSignOut }) {
     return order.filter((r) => fohRoster.some((p) => p.role === r));
   }, [fohRoster]);
 
+  // ---- Independent weekly schedules (migration 0010) ----------------------
+  // `patterns` and `placeholderPatterns` are the RECURRING TEMPLATE, shared by
+  // every week — that's what made editing one week edit them all. The two maps
+  // below hold the weeks that have their own saved record, keyed by the week's
+  // Monday ISO. A week absent from the map has never been edited and renders
+  // from the template; the first edit snapshots it in (see writeCellShift).
+  // Declared here, above autoSlots, because the Tip Sheet resolves through them.
+  const [placeholderPatterns, setPlaceholderPatterns] = useState(() => {
+    const init = {};
+    Object.entries(PLACEHOLDER_GROUPS).forEach(([key, count]) => {
+      init[key] = Array.from({ length: count }, () => ["OFF", "OFF", "OFF", "OFF", "OFF", "OFF", "OFF"]);
+    });
+    return init;
+  });
+  const [weeklyPatterns, setWeeklyPatterns] = useState({});        // { "2026-08-03": { name: [7] } }
+  const [weeklyPlaceholders, setWeeklyPlaceholders] = useState({}); // { "2026-08-03": { group: [[7]] } }
+  // Week starts we've already fetched, so we don't refetch on every render.
+  const loadedWeeksRef = useRef(new Set());
+
+  // staff_id -> name. Declared here because the weekly loaders need it;
+  // staffNameById further down aliases this rather than rebuilding it.
+  const idToName = useMemo(() => {
+    const m = {};
+    staffList.forEach((s) => { if (s.id) m[s.id] = s.name; });
+    return m;
+  }, [staffList]);
+
+  // Monday of the week currently shown in Set Schedule. Derived straight from
+  // the offset so it doesn't depend on activeWeek, which is built further down.
+  const activeWeekStart = useMemo(() => {
+    const m = mondayOf(new Date());
+    m.setDate(m.getDate() + weekIndex * 7);
+    return iso(m);
+  }, [weekIndex]);
+
+  // The schedule that applies to a given week — its own record if it has one,
+  // otherwise the shared template. Every read path goes through these, so Set
+  // Schedule, the Calendar and the Tip Sheet can never disagree about a week.
+  function patternsForWeekStart(weekStartIso) {
+    return (weekStartIso && weeklyPatterns[weekStartIso]) || patterns;
+  }
+  function placeholdersForWeekStart(weekStartIso) {
+    return (weekStartIso && weeklyPlaceholders[weekStartIso]) || placeholderPatterns;
+  }
+  // For the many call sites that hold a single day rather than a week. Day
+  // shapes differ: the calendar grid uses { date, iso }, dateInfoFromIso uses
+  // { dateObj, iso }. Handle all of them — falling through to the template here
+  // would silently show the wrong week rather than failing loudly.
+  function patternsForDate(day) {
+    if (!day) return patterns;
+    const d =
+      day instanceof Date ? day
+      : day.date instanceof Date ? day.date
+      : day.dateObj instanceof Date ? day.dateObj
+      : day.iso ? new Date(`${day.iso}T00:00:00`)
+      : null;
+    return d ? patternsForWeekStart(iso(mondayOf(d))) : patterns;
+  }
+  const activePatterns = patternsForWeekStart(activeWeekStart);
+  const activePlaceholders = placeholdersForWeekStart(activeWeekStart);
+
+  // Pull a week's stored record before we display it. Pre-migration the tables
+  // don't exist, fetch returns null, and the week simply stays on the template.
+  async function ensureWeekLoaded(weekStartIso) {
+    if (!weekStartIso || loadedWeeksRef.current.has(weekStartIso)) return;
+    loadedWeeksRef.current.add(weekStartIso);
+    try {
+      const [wp, wph] = await Promise.all([
+        fetchWeeklySchedule(weekStartIso, idToName),
+        fetchWeeklyPlaceholders(weekStartIso),
+      ]);
+      if (wp) setWeeklyPatterns((prev) => ({ ...prev, [weekStartIso]: wp }));
+      if (wph) setWeeklyPlaceholders((prev) => ({ ...prev, [weekStartIso]: wph }));
+    } catch (e) {
+      console.error(`Weekly schedule load failed for ${weekStartIso}:`, e);
+      loadedWeeksRef.current.delete(weekStartIso); // allow a retry
+    }
+  }
+
+  // ---- Per-week notes (migration 0010) ------------------------------------
+  const [notesOpen, setNotesOpen] = useState(false);
+  const [notesByWeek, setNotesByWeek] = useState({}); // { weekStartIso: [rows] }
+  const [noteDraft, setNoteDraft] = useState("");
+  const [noteEditId, setNoteEditId] = useState(null);
+  const [noteEditText, setNoteEditText] = useState("");
+  const weekNotes = notesByWeek[activeWeekStart] || [];
+
+  async function reloadNotes(weekStartIso) {
+    if (!weekStartIso) return;
+    try {
+      const rows = await fetchScheduleNotes(weekStartIso);
+      setNotesByWeek((prev) => ({ ...prev, [weekStartIso]: rows }));
+    } catch (e) {
+      console.error("Notes load failed:", e);
+    }
+  }
+
+  // Auto-note on Rail approval: "Bernie — Request Off — Aug 3 — Approved".
+  // A request can span weeks, so dates are grouped and one note is written per
+  // affected week. Failures are logged and ignored — a missing note must never
+  // undo an approval that already wrote to the schedule.
+  async function noteApproval(item, isoDates) {
+    if (!isoDates || !isoDates.length) return;
+    const byWeek = {};
+    isoDates.forEach((d) => {
+      const ws = iso(mondayOf(new Date(`${d}T00:00:00`)));
+      if (!byWeek[ws]) byWeek[ws] = [];
+      byWeek[ws].push(d);
+    });
+    const label = TYPE_STYLES[item.type]?.label || item.type;
+    const staffId = item.staffId || nameToId[item.name] || null;
+    for (const [ws, ds] of Object.entries(byWeek)) {
+      const pretty = ds.sort()
+        .map((d) => new Date(`${d}T00:00:00`).toLocaleDateString(undefined, MONTH_FMT))
+        .join(", ");
+      try {
+        const row = await insertScheduleNote({
+          weekStartIso: ws,
+          note: `${item.name} — ${label} — ${pretty} — Approved`,
+          staffId, source: "rail", railRequestId: item.id,
+        });
+        if (row) setNotesByWeek((prev) => ({ ...prev, [ws]: [row, ...(prev[ws] || [])] }));
+      } catch (e) {
+        console.error("Auto-note failed:", e);
+      }
+    }
+  }
+
+  async function handleAddNote() {
+    const text = noteDraft.trim();
+    if (!text || !activeWeekStart) return;
+    setNoteDraft("");
+    try {
+      const row = await insertScheduleNote({ weekStartIso: activeWeekStart, note: text });
+      if (row) {
+        setNotesByWeek((prev) => ({ ...prev, [activeWeekStart]: [row, ...(prev[activeWeekStart] || [])] }));
+      }
+    } catch (e) {
+      console.error("Add note failed:", e);
+      setNoteDraft(text); // hand it back rather than losing what they typed
+    }
+  }
+  async function handleSaveNoteEdit(id) {
+    const text = noteEditText.trim();
+    if (!text) return;
+    setNoteEditId(null);
+    setNotesByWeek((prev) => ({
+      ...prev,
+      [activeWeekStart]: (prev[activeWeekStart] || []).map((n) => (n.id === id ? { ...n, note: text } : n)),
+    }));
+    try { await updateScheduleNote(id, text); }
+    catch (e) { console.error("Edit note failed:", e); reloadNotes(activeWeekStart); }
+  }
+  async function handleDeleteNote(id) {
+    setNotesByWeek((prev) => ({
+      ...prev,
+      [activeWeekStart]: (prev[activeWeekStart] || []).filter((n) => n.id !== id),
+    }));
+    try { await deleteScheduleNote(id); }
+    catch (e) { console.error("Delete note failed:", e); reloadNotes(activeWeekStart); }
+  }
+
   const autoSlots = useMemo(
-    () => autoAssignSlots(tipDateInfo, patterns, overrides, fohRoster),
-    [tipDateIso, patterns, overrides, fohRoster]
+    () => autoAssignSlots(tipDateInfo, patternsForDate(tipDateInfo), overrides, fohRoster),
+    [tipDateIso, patterns, weeklyPatterns, overrides, fohRoster]
   );
 
   function toggleCustomMode() {
@@ -1278,14 +1449,8 @@ export default function SchedulingHub({ session, onSignOut }) {
   const [scheduleView, setScheduleView] = useState("foh");
   const [scheduleLocked, setScheduleLocked] = useState(false);
   const [finalizedWeeks, setFinalizedWeeks] = useState(new Set()); // { "2026-07-13" }
-  const [placeholderPatterns, setPlaceholderPatterns] = useState(() => {
-    const init = {};
-    Object.entries(PLACEHOLDER_GROUPS).forEach(([key, count]) => {
-      init[key] = Array.from({ length: count }, () => ["OFF", "OFF", "OFF", "OFF", "OFF", "OFF", "OFF"]);
-    });
-    return init;
-  });
   const [loadError, setLoadError] = useState("");
+  const [publishedWeekStarts, setPublishedWeekStarts] = useState(new Set());
 
   // Load everything from Supabase on mount. DB values win where present;
   // anything the DB doesn't have falls back to the seed constants so the UI is
@@ -1365,6 +1530,48 @@ export default function SchedulingHub({ session, onSignOut }) {
     return () => { cancelled = true; };
   }, []);
 
+  // Finalize/publish state per week. Without this the Finalize button forgot
+  // itself on every reload — it wrote to schedule_weeks but nothing read back.
+  useEffect(() => {
+    let cancelled = false;
+    fetchScheduleWeeks()
+      .then((rows) => {
+        if (cancelled) return;
+        setFinalizedWeeks(new Set(rows.filter((r) => r.finalized).map((r) => r.week_start)));
+        setPublishedWeekStarts(new Set(rows.filter((r) => r.published).map((r) => r.week_start)));
+      })
+      .catch((e) => console.error("Schedule weeks load failed:", e));
+    return () => { cancelled = true; };
+  }, []);
+
+  // Pull each week's own record as it comes into view — the Set Schedule week,
+  // and every week the calendar is showing (so day summaries match the grid).
+  useEffect(() => {
+    if (!Object.keys(idToName).length) return; // need the id->name map first
+    ensureWeekLoaded(activeWeekStart);
+  }, [activeWeekStart, idToName]);
+
+  useEffect(() => {
+    if (!Object.keys(idToName).length) return;
+    const starts = new Set();
+    (calMonthView === 3 ? threeMonthWeeks.flat() : weeks).forEach((w) => {
+      if (w?.[0]?.date) starts.add(iso(mondayOf(w[0].date)));
+    });
+    starts.forEach((s) => ensureWeekLoaded(s));
+  }, [weeks, threeMonthWeeks, calMonthView, idToName]);
+
+  // The Tip Sheet auto-fills from whatever week its date falls in.
+  useEffect(() => {
+    if (!Object.keys(idToName).length || !tipDateIso) return;
+    ensureWeekLoaded(iso(mondayOf(new Date(`${tipDateIso}T00:00:00`))));
+  }, [tipDateIso, idToName]);
+
+  // Notes for the week on screen (drives the "Notes (N)" count, so it loads
+  // whether or not the panel is open).
+  useEffect(() => {
+    if (activeWeekStart && !notesByWeek[activeWeekStart]) reloadNotes(activeWeekStart);
+  }, [activeWeekStart]);
+
   // Pending staff info-update requests (Staff tab review section).
   function reloadInfoUpdates() {
     return fetchInfoUpdates().then((u) => setInfoUpdates(u)).catch(() => setInfoUpdates([]));
@@ -1383,11 +1590,7 @@ export default function SchedulingHub({ session, onSignOut }) {
     return () => { cancelled = true; };
   }, [qrModal]);
 
-  const staffNameById = useMemo(() => {
-    const m = {};
-    staffList.forEach((s) => { if (s.id) m[s.id] = s.name; });
-    return m;
-  }, [staffList]);
+  const staffNameById = idToName;
 
   async function handleApproveInfo(u) {
     try {
@@ -1595,44 +1798,66 @@ export default function SchedulingHub({ session, onSignOut }) {
         else next.delete(weekStart);
         return next;
       });
-      addLog(`Week ${weekStart} ${finalized ? "finalized" : "unfin alized"}`, "good");
+      addLog(`Week ${weekStart} ${finalized ? "finalized" : "unfinalized"}`, "good");
     } catch (e) {
       console.error("Finalize toggle failed:", e);
       addLog(`Finalize failed: ${e.message}`, "warn");
     }
   }
 
+  // Send every finalized week, using the same real publish path as the Calendar
+  // preview modal did: build one branded PDF per week per section client-side,
+  // then hand the payloads + attachments to /api/send-schedule. The previous
+  // version posted a placeholder payload with empty recipients and no token, so
+  // it never actually sent anything — and it cleared the finalized set whether
+  // or not the send worked.
   async function publishFinalizedWeeks() {
-    if (!session?.access_token) return;
-    if (finalizedWeeks.size === 0) {
-      addLog("No finalized weeks to publish", "warn");
-      return;
-    }
+    if (publishBusy) return;
+    const token = session?.access_token;
+    if (!token) { addLog("Sign in to publish", "warn"); return; }
+    const starts = [...finalizedWeeks].sort();
+    if (!starts.length) { addLog("No finalized weeks to publish", "warn"); return; }
+
+    setPublishBusy(true);
     try {
-      // Call existing send-schedule endpoint with list of finalized weeks
-      const weeks = Array.from(finalizedWeeks).map(start => {
-        const d = new Date(start);
-        return {
-          start: d.toISOString().split('T')[0],
-          end: new Date(d.getTime() + 6 * 86400000).toISOString().split('T')[0],
-        };
-      });
-
-      // Reuse existing publish logic but mark as published
-      await triggerSchedulePublish({
-        weeks: weeks.map(w => ({
-          weekStart: w.start,
-          section: "FOH", // Would need to expand for all sections
-          recipients: [], // Would be populated from preferences
-        })),
-      });
-
-      addLog(`Published ${finalizedWeeks.size} finalized week(s)`, "good");
-      setFinalizedWeeks(new Set());
+      const selWeeks = starts.map((s) => buildWeekByOffset(weekOffsetFor(new Date(`${s}T00:00:00`))));
+      const fohAttachments = [];
+      const bkAttachments = [];
+      for (const week of selWeeks) {
+        fohAttachments.push({
+          filename: `Haenyeo-Schedule-FOH-${weekFileRange(week)}.pdf`,
+          b64: await sheetNodePdfBase64(scheduleSheetNodeFor("FOH", week)),
+        });
+        bkAttachments.push({
+          filename: `Haenyeo-Schedule-BOH-Kitchen-${weekFileRange(week)}.pdf`,
+          b64: await sheetNodePdfBase64(scheduleSheetNodeFor("BOHKITCHEN", week)),
+        });
+      }
+      const [fohRes, bkRes] = await Promise.all([
+        triggerSchedulePublish(
+          { weeks: selWeeks.map(buildSchedulePayload), sections: ["FOH"], attachments: fohAttachments },
+          token
+        ),
+        triggerSchedulePublish(
+          { weeks: selWeeks.map(buildBohKitchenPayload), sections: ["BOH", "Kitchen"], attachments: bkAttachments },
+          token
+        ),
+      ]);
+      const err = fohRes?.error || bkRes?.error;
+      if (err) {
+        addLog(`Publish email issue (${err})`, "warn");
+      } else {
+        // Only mark published once the sends actually came back clean.
+        await Promise.all(starts.map((s) => setWeekPublished(s).catch(() => {})));
+        setPublishedWeekStarts((prev) => new Set([...prev, ...starts]));
+        const n = starts.length;
+        addLog(`Published ${n} week${n === 1 ? "" : "s"} — FOH ${fohRes?.sent ?? 0}, BOH & Kitchen ${bkRes?.sent ?? 0}`, "good");
+      }
     } catch (e) {
       console.error("Publish failed:", e);
       addLog(`Publish failed: ${e.message}`, "warn");
     }
+    setPublishBusy(false);
   }
 
   // Re-pull rail requests from the DB (used after a manual Gmail poll so new
@@ -1712,14 +1937,25 @@ export default function SchedulingHub({ session, onSignOut }) {
   }, [tipDateIso]);
   // BOH / Kitchen dropdown cells write straight through; Management keeps the
   // click interaction but toggles Off <-> FM only.
+  // Same per-week rule as writeCellShift: edits land on this week's own record.
   function writePlaceholderShift(groupKey, slotIdx, weekday, newType) {
-    setPlaceholderPatterns((prev) => {
-      const rows = (prev[groupKey] || []).map((row) => [...row]);
-      while (rows.length <= slotIdx) rows.push([...ALL_OFF_WEEK]);
-      rows[slotIdx][weekday] = newType;
-      return { ...prev, [groupKey]: rows };
-    });
-    upsertPlaceholder(groupKey, slotIdx, weekday, newType).catch((e) => console.error("Save placeholder failed:", e));
+    const ws = activeWeekStart;
+    const base = weeklyPlaceholders[ws] || placeholderPatterns;
+    const alreadySeeded = !!weeklyPlaceholders[ws];
+    const rows = (base[groupKey] || []).map((row) => [...row]);
+    while (rows.length <= slotIdx) rows.push([...ALL_OFF_WEEK]);
+    rows[slotIdx][weekday] = newType;
+    const nextWeek = { ...base, [groupKey]: rows };
+    setWeeklyPlaceholders((prev) => ({ ...prev, [ws]: nextWeek }));
+    const slotName = (groupRosters[groupKey] || [])[slotIdx] || "";
+    (async () => {
+      try {
+        if (!alreadySeeded) await seedWeeklyPlaceholders(ws, base, groupRosters);
+        await upsertWeeklyPlaceholder(ws, groupKey, slotIdx, slotName, weekday, newType);
+      } catch (e) {
+        console.error("Save weekly placeholder failed:", e);
+      }
+    })();
   }
   function setPlaceholderShift(groupKey, slotIdx, weekday, newType) {
     if (scheduleLocked) return;
@@ -1747,7 +1983,7 @@ export default function SchedulingHub({ session, onSignOut }) {
     for (const [grp, label] of checks) {
       const idx = (groupRosters[grp] || []).indexOf(name);
       if (idx < 0) continue;
-      if ((placeholderPatterns[grp]?.[idx]?.[weekday] || "OFF") !== "OFF") return label;
+      if ((activePlaceholders[grp]?.[idx]?.[weekday] || "OFF") !== "OFF") return label;
     }
     return null;
   }
@@ -1755,7 +1991,7 @@ export default function SchedulingHub({ session, onSignOut }) {
   function toggleManagementCell(slotIdx, weekday) {
     if (scheduleLocked) return;
     const name = (groupRosters.management || [])[slotIdx];
-    const current = placeholderPatterns.management?.[slotIdx]?.[weekday] || "OFF";
+    const current = activePlaceholders.management?.[slotIdx]?.[weekday] || "OFF";
     if (current === "OFF") {
       const conflict = crossSectionBlock(name, "management", weekday);
       if (conflict) { window.alert(`${name} is already scheduled in ${conflict} that day — can't also be FM.`); return; }
@@ -1765,7 +2001,7 @@ export default function SchedulingHub({ session, onSignOut }) {
 
   // Render one BOH/Kitchen roster row (dropdown cells with cross-section blocking).
   function renderGroupRow(groupKey, personName, idx) {
-    const row = placeholderPatterns[groupKey]?.[idx] || ALL_OFF_WEEK;
+    const row = activePlaceholders[groupKey]?.[idx] || ALL_OFF_WEEK;
     const isYesPerson = personName.startsWith("Jenny") || personName.startsWith("Ajuma");
     const opts = roleOptions[GROUP_ROLE[groupKey]] || [{ code: "OFF", label: "Off" }];
     return (
@@ -1879,6 +2115,7 @@ export default function SchedulingHub({ session, onSignOut }) {
       const { dates } = timeOffDates(item.dates);
       if (!dates.length) { console.warn("No parseable dates on TIME OFF:", item.dates); return; }
       await writeOffDates(item, staffId, dates);
+      await noteApproval(item, dates);
       return;
     }
 
@@ -1897,6 +2134,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         await upsertScheduleOverride({ staffId, dateIso: isoStr, overrideType, isSwap: false, railRequestId: item.id });
         setOverrides((o) => ({ ...o, [`${item.name}|${isoStr}`]: { type: overrideType, swap: false, railId: item.id } }));
       }
+      await noteApproval(item, dates);
     } else if (item.type === "SHIFT SWAP") {
       const partner = findSwapPartner(item);
       const isoStr = dates[0];
@@ -1908,8 +2146,9 @@ export default function SchedulingHub({ session, onSignOut }) {
       }
       if (!confirmOverwrite(item.name, isoStr) || !confirmOverwrite(partner.name, isoStr)) return;
       const di = dateInfoFromIso(isoStr);
-      const aShift = personShiftFor(item.name, di, patterns, overrides).type;
-      const bShift = personShiftFor(partner.name, di, patterns, overrides).type;
+      const swapPats = patternsForDate(di);
+      const aShift = personShiftFor(item.name, di, swapPats, overrides).type;
+      const bShift = personShiftFor(partner.name, di, swapPats, overrides).type;
       await upsertScheduleOverride({ staffId: aId, dateIso: isoStr, overrideType: bShift, isSwap: true, railRequestId: item.id });
       await upsertScheduleOverride({ staffId: bId, dateIso: isoStr, overrideType: aShift, isSwap: true, railRequestId: item.id });
       setOverrides((o) => ({
@@ -1917,6 +2156,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         [`${item.name}|${isoStr}`]: { type: bShift, swap: true, railId: item.id },
         [`${partner.name}|${isoStr}`]: { type: aShift, swap: true, railId: item.id },
       }));
+      await noteApproval(item, [isoStr]);
     }
   }
 
@@ -2163,12 +2403,19 @@ export default function SchedulingHub({ session, onSignOut }) {
     return [...names];
   }
 
-  // FOH dropdown cell: write the picked shift code (which carries its role)
+  // FOH dropdown cell: write the picked shift code (which carries its role) into
+  // THIS WEEK's own record. The first edit of a week that has never been touched
+  // snapshots the whole template week in first, so the week becomes a complete
+  // independent record and later template changes can't leak into it.
   function writeCellShift(name, weekday, code) {
-    setPatterns((prev) => ({
-      ...prev,
-      [name]: (prev[name] || ALL_OFF_WEEK).map((c, i) => (i === weekday ? code : c)),
-    }));
+    const ws = activeWeekStart;
+    const base = weeklyPatterns[ws] || patterns; // exactly what's on screen
+    const alreadySeeded = !!weeklyPatterns[ws];
+    const nextWeek = {
+      ...base,
+      [name]: (base[name] || ALL_OFF_WEEK).map((c, i) => (i === weekday ? code : c)),
+    };
+    setWeeklyPatterns((prev) => ({ ...prev, [ws]: nextWeek }));
     setCellRoleSel((prev) => {
       if (!(`${name}|${weekday}` in prev)) return prev;
       const next = { ...prev };
@@ -2176,9 +2423,14 @@ export default function SchedulingHub({ session, onSignOut }) {
       return next;
     });
     const staffId = nameToId[name];
-    if (staffId) {
-      upsertPattern(staffId, weekday, code).catch((e) => console.error("Save pattern failed:", e));
-    }
+    (async () => {
+      try {
+        if (!alreadySeeded) await seedWeeklySchedule(ws, base, nameToId);
+        if (staffId) await upsertWeeklyShift(ws, staffId, weekday, code);
+      } catch (e) {
+        console.error("Save weekly shift failed:", e);
+      }
+    })();
   }
   function setCellShift(name, weekday, code) {
     if (scheduleLocked) return;
@@ -2197,16 +2449,10 @@ export default function SchedulingHub({ session, onSignOut }) {
   function setCellRole(name, weekday, role) {
     if (scheduleLocked) return;
     setCellRoleSel((prev) => ({ ...prev, [`${name}|${weekday}`]: role }));
-    const current = (patterns[name] || ALL_OFF_WEEK)[weekday];
+    const current = (activePatterns[name] || ALL_OFF_WEEK)[weekday];
     if (current !== "OFF" && roleFromCode(current) !== role) {
-      setPatterns((prev) => ({
-        ...prev,
-        [name]: (prev[name] || ALL_OFF_WEEK).map((c, i) => (i === weekday ? "OFF" : c)),
-      }));
-      const staffId = nameToId[name];
-      if (staffId) {
-        upsertPattern(staffId, weekday, "OFF").catch((e) => console.error("Save pattern failed:", e));
-      }
+      writeCellShift(name, weekday, "OFF");
+      setCellRoleSel((prev) => ({ ...prev, [`${name}|${weekday}`]: role })); // writeCellShift clears it
     }
   }
 
@@ -2230,9 +2476,10 @@ export default function SchedulingHub({ session, onSignOut }) {
     return week.findIndex((d) => iso(d.date) === TODAY_ISO);
   }
   function buildManagerOn(week) {
+    const ph = placeholdersForWeekStart(week?.[0]?.iso);
     return week.map((d) =>
       (groupRosters.management || []).filter(
-        (_, idx) => (placeholderPatterns.management?.[idx]?.[d.weekday] || "OFF") !== "OFF"
+        (_, idx) => (ph.management?.[idx]?.[d.weekday] || "OFF") !== "OFF"
       )
     );
   }
@@ -2259,12 +2506,13 @@ export default function SchedulingHub({ session, onSignOut }) {
   // (from the shift code, e.g. Akira's BAR_6CL day is "Bar") so cells color by
   // role worked, not by the section row.
   function buildFohSheetGroups(week) {
+    const wp = patternsForWeekStart(week?.[0]?.iso);
     return fohRoleGroups.map((role) => ({
       label: role,
       rows: fohRoster
         .filter((p) => p.role === role)
         .map((p) => {
-          const types = week.map((d) => personShiftFor(p.name, d, patterns, overrides).type);
+          const types = week.map((d) => personShiftFor(p.name, d, wp, overrides).type);
           return {
             name: p.name,
             primaryRole: p.role,
@@ -2278,9 +2526,10 @@ export default function SchedulingHub({ session, onSignOut }) {
   // flat for the preview modal; `groups`/`managerOn`/`todayIdx`/`days` feed the
   // redesigned HTML email (older payloads without them still render).
   function buildSchedulePayload(week) {
+    const wp = patternsForWeekStart(week?.[0]?.iso);
     const rows = fohRoster.map((p) => ({
       name: p.name,
-      shifts: week.map((d) => shiftLabelForType(personShiftFor(p.name, d, patterns, overrides).type)),
+      shifts: week.map((d) => shiftLabelForType(personShiftFor(p.name, d, wp, overrides).type)),
     }));
     return {
       weekLabel: weekRangeLabel(week),
@@ -2300,8 +2549,9 @@ export default function SchedulingHub({ session, onSignOut }) {
     return SHIFT_META[code]?.label || code;
   }
   function buildGroupRows(gk, week) {
+    const ph = placeholdersForWeekStart(week?.[0]?.iso);
     return (groupRosters[gk] || []).map((personName, idx) => {
-      const codes = week.map((d) => placeholderPatterns[gk]?.[idx]?.[d.weekday] || "OFF");
+      const codes = week.map((d) => ph[gk]?.[idx]?.[d.weekday] || "OFF");
       return {
         name: personName,
         primaryRole: primaryRoleFor(personName),
@@ -2326,81 +2576,12 @@ export default function SchedulingHub({ session, onSignOut }) {
     };
   }
 
-  // Recipient counts per audience for the preview modal.
-  const publishCounts = useMemo(() => {
-    const inSec = (s, secs) => secs.includes(s.section);
-    const build = (secs) => {
-      const active = staffList.filter((s) => s.active !== false && inSec(s, secs));
-      const registered = active.filter((s) => s.registered && s.personal_email);
-      return { total: active.length, registered: registered.length, skipped: active.length - registered.length };
-    };
-    return { foh: build(["FOH"]), bk: build(["BOH", "Kitchen"]) };
-  }, [staffList]);
-
-  // The weeks offered in the publish modal: the clicked week + the next 3.
-  function publishCandidates(baseIdx) {
-    const out = [];
-    for (let i = baseIdx; i < baseIdx + 4; i++) out.push(i);
-    return out;
-  }
-  function publishWeek() {
-    setPublishModal({ baseIdx: weekIndex, selected: new Set([weekIndex]) });
-  }
-  function togglePublishWeek(idx) {
-    setPublishModal((m) => {
-      if (!m) return m;
-      const selected = new Set(m.selected);
-      if (selected.has(idx)) selected.delete(idx);
-      else selected.add(idx);
-      return { ...m, selected };
-    });
-  }
-  async function confirmPublish() {
-    if (publishBusy || !publishModal) return;
-    const idxs = [...publishModal.selected].sort((a, b) => a - b);
-    if (!idxs.length) return;
-    setPublishBusy(true);
-    const selWeeks = idxs.map((i) => buildWeekByOffset(i));
-    const token = session?.access_token;
-    try {
-      // Generate one branded PDF per selected week per section (client-side —
-      // html2canvas needs the DOM), then hand the base64 blobs to the server to
-      // attach. Sequential so we never hold many big canvases at once.
-      const fohAttachments = [];
-      const bkAttachments = [];
-      for (const week of selWeeks) {
-        fohAttachments.push({
-          filename: `Haenyeo-Schedule-FOH-${weekFileRange(week)}.pdf`,
-          b64: await sheetNodePdfBase64(scheduleSheetNodeFor("FOH", week)),
-        });
-        bkAttachments.push({
-          filename: `Haenyeo-Schedule-BOH-Kitchen-${weekFileRange(week)}.pdf`,
-          b64: await sheetNodePdfBase64(scheduleSheetNodeFor("BOHKITCHEN", week)),
-        });
-      }
-      const [fohRes, bkRes] = await Promise.all([
-        triggerSchedulePublish(
-          { weeks: selWeeks.map(buildSchedulePayload), sections: ["FOH"], attachments: fohAttachments },
-          token
-        ),
-        triggerSchedulePublish(
-          { weeks: selWeeks.map(buildBohKitchenPayload), sections: ["BOH", "Kitchen"], attachments: bkAttachments },
-          token
-        ),
-      ]);
-      setPublishedWeeks((s) => { const n = new Set(s); idxs.forEach((i) => n.add(i)); return n; });
-      const err = fohRes?.error || bkRes?.error;
-      const wk = idxs.length === 1 ? `week of ${selWeeks[0][0].date.toLocaleDateString(undefined, MONTH_FMT)}` : `${idxs.length} weeks`;
-      if (err) addLog(`Publish email issue (${err}) — schedule marked published`, "warn");
-      else addLog(`Published ${wk} — FOH ${fohRes?.sent ?? 0}, BOH & Kitchen ${bkRes?.sent ?? 0}`, "good");
-    } catch (e) {
-      addLog(`Publish failed: ${e.message}`, "warn");
-    }
-    setPublishBusy(false);
-    setPublishModal(null);
-  }
 
   const activeWeek = buildWeekByOffset(weekIndex);
+  const weekIsFinalized = finalizedWeeks.has(activeWeekStart);
+  // Publish is gated on the CURRENT week specifically, not the one on screen —
+  // you can be looking at any week and still send the finalized batch.
+  const currentWeekFinalized = finalizedWeeks.has(iso(mondayOf(new Date())));
 
   return (
     <div className="hub">
@@ -2898,6 +3079,25 @@ export default function SchedulingHub({ session, onSignOut }) {
         .qr-btn { font-family: 'Manrope', sans-serif; font-weight: 700; font-size: 11.5px; padding: 6px 12px; border-radius: 20px; border: 1px solid rgba(43,42,37,0.18); background: #FBF8EF; color: #4a473d; cursor: pointer; }
         .qr-btn:hover { background: #F1EAD9; }
         .qr-modal { background: #F5F0E3; color: #2B2A25; border-radius: 12px; padding: 18px 20px; width: min(380px, 92vw); text-align: center; box-shadow: 0 18px 48px rgba(0,0,0,0.45); animation: zoomIn 0.18s ease; }
+
+        /* ---- per-week notes panel ---- */
+        .notes-modal { background: #F5F0E3; color: #2B2A25; border-radius: 12px; padding: 18px 20px; width: min(560px, 94vw); max-height: 82vh; overflow-y: auto; box-shadow: 0 18px 48px rgba(0,0,0,0.45); animation: zoomIn 0.18s ease; }
+        .notes-add { display: flex; gap: 8px; margin: 12px 0 14px; }
+        .notes-input { flex: 1; font-family: 'Manrope', sans-serif; font-size: 12.5px; padding: 8px 10px; border: 1px solid #cfc7b4; border-radius: 7px; background: #fffdf7; color: #2B2A25; }
+        .notes-input:focus { outline: none; border-color: #c8956c; }
+        .notes-empty { font-size: 12px; color: #7d7666; font-style: italic; padding: 10px 2px 4px; }
+        .notes-list { display: flex; flex-direction: column; gap: 8px; }
+        .notes-row { display: flex; align-items: flex-start; gap: 8px; background: #fffdf7; border: 1px solid #e2dbc9; border-radius: 8px; padding: 9px 10px; }
+        .notes-row-body { flex: 1; min-width: 0; }
+        .notes-row-text { font-size: 12.5px; line-height: 1.4; word-break: break-word; }
+        .notes-row-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; font-family: 'Space Mono', monospace; font-size: 9.5px; letter-spacing: 0.5px; text-transform: uppercase; color: #8c8574; }
+        .notes-tag { color: #a06a34; font-weight: 700; }
+        .notes-row-actions { display: flex; gap: 5px; flex-shrink: 0; }
+
+        /* finalized week: green button + a small dot on the date range */
+        .print-btn.finalized-active { background: #5a8a6a; border-color: #5a8a6a; color: #fff; }
+        .week-finalized-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #5a8a6a; margin-left: 6px; vertical-align: middle; }
+        .week-range-finalized { color: #5a8a6a; }
         .qr-img { width: 260px; height: 260px; max-width: 100%; background: #fff; border-radius: 8px; padding: 8px; }
         .qr-loading { height: 260px; display: flex; align-items: center; justify-content: center; color: #8c8574; }
         .qr-caption { font-size: 12px; color: #5c625f; margin-top: 10px; }
@@ -3220,7 +3420,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                 <>
                   {WEEKDAY_LABELS.map((w) => <div className="cal-weekday" key={w}>{w}</div>)}
                   {weeks.flat().map((d, i) => {
-                const s = daySummary(d, patterns, overrides, fohRoster);
+                const s = daySummary(d, patternsForDate(d), overrides, fohRoster);
                 const holiday = holidayFor(d.iso);
                 const offNames = timeOffNamesForDate(d.iso);
                 const hasOtherRail = railItemsForDate(d.iso).some((it) => it.type !== "REQUEST OFF");
@@ -3255,7 +3455,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                         <div className={`cal-month-label ${isCurrentMonth ? "current" : ""}`}>{monthLabel}</div>
                         {WEEKDAY_LABELS.map((w) => <div className="cal-weekday" key={`${monthIdx}-${w}`}>{w}</div>)}
                         {monthWeeks.flat().map((d, i) => {
-                          const s = daySummary(d, patterns, overrides, fohRoster);
+                          const s = daySummary(d, patternsForDate(d), overrides, fohRoster);
                           const holiday = holidayFor(d.iso);
                           const offNames = timeOffNamesForDate(d.iso);
                           const hasOtherRail = railItemsForDate(d.iso).some((it) => it.type !== "REQUEST OFF");
@@ -3351,10 +3551,10 @@ export default function SchedulingHub({ session, onSignOut }) {
             <div className="week-header">
               <button className="back-btn" onClick={() => setCalView("month")}><ChevronLeft size={14} /> Back to month</button>
               <div className="week-range">{activeWeek[0].date.toLocaleDateString(undefined, MONTH_FMT)} – {activeWeek[6].date.toLocaleDateString(undefined, MONTH_FMT)}</div>
-              {publishedWeeks.has(weekIndex) ? (
+              {/* Publishing lives on Set Schedule only — the Calendar is read-only.
+                  A published week still shows its badge here for reference. */}
+              {publishedWeekStarts.has(activeWeek[0].iso) && (
                 <span className="published-badge"><Check size={12} /> Published</span>
-              ) : (
-                <button className="publish-btn" onClick={publishWeek}>Publish this week</button>
               )}
             </div>
             <table className="week-table">
@@ -3376,7 +3576,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                       <tr key={p.name}>
                         <td className="emp-name">{p.name}</td>
                         {activeWeek.map((d) => {
-                          const shift = personShiftFor(p.name, d, patterns, overrides);
+                          const shift = personShiftFor(p.name, d, patternsForDate(d), overrides);
                           const meta = SHIFT_META[shift.type] || SHIFT_META.OFF;
                           return (
                             <td key={d.iso} className={`shift-cell ${d.isToday ? "today-col" : ""}`}>
@@ -3395,75 +3595,6 @@ export default function SchedulingHub({ session, onSignOut }) {
             </table>
           </div>
 
-          {publishModal && (() => {
-            const candidates = publishCandidates(publishModal.baseIdx);
-            const selectedIdxs = candidates.filter((i) => publishModal.selected.has(i));
-            const nWeeks = selectedIdxs.length;
-            const { foh, bk } = publishCounts;
-            const weekWord = nWeeks === 1 ? "week" : "weeks";
-            return (
-              <div className="day-popup-backdrop" onClick={() => !publishBusy && setPublishModal(null)}>
-                <div className="publish-modal" onClick={(e) => e.stopPropagation()}>
-                  <div className="day-popup-head">
-                    <div className="day-popup-date">Publish schedule</div>
-                    <button className="day-popup-close" disabled={publishBusy} onClick={() => setPublishModal(null)}><X size={15} /></button>
-                  </div>
-                  <div className="publish-weeks">
-                    <div className="publish-weeks-label">Weeks to send</div>
-                    {candidates.map((i) => (
-                      <label key={i} className={`publish-week-opt ${publishModal.selected.has(i) ? "checked" : ""}`}>
-                        <input
-                          type="checkbox"
-                          checked={publishModal.selected.has(i)}
-                          disabled={publishBusy}
-                          onChange={() => togglePublishWeek(i)}
-                        />
-                        <span>{weekRangeLabel(buildWeekByOffset(i))}</span>
-                      </label>
-                    ))}
-                  </div>
-                  <div className="publish-count">
-                    <div>FOH: Sending <b>{nWeeks}</b> {weekWord} to <b>{foh.registered}</b> of {foh.total} staff{foh.skipped > 0 && <span className="publish-skip"> ({foh.skipped} not yet registered)</span>}</div>
-                    <div>BOH+Kitchen: Sending <b>{nWeeks}</b> {weekWord} to <b>{bk.registered}</b> of {bk.total} staff{bk.skipped > 0 && <span className="publish-skip"> ({bk.skipped} not yet registered)</span>}</div>
-                    <div className="publish-attach-note">Each week attaches as its own PDF.</div>
-                  </div>
-                  <div className="publish-preview">
-                    {selectedIdxs.length === 0 ? (
-                      <div className="publish-empty">Select at least one week to send.</div>
-                    ) : (
-                      selectedIdxs.map((i) => {
-                        const payload = buildSchedulePayload(buildWeekByOffset(i));
-                        return (
-                          <div key={i} className="publish-week-block">
-                            <div className="publish-week-heading">Week of {payload.weekLabel}</div>
-                            <table className="publish-table">
-                              <thead>
-                                <tr><th></th>{payload.dayHeaders.map((h) => <th key={h}>{h}</th>)}</tr>
-                              </thead>
-                              <tbody>
-                                {payload.rows.map((r) => (
-                                  <tr key={r.name}>
-                                    <td className="publish-name">{r.name}</td>
-                                    {r.shifts.map((sh, di) => <td key={di} className={sh === "Off" ? "publish-off" : ""}>{sh}</td>)}
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        );
-                      })
-                    )}
-                  </div>
-                  <div className="publish-actions">
-                    <button className="nr-btn nr-btn-deny" disabled={publishBusy} onClick={() => setPublishModal(null)}>Cancel</button>
-                    <button className="publish-btn" disabled={publishBusy || nWeeks === 0} onClick={confirmPublish}>
-                      {publishBusy ? "Sending…" : nWeeks > 1 ? `Confirm & Send (${nWeeks} weeks)` : "Confirm & Send"}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            );
-          })()}
         </div>
       )}
 
@@ -3479,12 +3610,33 @@ export default function SchedulingHub({ session, onSignOut }) {
                 <button className={`print-btn ${scheduleLocked ? "lock-active" : ""}`} onClick={() => setScheduleLocked((l) => !l)}>
                   {scheduleLocked ? <Lock size={13} /> : <Unlock size={13} />} {scheduleLocked ? "Locked" : "Lock Schedule"}
                 </button>
-                <button className={`print-btn ${finalizedWeeks.has(activeWeek?.[0]?.iso) ? "lock-active" : ""}`} onClick={toggleWeekFinalized} title="Mark this week as finalized for publishing">
-                  {finalizedWeeks.has(activeWeek?.[0]?.iso) ? "✓ Finalized" : "Finalize"}
+                <button
+                  className={`print-btn ${weekIsFinalized ? "finalized-active" : ""}`}
+                  onClick={toggleWeekFinalized}
+                  title={weekIsFinalized ? "Un-finalize this week" : "Mark this week as ready to publish (does not send anything)"}
+                >
+                  {weekIsFinalized ? "✓ Finalized" : "Finalize"}
                 </button>
-                {onCurrentWeek && finalizedWeeks.has(activeWeek?.[0]?.iso) && (
-                  <button className="publish-btn" onClick={publishFinalizedWeeks}>Send Scheduled Emails</button>
+                {notesTableAvailable() && (
+                  <button className="print-btn" onClick={() => setNotesOpen(true)} title="Notes for this week">
+                    Notes ({weekNotes.length})
+                  </button>
                 )}
+                {/* Publish lives here only, never on the Calendar. It sends every
+                    finalized week at once, so it stays visible on any week and is
+                    gated on the CURRENT week being finalized. */}
+                <button
+                  className="publish-btn"
+                  disabled={publishBusy || !currentWeekFinalized}
+                  onClick={publishFinalizedWeeks}
+                  title={
+                    currentWeekFinalized
+                      ? `Send schedule emails for ${finalizedWeeks.size} finalized week${finalizedWeeks.size === 1 ? "" : "s"}`
+                      : "Finalize the current week before publishing"
+                  }
+                >
+                  {publishBusy ? "Sending…" : `Publish (${finalizedWeeks.size})`}
+                </button>
               </div>
               <div className="print-week-range">
                 <button
@@ -3496,7 +3648,10 @@ export default function SchedulingHub({ session, onSignOut }) {
                   Today
                 </button>
                 <button className="back-btn" onClick={() => setWeekIndex((i) => i - 1)}><ChevronLeft size={13} /></button>
-                <span className={`week-range-text ${onCurrentWeek ? "week-range-current" : ""}`}>{formatWeekRange(activeWeek)}</span>
+                <span className={`week-range-text ${onCurrentWeek ? "week-range-current" : ""} ${weekIsFinalized ? "week-range-finalized" : ""}`}>
+                  {formatWeekRange(activeWeek)}
+                  {weekIsFinalized && <span className="week-finalized-dot" title="Finalized" />}
+                </span>
                 <button className="back-btn" onClick={() => setWeekIndex((i) => i + 1)}><ChevronRight size={13} /></button>
               </div>
             </div>
@@ -3525,7 +3680,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                   {WEEKDAY_LABELS.map((w, wi) => {
                     const weekday = WEEKDAY_ORDER[wi];
                     const names = (groupRosters.management || []).filter(
-                      (_, idx) => (placeholderPatterns.management?.[idx]?.[weekday] || "OFF") !== "OFF"
+                      (_, idx) => (activePlaceholders.management?.[idx]?.[weekday] || "OFF") !== "OFF"
                     );
                     return (
                       <div className={`fm-chip ${names.length === 0 ? "fm-chip-empty" : ""}`} key={w}>
@@ -3556,7 +3711,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                               <td className="emp-name">{p.name}</td>
                               {WEEKDAY_LABELS.map((w, wi) => {
                                 const weekday = WEEKDAY_ORDER[wi];
-                                const code = (patterns[p.name] || ALL_OFF_WEEK)[weekday];
+                                const code = (activePatterns[p.name] || ALL_OFF_WEEK)[weekday];
                                 const selKey = `${p.name}|${weekday}`;
                                 const cellRole = cellRoleSel[selKey] || roleFromCode(code) || personRoles[0];
                                 const opts = roleOptions[cellRole] || [{ code: "OFF", label: "Off" }];
@@ -3652,7 +3807,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                   </thead>
                   <tbody>
                     {(groupRosters.management || []).map((personName, idx) => {
-                      const row = placeholderPatterns.management?.[idx] || ALL_OFF_WEEK;
+                      const row = activePlaceholders.management?.[idx] || ALL_OFF_WEEK;
                       return (
                         <tr key={personName + idx}>
                           <td className="emp-name">{personName}</td>
@@ -4266,6 +4421,78 @@ export default function SchedulingHub({ session, onSignOut }) {
               <button className="nr-btn nr-btn-deny" onClick={() => setTimeOffBlock(null)}>Keep Time Off</button>
               <button className="delete-confirm-btn" onClick={() => { const fn = timeOffBlock.onOverride; setTimeOffBlock(null); fn && fn(); }}>Override</button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Per-week notes. Scoped to activeWeekStart, so navigating weeks swaps the
+          whole list. Rail-sourced notes are tagged but otherwise fully editable. */}
+      {notesOpen && (
+        <div className="day-popup-backdrop" onClick={() => { setNotesOpen(false); setNoteEditId(null); }}>
+          <div className="notes-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="day-popup-head">
+              <div className="day-popup-date">Notes — week of {formatWeekRange(activeWeek)}</div>
+              <button className="day-popup-close" onClick={() => { setNotesOpen(false); setNoteEditId(null); }}><X size={15} /></button>
+            </div>
+
+            <div className="notes-add">
+              <input
+                className="notes-input"
+                placeholder="Add a note for this week…"
+                value={noteDraft}
+                onChange={(e) => setNoteDraft(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") handleAddNote(); }}
+              />
+              <button className="publish-btn" disabled={!noteDraft.trim()} onClick={handleAddNote}>Add</button>
+            </div>
+
+            {weekNotes.length === 0 ? (
+              <div className="notes-empty">No notes for this week yet.</div>
+            ) : (
+              <div className="notes-list">
+                {weekNotes.map((n) => (
+                  <div className="notes-row" key={n.id}>
+                    {noteEditId === n.id ? (
+                      <>
+                        <input
+                          className="notes-input"
+                          value={noteEditText}
+                          autoFocus
+                          onChange={(e) => setNoteEditText(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") handleSaveNoteEdit(n.id);
+                            if (e.key === "Escape") setNoteEditId(null);
+                          }}
+                        />
+                        <div className="notes-row-actions">
+                          <button className="nr-btn nr-btn-approve" onClick={() => handleSaveNoteEdit(n.id)}><Check size={13} /></button>
+                          <button className="nr-btn nr-btn-deny" onClick={() => setNoteEditId(null)}><X size={13} /></button>
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div className="notes-row-body">
+                          <div className="notes-row-text">{n.note}</div>
+                          <div className="notes-row-meta">
+                            {n.source === "rail" && <span className="notes-tag">from Rail</span>}
+                            {n.staff_id && staffNameById[n.staff_id] && <span>{staffNameById[n.staff_id]}</span>}
+                            <span>{new Date(n.created_at).toLocaleDateString(undefined, MONTH_FMT)}</span>
+                          </div>
+                        </div>
+                        <div className="notes-row-actions">
+                          <button
+                            className="nr-btn"
+                            title="Edit"
+                            onClick={() => { setNoteEditId(n.id); setNoteEditText(n.note); }}
+                          >Edit</button>
+                          <button className="nr-btn nr-btn-deny" title="Delete" onClick={() => handleDeleteNote(n.id)}><X size={13} /></button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}

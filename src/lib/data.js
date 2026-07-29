@@ -245,6 +245,253 @@ export async function upsertPlaceholder(groupKey, slotIndex, weekday, shiftType)
   if (error) throw error;
 }
 
+/* ------------------------------------------- weekly_schedules (per week) --- */
+// schedule_patterns / placeholder_schedule are RECURRING templates shared by
+// every week. These tables store one row per (week_start, ...) so each week is
+// independent. A week with no rows has never been edited and renders from the
+// template; the first edit snapshots the whole week in (see seedWeek* below).
+//
+// All of it is migration-0010-gated. Until the owner runs that migration the
+// tables don't exist, so every read here returns null/empty and every write is
+// a no-op — the app then behaves exactly as it did before, off the template.
+// PostgREST reports a missing table as 42P01 (and PGRST205 from its schema
+// cache); anything else is a real error and still throws.
+const MISSING_TABLE = new Set(["42P01", "PGRST205"]);
+function isMissingTable(error) {
+  return !!error && MISSING_TABLE.has(error.code);
+}
+
+// True once we've confirmed the 0010 tables exist, false once we've confirmed
+// they don't, null while unknown. Cached so a pre-migration app doesn't retry
+// on every week change.
+let weeklyTablesPresent = null;
+export function weeklyTablesAvailable() {
+  return weeklyTablesPresent !== false;
+}
+
+// -> { [name]: [7 shift_types] } for one week, or null if the week has no rows
+// (never edited) or the tables don't exist yet.
+export async function fetchWeeklySchedule(weekStartIso, idToName) {
+  const { data, error } = await supabase
+    .from("weekly_schedules")
+    .select("staff_id, weekday, shift_type")
+    .eq("week_start", weekStartIso);
+  if (error) {
+    if (isMissingTable(error)) { weeklyTablesPresent = false; return null; }
+    throw error;
+  }
+  weeklyTablesPresent = true;
+  if (!data || !data.length) return null;
+  const patterns = {};
+  data.forEach((row) => {
+    const name = idToName[row.staff_id];
+    if (!name) return;
+    if (!patterns[name]) patterns[name] = ["OFF", "OFF", "OFF", "OFF", "OFF", "OFF", "OFF"];
+    patterns[name][row.weekday] = row.shift_type;
+  });
+  return patterns;
+}
+
+// -> { [group_key]: [ [7 shift_types] per slot ] } for one week, or null.
+export async function fetchWeeklyPlaceholders(weekStartIso) {
+  const { data, error } = await supabase
+    .from("weekly_placeholder_schedules")
+    .select("group_key, slot_index, weekday, shift_type")
+    .eq("week_start", weekStartIso);
+  if (error) {
+    if (isMissingTable(error)) { weeklyTablesPresent = false; return null; }
+    throw error;
+  }
+  if (!data || !data.length) return null;
+  const groups = {};
+  const maxSlot = {};
+  data.forEach((row) => {
+    maxSlot[row.group_key] = Math.max(maxSlot[row.group_key] ?? -1, row.slot_index);
+  });
+  Object.entries(maxSlot).forEach(([g, max]) => {
+    groups[g] = Array.from({ length: max + 1 }, () => ["OFF", "OFF", "OFF", "OFF", "OFF", "OFF", "OFF"]);
+  });
+  data.forEach((row) => {
+    groups[row.group_key][row.slot_index][row.weekday] = row.shift_type;
+  });
+  return groups;
+}
+
+export async function upsertWeeklyShift(weekStartIso, staffId, weekday, shiftType) {
+  if (!staffId || weeklyTablesPresent === false) return;
+  const { error } = await supabase
+    .from("weekly_schedules")
+    .upsert(
+      { week_start: weekStartIso, staff_id: staffId, weekday, shift_type: shiftType, updated_at: new Date().toISOString() },
+      { onConflict: "week_start,staff_id,weekday" }
+    );
+  if (error) {
+    if (isMissingTable(error)) { weeklyTablesPresent = false; return; }
+    throw error;
+  }
+}
+
+export async function upsertWeeklyPlaceholder(weekStartIso, groupKey, slotIndex, slotName, weekday, shiftType) {
+  if (weeklyTablesPresent === false) return;
+  const { error } = await supabase
+    .from("weekly_placeholder_schedules")
+    .upsert(
+      {
+        week_start: weekStartIso, group_key: groupKey, slot_index: slotIndex,
+        slot_name: slotName || "", weekday, shift_type: shiftType,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "week_start,group_key,slot_index,weekday" }
+    );
+  if (error) {
+    if (isMissingTable(error)) { weeklyTablesPresent = false; return; }
+    throw error;
+  }
+}
+
+// Snapshot a whole week into weekly_schedules the first time it's touched, so
+// the week is a complete independent record and later template edits can't leak
+// into it. `patterns` is the grid currently on screen (template-derived).
+export async function seedWeeklySchedule(weekStartIso, patterns, nameToId) {
+  if (weeklyTablesPresent === false) return;
+  const rows = [];
+  Object.entries(patterns || {}).forEach(([name, week]) => {
+    const staffId = nameToId[name];
+    if (!staffId) return;
+    (week || []).forEach((shiftType, weekday) => {
+      rows.push({ week_start: weekStartIso, staff_id: staffId, weekday, shift_type: shiftType || "OFF" });
+    });
+  });
+  if (!rows.length) return;
+  const { error } = await supabase
+    .from("weekly_schedules")
+    .upsert(rows, { onConflict: "week_start,staff_id,weekday" });
+  if (error) {
+    if (isMissingTable(error)) { weeklyTablesPresent = false; return; }
+    throw error;
+  }
+}
+
+export async function seedWeeklyPlaceholders(weekStartIso, placeholders, slotNamesByGroup = {}) {
+  if (weeklyTablesPresent === false) return;
+  const rows = [];
+  Object.entries(placeholders || {}).forEach(([groupKey, slots]) => {
+    (slots || []).forEach((week, slotIndex) => {
+      (week || []).forEach((shiftType, weekday) => {
+        rows.push({
+          week_start: weekStartIso, group_key: groupKey, slot_index: slotIndex,
+          slot_name: (slotNamesByGroup[groupKey] || [])[slotIndex] || "",
+          weekday, shift_type: shiftType || "OFF",
+        });
+      });
+    });
+  });
+  if (!rows.length) return;
+  const { error } = await supabase
+    .from("weekly_placeholder_schedules")
+    .upsert(rows, { onConflict: "week_start,group_key,slot_index,weekday" });
+  if (error) {
+    if (isMissingTable(error)) { weeklyTablesPresent = false; return; }
+    throw error;
+  }
+}
+
+/* ------------------------------------------------------- schedule_notes ---- */
+// Per-week notes. Also 0010-gated: pre-migration every read returns [] and the
+// Notes button stays hidden rather than erroring.
+
+let notesTablePresent = null;
+export function notesTableAvailable() {
+  return notesTablePresent !== false;
+}
+
+export async function fetchScheduleNotes(weekStartIso) {
+  const { data, error } = await supabase
+    .from("schedule_notes")
+    .select("id, week_start, staff_id, note, source, rail_request_id, created_at, updated_at")
+    .eq("week_start", weekStartIso)
+    .order("created_at", { ascending: false });
+  if (error) {
+    if (isMissingTable(error)) { notesTablePresent = false; return []; }
+    throw error;
+  }
+  notesTablePresent = true;
+  return data || [];
+}
+
+export async function insertScheduleNote({ weekStartIso, note, staffId = null, source = "manual", railRequestId = null }) {
+  if (notesTablePresent === false) return null;
+  const { data, error } = await supabase
+    .from("schedule_notes")
+    .insert({ week_start: weekStartIso, note, staff_id: staffId, source, rail_request_id: railRequestId })
+    .select()
+    .single();
+  if (error) {
+    if (isMissingTable(error)) { notesTablePresent = false; return null; }
+    throw error;
+  }
+  return data;
+}
+
+export async function updateScheduleNote(id, note) {
+  if (notesTablePresent === false) return;
+  const { error } = await supabase
+    .from("schedule_notes")
+    .update({ note, updated_at: new Date().toISOString() })
+    .eq("id", id);
+  if (error && !isMissingTable(error)) throw error;
+}
+
+export async function deleteScheduleNote(id) {
+  if (notesTablePresent === false) return;
+  const { error } = await supabase.from("schedule_notes").delete().eq("id", id);
+  if (error && !isMissingTable(error)) throw error;
+}
+
+/* -------------------------------------------------------- schedule_weeks -- */
+// Finalize / publish state, one row per week_start (migration 0009).
+
+export async function fetchScheduleWeeks() {
+  const { data, error } = await supabase
+    .from("schedule_weeks")
+    .select("week_start, finalized, published");
+  if (error) {
+    if (isMissingTable(error)) return [];
+    throw error;
+  }
+  return data || [];
+}
+
+export async function setWeekFinalized(weekStartIso, finalized) {
+  const { error } = await supabase
+    .from("schedule_weeks")
+    .upsert(
+      {
+        week_start: weekStartIso,
+        finalized,
+        finalized_at: finalized ? new Date().toISOString() : null,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "week_start" }
+    );
+  if (error && !isMissingTable(error)) throw error;
+}
+
+export async function setWeekPublished(weekStartIso) {
+  const { error } = await supabase
+    .from("schedule_weeks")
+    .upsert(
+      {
+        week_start: weekStartIso,
+        published: true,
+        published_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "week_start" }
+    );
+  if (error && !isMissingTable(error)) throw error;
+}
+
 /* -------------------------------------------------- schedule_overrides ----- */
 // -> { "name|YYYY-MM-DD": { type, swap } }, matching the prototype OVERRIDES.
 
