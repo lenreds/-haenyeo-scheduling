@@ -82,7 +82,9 @@
       "Bash(npm test *)",
       "Bash(git commit -m 'Fix 3-month calendar layout, reuse PDF renderer for schedule print, fix tip sheet print *)",
       "Bash(git commit -m 'Tip Sheet print/PDF: switch to landscape orientation *)",
-      "Bash(git commit -m 'Tip Sheet print/PDF: fill page without gap, pin PDF to 1280px capture *)"
+      "Bash(git commit -m 'Tip Sheet print/PDF: fill page without gap, pin PDF to 1280px capture *)",
+      "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\Lenre\\\\OneDrive\\\\Desktop\\\\HaenyeoMNG\\\\src\" -Recurse | Where-Object { $_.Extension -in '.tsx', '.ts', '.jsx', '.js' } | Select-Object -ExpandProperty FullName)",
+      "Bash(git rebase *)"
     ]
   }
 }

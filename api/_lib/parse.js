@@ -145,3 +145,56 @@ export function headerValue(message, name) {
   const h = headers.find((x) => x.name?.toLowerCase() === name.toLowerCase());
   return h ? h.value : "";
 }
+
+// Parse scheduling email subject for keyword-based type matching.
+// Returns { type } or null if no keyword found.
+export function parseSchedulingKeywords(subject) {
+  if (!subject) return null;
+  const lower = subject.toLowerCase();
+
+  if (/\b(off|time off|day off|request off)\b/.test(lower)) {
+    return { type: "REQUEST OFF" };
+  }
+  if (/\b(swap|switch|trade)\b/.test(lower)) {
+    return { type: "SHIFT SWAP" };
+  }
+  if (/\b(cover|coverage|need someone)\b/.test(lower)) {
+    return { type: "COVERAGE REQUEST" };
+  }
+
+  return null;
+}
+
+// Extract any dates from subject. Returns array of ISO date strings or [].
+export function extractDatesFromSubject(subject) {
+  const dates = new Set();
+  if (!subject) return [];
+
+  const numeric = /(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/g;
+  let mm;
+  while ((mm = numeric.exec(subject))) {
+    const m = Number(mm[1]);
+    const d = Number(mm[2]);
+    const y = mm[3] ? Number(mm[3]) : null;
+    if (m < 1 || m > 12 || d < 1 || d > 31) continue;
+
+    const refYear = new Date().getFullYear();
+    const cand = new Date(refYear, m - 1, d);
+    const yearFinal = (cand - new Date()) / 86400000 < -60 ? refYear + 1 : refYear;
+    const isoDate = `${yearFinal}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+    dates.add(isoDate);
+  }
+
+  return [...dates].sort();
+}
+
+// Match sender email against registered staff's personal_email field.
+// Returns staff row or null if no unique match.
+export function matchStaffByEmail(senderEmail, staff) {
+  if (!senderEmail) return null;
+  const normalized = senderEmail.trim().toLowerCase();
+  const matches = (staff || []).filter(
+    (s) => s.personal_email && s.personal_email.trim().toLowerCase() === normalized
+  );
+  return matches.length === 1 ? matches[0] : null;
+}

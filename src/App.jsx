@@ -964,6 +964,9 @@ export default function SchedulingHub({ session, onSignOut }) {
   const schedulePrintRef = useRef(null); // print-only mount for the branded schedule sheet
   const [infoUpdates, setInfoUpdates] = useState([]); // pending staff_info_updates
   const [staffProfile, setStaffProfile] = useState(null); // open staff id in directory
+  const [editingStaffId, setEditingStaffId] = useState(null); // which staff member is being edited in modal
+  const [editingStaffEmail, setEditingStaffEmail] = useState("");
+  const [editingStaffPhone, setEditingStaffPhone] = useState("");
   const [qrModal, setQrModal] = useState(null); // open QR key
   const [qrDataUrl, setQrDataUrl] = useState(""); // generated QR image
   const [deleteTarget, setDeleteTarget] = useState(null); // staff pending delete confirm
@@ -2075,6 +2078,35 @@ export default function SchedulingHub({ session, onSignOut }) {
     }
   }
 
+  async function handleSaveStaffProfile() {
+    if (!editingStaffId) return;
+    const email = editingStaffEmail.trim();
+    const phone = editingStaffPhone.trim();
+    try {
+      // Save email, phone, and set registered=true
+      const patch = { registered: true };
+      if (email) patch.personal_email = email;
+      if (phone) patch.phone = phone;
+      await updateStaff(editingStaffId, patch);
+
+      // Update local state
+      setStaffList((list) =>
+        list.map((st) =>
+          st.id === editingStaffId
+            ? { ...st, personal_email: email || null, phone: phone || null, registered: true }
+            : st
+        )
+      );
+
+      // Close modal
+      setEditingStaffId(null);
+      setStaffMsg("Contact info saved!");
+    } catch (e) {
+      console.error("Save profile failed:", e);
+      setStaffMsg(`Couldn't save contact info: ${e.message || e}`);
+    }
+  }
+
   // every Rail request (pending or approved) touching a given date
   function railItemsForDate(isoStr) {
     const items = [];
@@ -2753,6 +2785,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         .cal-rail-dot { position: absolute; bottom: 6px; right: 7px; width: 6px; height: 6px; border-radius: 50%; background: #8FA396; }
         .day-popup-backdrop { position: fixed; inset: 0; background: rgba(20,18,14,0.55); display: flex; align-items: center; justify-content: center; z-index: 60; }
         .day-popup { background: #F5F0E3; color: #2B2A25; border-radius: 10px; padding: 18px 20px; width: min(400px, 92vw); max-height: 80vh; overflow-y: auto; box-shadow: 0 18px 48px rgba(0,0,0,0.45); animation: zoomIn 0.18s ease; }
+        .staff-edit-modal { background: #F5F0E3; color: #2B2A25; border-radius: 10px; padding: 22px 24px; width: min(420px, 92vw); box-shadow: 0 18px 48px rgba(0,0,0,0.45); animation: zoomIn 0.18s ease; }
         .day-popup-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 4px; }
         .day-popup-date { font-family: 'Space Mono', monospace; font-weight: 700; font-size: 14px; }
         .day-popup-close { background: none; border: none; cursor: pointer; color: #6b6355; padding: 2px; }
@@ -2859,6 +2892,9 @@ export default function SchedulingHub({ session, onSignOut }) {
         .staff-profile-empty { color: #b0a892; font-size: 12.5px; font-style: italic; }
         .staff-profile-status.reg-yes { color: #4C6B4F; font-weight: 700; }
         .staff-profile-status.reg-no { color: #9a7a1f; font-weight: 700; }
+        .staff-profile-value-container { flex: 1; display: flex; align-items: center; }
+        .staff-profile-input { font-family: 'Manrope', sans-serif; font-size: 13px; padding: 6px 9px; border: 1px solid rgba(43,42,37,0.15); border-radius: 4px; background: #FFFDF7; color: #2B2A25; flex: 1; max-width: 260px; }
+        .staff-profile-note { font-size: 11px; color: #8c8574; font-style: italic; margin-top: 6px; margin-left: 56px; }
 
         .hero-stat { display: flex; gap: 14px; margin-bottom: 20px; }
         .hero-item { flex: 1; background: #FBF0DE; border: 1px solid rgba(201,138,63,0.35); border-radius: 8px; padding: 22px 18px; }
@@ -3430,9 +3466,9 @@ export default function SchedulingHub({ session, onSignOut }) {
                 >
                   Today
                 </button>
-                <button className="back-btn" onClick={() => setWeekIndex((i) => Math.max(0, i - 1))}><ChevronLeft size={13} /></button>
+                <button className="back-btn" onClick={() => setWeekIndex((i) => i - 1)}><ChevronLeft size={13} /></button>
                 <span className={`week-range-text ${onCurrentWeek ? "week-range-current" : ""}`}>{formatWeekRange(activeWeek)}</span>
-                <button className="back-btn" onClick={() => setWeekIndex((i) => Math.min(weeks.length - 1, currentWeekIndex >= 0 ? currentWeekIndex + 4 : i + 1, i + 1))}><ChevronRight size={13} /></button>
+                <button className="back-btn" onClick={() => setWeekIndex((i) => i + 1)}><ChevronRight size={13} /></button>
               </div>
             </div>
             {scheduleLocked && (
@@ -4040,21 +4076,33 @@ export default function SchedulingHub({ session, onSignOut }) {
                         <div className="staff-profile">
                           <div className="staff-profile-row">
                             <span className="staff-profile-key">Email</span>
-                            {s.personal_email
-                              ? <button className="staff-profile-val" title="Tap to copy" onClick={() => copyText(s.personal_email)}>{s.personal_email}</button>
-                              : <span className="staff-profile-empty">— none on file —</span>}
+                            <div className="staff-profile-value-container">
+                              {s.personal_email
+                                ? <button className="staff-profile-val" title="Tap to copy" onClick={() => copyText(s.personal_email)}>{s.personal_email}</button>
+                                : <span className="staff-profile-empty">— none on file —</span>}
+                            </div>
                           </div>
                           <div className="staff-profile-row">
                             <span className="staff-profile-key">Phone</span>
-                            {s.phone
-                              ? <button className="staff-profile-val" title="Tap to copy" onClick={() => copyText(s.phone)}>{s.phone}</button>
-                              : <span className="staff-profile-empty">— none on file —</span>}
+                            <div className="staff-profile-value-container">
+                              {s.phone
+                                ? <button className="staff-profile-val" title="Tap to copy" onClick={() => copyText(s.phone)}>{s.phone}</button>
+                                : <span className="staff-profile-empty">— none on file —</span>}
+                            </div>
                           </div>
                           <div className="staff-profile-row">
                             <span className="staff-profile-key">Status</span>
                             <span className={`staff-profile-status ${s.registered ? "reg-yes" : "reg-no"}`}>
                               {s.registered ? "Registered" : "Not yet registered"}
                             </span>
+                          </div>
+                          <div className="staff-profile-row">
+                            <span className="staff-profile-key"></span>
+                            <button className="publish-btn" onClick={() => {
+                              setEditingStaffId(s.id);
+                              setEditingStaffEmail(s.personal_email || "");
+                              setEditingStaffPhone(s.phone || "");
+                            }}>Edit Contact Info</button>
                           </div>
                         </div>
                       )}
@@ -4133,6 +4181,50 @@ export default function SchedulingHub({ session, onSignOut }) {
           </div>
         </div>
       )}
+
+      {editingStaffId && (() => {
+        const staff = staffList.find((s) => s.id === editingStaffId);
+        return staff ? (
+          <div className="day-popup-backdrop" onClick={() => setEditingStaffId(null)}>
+            <div className="staff-edit-modal" onClick={(e) => e.stopPropagation()}>
+              <div style={{ marginBottom: 16 }}>
+                <div style={{ fontFamily: "'Space Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: "#8c8574", marginBottom: 4 }}>Staff Member</div>
+                <div style={{ fontFamily: "'Manrope', sans-serif", fontSize: 14, fontWeight: 700, color: "#2B2A25" }}>{staff.name}</div>
+              </div>
+
+              <div style={{ marginBottom: 14 }}>
+                <label style={{ display: "block", fontFamily: "'Space Mono', monospace", fontSize: 10, letterSpacing: 1, textTransform: "uppercase", color: "#8c8574", marginBottom: 6 }}>Email</label>
+                <input
+                  type="email"
+                  value={editingStaffEmail}
+                  onChange={(e) => setEditingStaffEmail(e.target.value)}
+                  placeholder="Email address"
+                  style={{ width: "100%", fontFamily: "'Manrope', sans-serif", fontSize: 13, padding: "8px 11px", border: "1px solid rgba(43,42,37,0.15)", borderRadius: 4, background: "#FFFDF7", color: "#2B2A25", boxSizing: "border-box" }}
+                  autoFocus
+                />
+              </div>
+
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ display: "block", fontFamily: "'Space Mono', monospace", fontSize: 10, letterSpacing: 1, textTransform: "uppercase", color: "#8c8574", marginBottom: 6 }}>Phone</label>
+                <input
+                  type="tel"
+                  value={editingStaffPhone}
+                  onChange={(e) => setEditingStaffPhone(e.target.value)}
+                  placeholder="Phone number"
+                  style={{ width: "100%", fontFamily: "'Manrope', sans-serif", fontSize: 13, padding: "8px 11px", border: "1px solid rgba(43,42,37,0.15)", borderRadius: 4, background: "#FFFDF7", color: "#2B2A25", boxSizing: "border-box" }}
+                />
+              </div>
+
+              <div style={{ fontSize: 11, color: "#8c8574", fontStyle: "italic", marginBottom: 16 }}>Contact info will be saved and staff will be marked as Registered.</div>
+
+              <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+                <button className="nr-btn nr-btn-deny" onClick={() => setEditingStaffId(null)}>Cancel</button>
+                <button className="publish-btn" onClick={handleSaveStaffProfile}>Save</button>
+              </div>
+            </div>
+          </div>
+        ) : null;
+      })()}
 
       {timeOffBlock && (
         <div className="day-popup-backdrop" onClick={() => setTimeOffBlock(null)}>

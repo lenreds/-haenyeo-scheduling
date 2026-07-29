@@ -13,6 +13,7 @@ import {
 import {
   parseSchedulingSubject, parseRegisterSubject, parseUpdateInfoSubject, codeMatches,
   matchStaff, matchStaffFuzzy, parsePhoneFromBody, parseUpdateFields, extractPlainText, headerValue,
+  parseSchedulingKeywords, extractDatesFromSubject, matchStaffByEmail,
 } from "./_lib/parse.js";
 import { makeLabeler, LABELS, incomingLabelForType } from "./_lib/labels.js";
 import { buildRawEmail } from "./_lib/reply.js";
@@ -168,6 +169,48 @@ export default async function handler(req, res) {
           if (result.duplicate) s.duplicates++; else s.railCreated++;
           await finish(id, incomingLabelForType(parsed.type));
           continue;
+        }
+
+        // ---- Keyword-based scheduling (simplified email) ----
+        // Any email from a registered staff address with scheduling keywords
+        const matchByEmail = matchStaffByEmail(senderEmail, staff.filter((s) => s.registered));
+        if (matchByEmail) {
+          const parsed = parseSchedulingKeywords(subject);
+          if (parsed) {
+            if (await gmailMessageExists(id)) { s.duplicates++; await finish(id, null); continue; }
+            const dates = extractDatesFromSubject(subject);
+            const result = await insertGmailRail({
+              staffId: matchByEmail.id,
+              unmatchedName: null,
+              type: parsed.type,
+              dates: dates.length > 0 ? dates.join(", ") : "",
+              note: extractPlainText(msg),
+              messageId: id,
+              threadId: msg.threadId || null,
+            });
+            if (result.duplicate) s.duplicates++; else s.railCreated++;
+
+            // Send auto-reply on successful card creation
+            const autoReplyText = `Hi ${matchByEmail.name},
+
+Got your message — we've logged your request and will get back to you soon.
+
+— Haenyeo Management`;
+            const subj = /^re:/i.test(subject) ? subject : `Re: ${subject}`;
+            await sendTagged(
+              {
+                to: senderEmail,
+                subject: subj,
+                body: autoReplyText,
+                threadId: msg.threadId,
+                inReplyTo: messageId,
+              },
+              LABELS.sentReplies
+            ).catch((e) => console.error(`[poll] auto-reply failed for ${matchByEmail.name}: ${e.message}`));
+
+            await finish(id, incomingLabelForType(parsed.type));
+            continue;
+          }
         }
 
         // ---- unrecognized ----
