@@ -856,6 +856,40 @@ function buildMonth(viewDate) {
   return weeks;
 }
 
+// Monday (local midnight) of the week containing `d`.
+function mondayOf(d) {
+  const m = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const dow = m.getDay(); // 0=Sun … 6=Sat
+  m.setDate(m.getDate() - (dow === 0 ? 6 : dow - 1));
+  return m;
+}
+
+// The Mon–Sun week `offset` weeks from the week containing today. Any integer
+// offset — positive or negative — produces a valid week, so week navigation has
+// no upper or lower bound and never runs off the end of a fixed array.
+function buildWeekByOffset(offset) {
+  const start = mondayOf(new Date());
+  start.setDate(start.getDate() + offset * 7);
+  const out = [];
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i);
+    out.push({
+      date: d,
+      iso: iso(d),
+      day: d.getDate(),
+      weekday: d.getDay(),
+      inMonth: true,
+      isToday: iso(d) === TODAY_ISO,
+    });
+  }
+  return out;
+}
+
+// How many weeks away from the current week the week containing `date` sits.
+function weekOffsetFor(date) {
+  return Math.round((mondayOf(date) - mondayOf(new Date())) / (7 * 86400000));
+}
+
 const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const JS_WEEKDAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 // Set Schedule's PERSON_PATTERNS arrays are still index 0=Sun..6=Sat (JS Date convention) —
@@ -931,7 +965,7 @@ export default function SchedulingHub({ session, onSignOut }) {
   const [nameToId, setNameToId] = useState({});
   const [calView, setCalView] = useState("month"); // 'month' | 'week'
   const [calDate, setCalDate] = useState(new Date(2026, 6, 1)); // month/year being viewed
-  const [weekIndex, setWeekIndex] = useState(0); // selected week for week view
+  const [weekIndex, setWeekIndex] = useState(0); // week offset from the current week (0 = this week, negative = past)
   const [calMonthView, setCalMonthView] = useState(1); // 1 or 3 months
   const [patterns, setPatterns] = useState(() => normalizePatterns(PERSON_PATTERNS, DEFAULT_PRIMARY_ROLE));
   const [overrides, setOverrides] = useState(OVERRIDES);
@@ -1238,9 +1272,8 @@ export default function SchedulingHub({ session, onSignOut }) {
       return buildMonth(monthDate);
     });
   }, [calDate, calMonthView]);
-  // Index of the week that contains today (-1 if today falls outside the grid).
-  const currentWeekIndex = useMemo(() => weeks.findIndex((w) => w.some((d) => d.iso === TODAY_ISO)), [weeks]);
-  const onCurrentWeek = weekIndex === currentWeekIndex;
+  // weekIndex is an offset from the current week, so 0 is always "this week".
+  const onCurrentWeek = weekIndex === 0;
   const weekStrip = useMemo(() => getWeekStrip(), []);
   const [scheduleView, setScheduleView] = useState("foh");
   const [scheduleLocked, setScheduleLocked] = useState(false);
@@ -2304,11 +2337,10 @@ export default function SchedulingHub({ session, onSignOut }) {
     return { foh: build(["FOH"]), bk: build(["BOH", "Kitchen"]) };
   }, [staffList]);
 
-  // The weeks offered in the publish modal: the clicked week + up to 3 future
-  // weeks, bounded by the grid.
+  // The weeks offered in the publish modal: the clicked week + the next 3.
   function publishCandidates(baseIdx) {
     const out = [];
-    for (let i = baseIdx; i < Math.min(baseIdx + 4, weeks.length); i++) out.push(i);
+    for (let i = baseIdx; i < baseIdx + 4; i++) out.push(i);
     return out;
   }
   function publishWeek() {
@@ -2328,7 +2360,7 @@ export default function SchedulingHub({ session, onSignOut }) {
     const idxs = [...publishModal.selected].sort((a, b) => a - b);
     if (!idxs.length) return;
     setPublishBusy(true);
-    const selWeeks = idxs.map((i) => weeks[i]);
+    const selWeeks = idxs.map((i) => buildWeekByOffset(i));
     const token = session?.access_token;
     try {
       // Generate one branded PDF per selected week per section (client-side —
@@ -2368,7 +2400,7 @@ export default function SchedulingHub({ session, onSignOut }) {
     setPublishModal(null);
   }
 
-  const activeWeek = weeks[weekIndex];
+  const activeWeek = buildWeekByOffset(weekIndex);
 
   return (
     <div className="hub">
@@ -3299,12 +3331,9 @@ export default function SchedulingHub({ session, onSignOut }) {
                     className="publish-btn day-popup-week-btn"
                     onClick={() => {
                       const d = dayPopup.day;
-                      const monthDate = new Date(d.date.getFullYear(), d.date.getMonth(), 1);
-                      const monthWeeks = buildMonth(monthDate);
-                      const weekIdx = monthWeeks.findIndex((week) => week.some((day) => day.iso === d.iso));
-                      setCalDate(monthDate);
+                      setCalDate(new Date(d.date.getFullYear(), d.date.getMonth(), 1));
                       setDayPopup(null);
-                      if (weekIdx >= 0) zoomToWeek(weekIdx);
+                      zoomToWeek(weekOffsetFor(d.date));
                     }}
                   >
                     View week
@@ -3389,7 +3418,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                           disabled={publishBusy}
                           onChange={() => togglePublishWeek(i)}
                         />
-                        <span>{weekRangeLabel(weeks[i])}</span>
+                        <span>{weekRangeLabel(buildWeekByOffset(i))}</span>
                       </label>
                     ))}
                   </div>
@@ -3403,7 +3432,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                       <div className="publish-empty">Select at least one week to send.</div>
                     ) : (
                       selectedIdxs.map((i) => {
-                        const payload = buildSchedulePayload(weeks[i]);
+                        const payload = buildSchedulePayload(buildWeekByOffset(i));
                         return (
                           <div key={i} className="publish-week-block">
                             <div className="publish-week-heading">Week of {payload.weekLabel}</div>
@@ -3460,9 +3489,9 @@ export default function SchedulingHub({ session, onSignOut }) {
               <div className="print-week-range">
                 <button
                   className="today-btn"
-                  disabled={onCurrentWeek || currentWeekIndex < 0}
-                  title={currentWeekIndex < 0 ? "Today isn't in this schedule window" : "Jump to the current week"}
-                  onClick={() => currentWeekIndex >= 0 && setWeekIndex(currentWeekIndex)}
+                  disabled={onCurrentWeek}
+                  title="Jump to the current week"
+                  onClick={() => setWeekIndex(0)}
                 >
                   Today
                 </button>

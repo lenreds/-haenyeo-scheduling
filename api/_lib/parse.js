@@ -152,14 +152,22 @@ export function parseSchedulingKeywords(subject) {
   if (!subject) return null;
   const lower = subject.toLowerCase();
 
-  if (/\b(off|time off|day off|request off)\b/.test(lower)) {
-    return { type: "REQUEST OFF" };
-  }
+  // Most specific intent first: "off" is a common word that also turns up in
+  // swap and coverage wording ("swap my day off"), so it has to be checked last
+  // or it swallows those requests.
   if (/\b(swap|switch|trade)\b/.test(lower)) {
     return { type: "SHIFT SWAP" };
   }
-  if (/\b(cover|coverage|need someone)\b/.test(lower)) {
+  if (/\b(cover|covering|coverage|need someone)\b/.test(lower)) {
     return { type: "COVERAGE REQUEST" };
+  }
+  if (/\boff\b/.test(lower)) {
+    // "time off" across more than one date is the multi-day TIME OFF type;
+    // a single date (or none) is an ordinary REQUEST OFF.
+    if (/\btime off\b/.test(lower) && extractDatesFromSubject(subject).length > 1) {
+      return { type: "TIME OFF" };
+    }
+    return { type: "REQUEST OFF" };
   }
 
   return null;

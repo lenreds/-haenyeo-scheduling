@@ -77,14 +77,30 @@ export async function listSchedulingUnread(accessToken, maxResults = 25) {
 // Broader than listSchedulingUnread: also catches [REGISTER] and [UPDATE INFO].
 // Gmail `{ a b }` = OR. Brackets in the tags are ignored by search; the code
 // filters subjects precisely afterward.
-export async function listActionableUnread(accessToken, maxResults = 30) {
-  const q = encodeURIComponent('is:unread {subject:SCHEDULING subject:REGISTER subject:"UPDATE INFO"}');
+async function listByQuery(accessToken, query, maxResults) {
+  const q = encodeURIComponent(query);
   const res = await fetch(`${GMAIL_BASE}/messages?q=${q}&maxResults=${maxResults}`, {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
   const data = await res.json();
   if (!res.ok) throw new Error(`Gmail list failed: ${data.error?.message || res.status}`);
   return data.messages || [];
+}
+
+// Unread mail the poller should look at. Two passes, merged and de-duped:
+//   1. the tagged subjects ([SCHEDULING]/[REGISTER]/[UPDATE INFO]) — always
+//      fetched so a busy inbox can never crowd them out;
+//   2. everything else unread in the inbox, so a plainly-worded email from a
+//      registered staffer ("Need Friday off") reaches the keyword parser.
+// Pass 2 mail that doesn't match a registered sender + keyword is left unread
+// and untouched by the caller — see the unrecognized branch in /api/poll.
+export async function listActionableUnread(accessToken, maxResults = 30) {
+  const [tagged, inbox] = await Promise.all([
+    listByQuery(accessToken, 'is:unread {subject:SCHEDULING subject:REGISTER subject:"UPDATE INFO"}', maxResults),
+    listByQuery(accessToken, "is:unread in:inbox -category:promotions -category:social", maxResults),
+  ]);
+  const seen = new Set();
+  return [...tagged, ...inbox].filter((m) => !seen.has(m.id) && seen.add(m.id));
 }
 
 export async function getMessage(accessToken, id) {

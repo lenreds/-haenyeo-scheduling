@@ -47,7 +47,9 @@ export async function recordPoll({ ok, error }) {
 /* ---- staff + rail_requests ---- */
 
 export async function fetchStaffMinimal() {
-  const { data, error } = await admin().from("staff").select("id, name, active");
+  // personal_email + registered are needed to match a plain email to its sender
+  // (the keyword-based scheduling path in /api/poll).
+  const { data, error } = await admin().from("staff").select("id, name, active, personal_email, registered");
   if (error) throw error;
   return data || [];
 }

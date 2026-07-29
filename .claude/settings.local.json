@@ -84,7 +84,12 @@
       "Bash(git commit -m 'Tip Sheet print/PDF: switch to landscape orientation *)",
       "Bash(git commit -m 'Tip Sheet print/PDF: fill page without gap, pin PDF to 1280px capture *)",
       "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\Lenre\\\\OneDrive\\\\Desktop\\\\HaenyeoMNG\\\\src\" -Recurse | Where-Object { $_.Extension -in '.tsx', '.ts', '.jsx', '.js' } | Select-Object -ExpandProperty FullName)",
-      "Bash(git rebase *)"
+      "Bash(git rebase *)",
+      "Bash(rm -rf .git/rebase-merge)",
+      "Bash(git commit -m 'Implement unlimited navigation and simplified email parsing *)",
+      "Bash(npx vercel *)",
+      "Bash(node weektest.mjs)",
+      "Bash(node parsetest.mjs)"
     ]
   }
 }

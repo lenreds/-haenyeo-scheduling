@@ -173,9 +173,19 @@ export default async function handler(req, res) {
 
         // ---- Keyword-based scheduling (simplified email) ----
         // Any email from a registered staff address with scheduling keywords
-        const matchByEmail = matchStaffByEmail(senderEmail, staff.filter((s) => s.registered));
+        const registeredStaff = staff.filter((r) => r.registered && r.personal_email);
+        const matchByEmail = matchStaffByEmail(senderEmail, registeredStaff);
+        const parsed = matchByEmail ? parseSchedulingKeywords(subject) : null;
+        console.log(
+          `[poll] keyword-match from="${senderEmail}" subject="${subject}" ` +
+          `registeredStaff=${registeredStaff.length}/${staff.length} ` +
+          `sender=${matchByEmail ? matchByEmail.name : "NO_MATCH"} ` +
+          `type=${parsed ? parsed.type : "NO_KEYWORD"}` +
+          // On a sender miss, show what we did have on file — the usual cause is
+          // a staffer emailing from an address that was never saved.
+          (matchByEmail ? "" : ` onFile=[${registeredStaff.map((r) => r.personal_email).join(", ")}]`)
+        );
         if (matchByEmail) {
-          const parsed = parseSchedulingKeywords(subject);
           if (parsed) {
             if (await gmailMessageExists(id)) { s.duplicates++; await finish(id, null); continue; }
             const dates = extractDatesFromSubject(subject);
@@ -214,8 +224,11 @@ Got your message — we've logged your request and will get back to you soon.
         }
 
         // ---- unrecognized ----
+        // Tagged mail is ours to file away, so it still gets marked read.
+        // Anything else came from the wider inbox sweep and isn't a scheduling
+        // request — leave it unread and unlabeled so the manager still sees it.
         s.skipped++;
-        await finish(id, null);
+        if (/SCHEDULING|REGISTER|UPDATE INFO/i.test(subject)) await finish(id, null);
       } catch (msgErr) {
         console.error(`[poll] message ${id} failed: ${msgErr.message}`);
       }
