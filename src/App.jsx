@@ -3016,26 +3016,6 @@ export default function SchedulingHub({ session, onSignOut }) {
         .day-popup-week-btn { width: 100%; margin-top: 14px; }
 
         /* publish preview modal */
-        .publish-modal { background: #F5F0E3; color: #2B2A25; border-radius: 12px; padding: 18px 20px; width: min(680px, 94vw); max-height: 84vh; overflow-y: auto; box-shadow: 0 18px 48px rgba(0,0,0,0.45); animation: zoomIn 0.18s ease; }
-        .publish-weeks { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 6px 0 12px; }
-        .publish-weeks-label { font-family: 'Space Mono', monospace; font-size: 9.5px; letter-spacing: 1px; text-transform: uppercase; color: #8c8574; width: 100%; }
-        .publish-week-opt { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; color: #6b6355; background: #FBF8EF; border: 1px solid rgba(43,42,37,0.16); border-radius: 999px; padding: 5px 12px 5px 9px; cursor: pointer; user-select: none; }
-        .publish-week-opt.checked { color: #2B2A25; background: #EDE7D9; border-color: #2F3432; }
-        .publish-week-opt input { accent-color: #2F3432; cursor: pointer; }
-        .publish-count { font-size: 13px; color: #2B2A25; margin: 4px 0 12px; }
-        .publish-skip { color: #9a7a1f; }
-        .publish-attach-note { font-size: 11.5px; color: #6b6355; font-style: italic; margin-top: 3px; }
-        .publish-preview { max-height: 40vh; overflow-y: auto; }
-        .publish-week-block { overflow-x: auto; border: 1px solid rgba(43,42,37,0.12); border-radius: 8px; margin-bottom: 10px; }
-        .publish-week-block:last-child { margin-bottom: 0; }
-        .publish-week-heading { font-family: 'Space Mono', monospace; font-size: 10px; font-weight: 700; letter-spacing: 0.5px; color: #2B2A25; padding: 7px 8px 5px; background: rgba(43,42,37,0.04); }
-        .publish-empty { font-size: 12.5px; color: #9a9385; font-style: italic; padding: 12px 4px; text-align: center; }
-        .publish-table { width: 100%; border-collapse: collapse; font-size: 11px; }
-        .publish-table th { font-family: 'Space Mono', monospace; font-size: 9px; letter-spacing: 0.5px; text-transform: uppercase; color: #8c8574; padding: 6px 5px; text-align: center; white-space: nowrap; }
-        .publish-table td { padding: 5px 6px; text-align: center; border-top: 1px solid rgba(43,42,37,0.07); white-space: nowrap; }
-        .publish-table .publish-name { text-align: left; font-weight: 700; }
-        .publish-table .publish-off { color: #b0a892; }
-        .publish-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 14px; }
 
         /* ---- staff & roles screen ---- */
         .staff-msg { font-family: 'Space Mono', monospace; font-size: 11px; color: #4C6B4F; }
