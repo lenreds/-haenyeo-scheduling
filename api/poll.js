@@ -175,16 +175,20 @@ export default async function handler(req, res) {
         // Any email from a registered staff address with scheduling keywords
         const registeredStaff = staff.filter((r) => r.registered && r.personal_email);
         const matchByEmail = matchStaffByEmail(senderEmail, registeredStaff);
-        const parsed = matchByEmail ? parseSchedulingKeywords(subject) : null;
-        console.log(
-          `[poll] keyword-match from="${senderEmail}" subject="${subject}" ` +
-          `registeredStaff=${registeredStaff.length}/${staff.length} ` +
-          `sender=${matchByEmail ? matchByEmail.name : "NO_MATCH"} ` +
-          `type=${parsed ? parsed.type : "NO_KEYWORD"}` +
-          // On a sender miss, show what we did have on file — the usual cause is
-          // a staffer emailing from an address that was never saved.
-          (matchByEmail ? "" : ` onFile=[${registeredStaff.map((r) => r.personal_email).join(", ")}]`)
-        );
+        const parsed = parseSchedulingKeywords(subject);
+        // Log only mail that plausibly concerns us — a known sender, or a
+        // scheduling keyword from an unknown one. The inbox sweep sees plenty of
+        // unrelated mail that would otherwise flood the logs. onFile is a count,
+        // never the addresses themselves: enough to spot "nobody has an email
+        // saved" without copying staff contact details into the log stream.
+        if (matchByEmail || parsed) {
+          console.log(
+            `[poll] keyword-match from="${senderEmail}" subject="${subject}" ` +
+            `sender=${matchByEmail ? matchByEmail.name : "NO_MATCH"} ` +
+            `type=${parsed ? parsed.type : "NO_KEYWORD"} ` +
+            `onFile=${registeredStaff.length}/${staff.length}`
+          );
+        }
         if (matchByEmail) {
           if (parsed) {
             if (await gmailMessageExists(id)) { s.duplicates++; await finish(id, null); continue; }
