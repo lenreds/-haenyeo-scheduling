@@ -150,11 +150,11 @@ async function exportNodeAsPdf(node, filename, { header, orientation = "portrait
 // sheet still reads fine on a black-and-white printer.
 const SHEET = {
   dark: "#1a1a1a", orange: "#c8956c", green: "#5a8a6a", blue: "#4a7a9b",
-  purple: "#8a5a9b", grey: "#8a8a8a", tint: "#fff8f4",
+  purple: "#8a5a9b", grey: "#8a8a8a", tint: "#fff8f4", teal: "#2a9d8f",
 };
 const SHEET_GROUP_COLOR = {
   Bar: SHEET.orange, Servers: SHEET.green, "Busser/Runner": SHEET.blue,
-  Host: SHEET.purple, Kitchen: SHEET.orange, BOH: SHEET.blue,
+  Host: SHEET.purple, Kitchen: SHEET.orange, BOH: SHEET.blue, Training: SHEET.teal,
 };
 
 /* ---- Role-color cells (ROLE-COLOR-CELLS-BRIEF) ---- */
@@ -165,7 +165,7 @@ const SHEET_GROUP_COLOR = {
 const ROLE_COLOR = {
   Bar: SHEET.orange, Servers: SHEET.green, "Busser/Runner": SHEET.blue,
   Host: SHEET.purple, Expo: SHEET.orange, Kitchen: SHEET.orange, BOH: SHEET.blue,
-  Management: "#888888",
+  Management: "#888888", Training: SHEET.teal,
 };
 // Role worked for a stored code. Section-scoped codes (BOH_*/KITCHEN/FM) name
 // their role directly; prefix codes go through roleFromCode; codes with no role
@@ -188,6 +188,7 @@ const CELL_STYLE_BY_ACCENT = {
   "#4a7a9b": { color: "#79a8c7", borderColor: "rgba(74,122,155,0.55)", background: "rgba(74,122,155,0.14)" },
   "#8a5a9b": { color: "#b184c2", borderColor: "rgba(138,90,155,0.55)", background: "rgba(138,90,155,0.14)" },
   "#888888": { color: "#aaaaaa", borderColor: "rgba(136,136,136,0.55)", background: "rgba(136,136,136,0.14)" },
+  "#2a9d8f": { color: "#5fc9bb", borderColor: "rgba(42,157,143,0.55)", background: "rgba(42,157,143,0.14)" },
 };
 function roleCellStyle(role) {
   const accent = ROLE_COLOR[role];
@@ -210,6 +211,7 @@ const CAL_CHIP_BY_ACCENT = {
   "#4a7a9b": { background: "#f1f7fb", color: "#35576e", borderColor: "#a5c4d8" }, // Busser/Runner / BOH
   "#8a5a9b": { background: "#f9f4fb", color: "#63406f", borderColor: "#c9add4" }, // Host
   "#888888": { background: "#f5f5f5", color: "#4d4d4d", borderColor: "#cfcfcf" }, // Management
+  "#2a9d8f": { background: "#f0faf8", color: "#1f6f66", borderColor: "#a6d9d2" }, // Training
 };
 const CAL_CHIP_OFF = { background: "#f6f6f4", color: "#9a9385", borderColor: "#e2ded4" };
 function calChipStyle(role) {
@@ -222,7 +224,7 @@ function calChipStyle(role) {
 const ROLE_COLOR_MUTED = {
   Bar: "#d6b294", Expo: "#d6b294", Kitchen: "#d6b294",
   Servers: "#85a891", "Busser/Runner": "#7ea0b8", BOH: "#7ea0b8",
-  Host: "#ab86b8", Management: "#a6a6a6",
+  Host: "#ab86b8", Management: "#a6a6a6", Training: "#7fc4ba",
 };
 // Label wording per the brief: "Server" (singular); other roles verbatim.
 function crossRoleLabelText(role) {
@@ -487,7 +489,10 @@ function getWeekStrip() {
 
 // display order for role sections — Expo isn't its own section since it's just
 // Daniel and Akira's Busser/Runner row on their specific day
-const ROLES = ["Bar", "Host", "Servers", "Busser/Runner"];
+// Training sits at the bottom of FOH: trainees aren't tipped and don't fill a
+// tip-out slot, so grouping them last keeps the tipped roles together. (The
+// brief offered "below Host, above Busser/Runner" or bottom-of-FOH.)
+const ROLES = ["Bar", "Host", "Servers", "Busser/Runner", "Training"];
 
 // other schedules on the Set Schedule tab, not staffed yet — placeholder slots only
 const PLACEHOLDER_GROUPS = { boh: 4, kitchen: 6, management: 2 };
@@ -577,14 +582,18 @@ const DEFAULT_ROLE_OPTIONS = {
     { code: "SV_5SC", label: "5pm-SC" }, { code: "SV_6CL", label: "6pm-CL" },
   ],
   "Busser/Runner": [
-    { code: "OFF", label: "Off" }, { code: "BR_4FC", label: "4pm-FC" }, { code: "BR_5CL", label: "5pm-CL" },
-    { code: "BR_6CL", label: "6pm-CL" },
+    { code: "OFF", label: "Off" }, { code: "BR_4FC", label: "4pm-FC" }, { code: "BR_5SC", label: "5pm-SC" },
+    { code: "BR_5CL", label: "5pm-CL" }, { code: "BR_6CL", label: "6pm-CL" },
   ],
   Host: [{ code: "OFF", label: "Off" }, { code: "HOST_4", label: "Host 4pm" }],
   Expo: [{ code: "OFF", label: "Off" }, { code: "EXPO_5", label: "Expo 5pm" }, { code: "EXPO_6", label: "Expo 6pm" }],
   Bar: [
     { code: "OFF", label: "Off" }, { code: "BAR_4FC", label: "4pm-FC" }, { code: "BAR_4CL", label: "4pm-CL" },
-    { code: "BAR_5CL", label: "5pm-CL" }, { code: "BAR_5FC", label: "5pm-FC" }, { code: "BAR_6CL", label: "6pm-CL" },
+    { code: "BAR_5SC", label: "5pm-SC" }, { code: "BAR_5CL", label: "5pm-CL" }, { code: "BAR_5FC", label: "5pm-FC" },
+    { code: "BAR_6CL", label: "6pm-CL" },
+  ],
+  Training: [
+    { code: "OFF", label: "Off" }, { code: "TRAIN_4", label: "Training 4pm" }, { code: "TRAIN_6", label: "Training 6pm" },
   ],
   BOH: [
     { code: "OFF", label: "Off" }, { code: "BOH_STD", label: "3p – Close" }, { code: "BOH_AM", label: "9a – 5p" },
@@ -597,11 +606,11 @@ const DEFAULT_ROLE_OPTIONS = {
 };
 
 // short role names for the compact in-cell role picker
-const ROLE_SHORT = { Bar: "Bar", Host: "Host", Servers: "Server", "Busser/Runner": "Bus/Run", Expo: "Expo" };
+const ROLE_SHORT = { Bar: "Bar", Host: "Host", Servers: "Server", "Busser/Runner": "Bus/Run", Expo: "Expo", Training: "Train" };
 
 // which roles the Staff screen offers per section
 const SECTION_ROLES = {
-  FOH: ["Bar", "Host", "Servers", "Busser/Runner", "Expo"],
+  FOH: ["Bar", "Host", "Servers", "Busser/Runner", "Expo", "Training"],
   BOH: ["BOH", "Kitchen"],
   Kitchen: ["Kitchen", "BOH"],
   Management: ["Management", "Kitchen"],
@@ -657,6 +666,7 @@ function roleFromCode(code) {
   if (code.startsWith("HOST")) return "Host";
   if (code.startsWith("EXPO")) return "Expo";
   if (code.startsWith("BAR_")) return "Bar";
+  if (code.startsWith("TRAIN")) return "Training";
   return null;
 }
 
@@ -790,6 +800,7 @@ const SHIFT_META = {
   SV_6CL: { label: "6pm-CL", fg: "#33425C", border: "#4A5C7A", bg: "#E7EAF2" },
   // Busser/Runner
   BR_4FC: { label: "4pm-FC", fg: "#3f6b42", border: "#6E9B72", bg: "#E9F1E9" },
+  BR_5SC: { label: "5pm-SC", fg: "#8a5a1f", border: "#c2934a", bg: "#F7EEDD" },
   BR_5CL: { label: "5pm-CL", fg: "#8a5a20", border: "#C98A3E", bg: "#FBF0DE" },
   BR_6CL: { label: "6pm-CL", fg: "#33425C", border: "#4A5C7A", bg: "#E7EAF2" },
   // Host / Expo
@@ -799,7 +810,11 @@ const SHIFT_META = {
   // Bar
   BAR_4FC: { label: "4pm-FC", fg: "#1f6f78", border: "#3fa8b3", bg: "#E5F3F4" },
   BAR_4CL: { label: "4pm-CL", fg: "#1f6f78", border: "#3fa8b3", bg: "#E5F3F4" },
+  BAR_5SC: { label: "5pm-SC", fg: "#1f6f78", border: "#3fa8b3", bg: "#DCEFF0" },
   BAR_5CL: { label: "5pm-CL", fg: "#1f6f78", border: "#3fa8b3", bg: "#DCEFF0" },
+  // Training (brief item 4) — teal, not tipped, excluded from Tip Sheet slots
+  TRAIN_4: { label: "Training 4pm", fg: "#1f6f66", border: "#2a9d8f", bg: "#E6F5F3" },
+  TRAIN_6: { label: "Training 6pm", fg: "#1f6f66", border: "#2a9d8f", bg: "#E6F5F3" },
   BAR_5FC: { label: "5pm-FC", fg: "#1f6f78", border: "#3fa8b3", bg: "#DCEFF0" },
   BAR_6CL: { label: "6pm-CL", fg: "#17555c", border: "#2f8a94", bg: "#D2E9EB" },
   // Management
@@ -853,6 +868,8 @@ function autoAssignSlots(dateInfo, patterns, overrides, roster) {
     const code = normalizeShiftCode(shift.type, p.role);
     const role = roleFromCode(code);
     if (!role) return;
+    // Trainees aren't tipped, so they never fill a tip-out slot (brief item 4).
+    if (role === "Training") return;
     const slotRole = role === "Expo" ? "Expo (Fri–Sun)" : role;
     (byRole[slotRole] = byRole[slotRole] || []).push({ name: p.name, rank: slotRankForCode(code) });
   });

@@ -86,11 +86,12 @@ export function buildScheduleEmail({ weekLabel, dayHeaders, rows, groups, sectio
 
 const SHEET_COLORS = {
   dark: "#1a1a1a", orange: "#c8956c", green: "#5a8a6a", blue: "#4a7a9b",
-  purple: "#8a5a9b", grey: "#8a8a8a", tint: "#fff8f4",
+  purple: "#8a5a9b", grey: "#8a8a8a", tint: "#fff8f4", teal: "#2a9d8f",
 };
 const GROUP_COLOR = {
   Bar: SHEET_COLORS.orange, Servers: SHEET_COLORS.green, "Busser/Runner": SHEET_COLORS.blue,
   Host: SHEET_COLORS.purple, Kitchen: SHEET_COLORS.orange, BOH: SHEET_COLORS.blue,
+  Training: SHEET_COLORS.teal,
 };
 // Cell-level colors: a cell takes the color of the role actually worked that
 // day (rows carry a `roles` array resolved client-side from the shift code
@@ -101,7 +102,7 @@ const ROLE_COLOR = { ...GROUP_COLOR, Expo: SHEET_COLORS.orange, Management: "#88
 const ROLE_COLOR_MUTED = {
   Bar: "#d6b294", Expo: "#d6b294", Kitchen: "#d6b294",
   Servers: "#85a891", "Busser/Runner": "#7ea0b8", BOH: "#7ea0b8",
-  Host: "#ab86b8", Management: "#a6a6a6",
+  Host: "#ab86b8", Management: "#a6a6a6", Training: "#7fc4ba",
 };
 const crossRoleLabelText = (role) => (role === "Servers" ? "Server" : role);
 const escHtml = (s) =>
