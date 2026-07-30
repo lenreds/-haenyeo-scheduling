@@ -193,6 +193,29 @@ function roleCellStyle(role) {
   const accent = ROLE_COLOR[role];
   return accent ? CELL_STYLE_BY_ACCENT[accent] : undefined;
 }
+// Dark-theme "Off" chip (Management grid). The old inline SHIFT_META.OFF colors
+// were tuned for the light card and left a tan border on the dark surface.
+const OFF_CHIP_DARK = { color: "#555555", borderColor: "#2a2a2a", background: "transparent" };
+
+// The Calendar WEEK view reads as a light, scannable sheet rather than an
+// editable dark grid, so its chips use a soft tint of the role color with the
+// role hue as ink — deliberately the inverse of CELL_STYLE_BY_ACCENT above,
+// which styles the editable Set Schedule cells. Keyed by the same ROLE_COLOR
+// accents, so the two stay in step. Ink is a deepened shade of each accent:
+// the accent itself (e.g. #c8956c) sits near 2.3:1 on these backgrounds, which
+// is too faint for 10px bold type.
+const CAL_CHIP_BY_ACCENT = {
+  "#c8956c": { background: "#fff8f4", color: "#a06a34", borderColor: "#e6c8ab" }, // Bar / Expo / Kitchen
+  "#5a8a6a": { background: "#f2f9f4", color: "#3d6149", borderColor: "#aacdb7" }, // Servers
+  "#4a7a9b": { background: "#f1f7fb", color: "#35576e", borderColor: "#a5c4d8" }, // Busser/Runner / BOH
+  "#8a5a9b": { background: "#f9f4fb", color: "#63406f", borderColor: "#c9add4" }, // Host
+  "#888888": { background: "#f5f5f5", color: "#4d4d4d", borderColor: "#cfcfcf" }, // Management
+};
+const CAL_CHIP_OFF = { background: "#f6f6f4", color: "#9a9385", borderColor: "#e2ded4" };
+function calChipStyle(role) {
+  const accent = ROLE_COLOR[role];
+  return accent ? CAL_CHIP_BY_ACCENT[accent] : undefined;
+}
 // Cross-role label (CROSS-ROLE-LABEL-BRIEF): when someone works outside their
 // primary role, a small role name renders under the shift in a lighter shade
 // of the same accent. Mirrored in api/_lib/emails.js for the schedule email.
@@ -3377,7 +3400,19 @@ export default function SchedulingHub({ session, onSignOut }) {
         .day-popup-item { border-color: var(--line); }
         .day-popup-status-pending { color: var(--accent); }
         .day-popup-status-approved { color: #7fb392; }
-        .shift-chip { border-color: var(--line2); }
+        /* Set Schedule grid dropdowns. The option list needs styling explicitly:
+           an unstyled <option> computes to a transparent background and Chrome
+           then paints the popup with the OS light default, which is where the
+           white was coming from. Role-tinted selects keep their inline
+           background (inline wins) — only the popup list is forced dark. */
+        .cell-select, .cell-select.shift-select, .cell-select.role-select {
+          background: #141414; border-color: #2a2a2a; color: #ffffff;
+        }
+        .cell-select option, .manual-field option, .staff-section-select option,
+        .staff-primary-select option, select.cell-select option {
+          background: #141414; color: #ffffff;
+        }
+        .cell-select:disabled { color: var(--txt2); }
         .nr-empty { border-color: var(--line2); }
         .empty-decisions, .empty-rail { color: var(--muted); }
         .manual-add-btn { color: var(--accent); border-color: var(--line2); background: var(--s2); }
@@ -3954,9 +3989,17 @@ export default function SchedulingHub({ session, onSignOut }) {
                         {activeWeek.map((d) => {
                           const shift = personShiftFor(p.name, d, patternsForDate(d), overrides);
                           const meta = SHIFT_META[shift.type] || SHIFT_META.OFF;
+                          // Colour by the role actually worked (so Akira's bar
+                          // cover reads as Bar), not by shift time. GAP keeps
+                          // its own red treatment, which is already light.
+                          const chipStyle =
+                            shift.type === "OFF" ? CAL_CHIP_OFF
+                            : shift.type === "GAP" ? { color: meta.fg, borderColor: meta.border, background: meta.bg }
+                            : calChipStyle(roleForCell(shift.type, p.role))
+                              || { color: meta.fg, borderColor: meta.border, background: meta.bg };
                           return (
                             <td key={d.iso} className={`shift-cell ${d.isToday ? "today-col" : ""}`}>
-                              <span className="shift-chip" style={{ color: meta.fg, borderColor: meta.border, background: meta.bg }}>
+                              <span className="shift-chip" style={chipStyle}>
                                 {meta.label}
                                 {shift.swap && <span className="swap-ribbon">SWAP</span>}
                               </span>
@@ -4205,7 +4248,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                                 {mgmtTimeOff && <span className="cell-timeoff-flag" title="Approved time off" />}
                                 <button
                                   className="shift-chip chip-btn"
-                                  style={type === "OFF" ? { color: meta.fg, borderColor: meta.border, background: meta.bg } : roleCellStyle("Management")}
+                                  style={type === "OFF" ? OFF_CHIP_DARK : roleCellStyle("Management")}
                                   onClick={() => toggleManagementCell(idx, realWeekday)}
                                 >
                                   {meta.label}
