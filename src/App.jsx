@@ -929,6 +929,8 @@ function weekOffsetFor(date) {
 }
 
 const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+// Sub-tab display names, used by the per-section Lock button (brief item 2).
+const SECTION_LABEL = { foh: "FOH", bohkitchen: "BOH+Kitchen", management: "Management" };
 const JS_WEEKDAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 // Set Schedule's PERSON_PATTERNS arrays are still index 0=Sun..6=Sat (JS Date convention) —
 // this maps each Mon-first display column back to the right index in those arrays
@@ -1488,7 +1490,12 @@ export default function SchedulingHub({ session, onSignOut }) {
   const onCurrentWeek = weekIndex === 0;
   const weekStrip = useMemo(() => getWeekStrip(), []);
   const [scheduleView, setScheduleView] = useState("foh");
-  const [scheduleLocked, setScheduleLocked] = useState(false);
+  // Locking is per sub-tab (brief item 2): locking FOH must not lock BOH+Kitchen
+  // or Management. Keyed by scheduleView value.
+  const [lockedSections, setLockedSections] = useState({ foh: false, bohkitchen: false, management: false });
+  const scheduleLocked = !!lockedSections[scheduleView]; // the sub-tab on screen
+  // Which lock applies to a given placeholder group.
+  const groupLockKey = (groupKey) => (groupKey === "management" ? "management" : "bohkitchen");
   const [finalizedWeeks, setFinalizedWeeks] = useState(new Set()); // { "2026-07-13" }
   const [loadError, setLoadError] = useState("");
   const [publishedWeekStarts, setPublishedWeekStarts] = useState(new Set());
@@ -2002,7 +2009,7 @@ export default function SchedulingHub({ session, onSignOut }) {
     })();
   }
   function setPlaceholderShift(groupKey, slotIdx, weekday, newType) {
-    if (scheduleLocked) return;
+    if (lockedSections[groupLockKey(groupKey)]) return;
     const personName = (groupRosters[groupKey] || [])[slotIdx];
     const blk = newType !== "OFF" && personName ? approvedOffFor(personName, weekday) : null;
     if (blk) {
@@ -2033,7 +2040,7 @@ export default function SchedulingHub({ session, onSignOut }) {
   }
 
   function toggleManagementCell(slotIdx, weekday) {
-    if (scheduleLocked) return;
+    if (lockedSections.management) return;
     const name = (groupRosters.management || [])[slotIdx];
     const current = activePlaceholders.management?.[slotIdx]?.[weekday] || "OFF";
     if (current === "OFF") {
@@ -2477,7 +2484,8 @@ export default function SchedulingHub({ session, onSignOut }) {
     })();
   }
   function setCellShift(name, weekday, code) {
-    if (scheduleLocked) return;
+    if (lockedSections.foh) return; // FOH grid
+
     const blk = code !== "OFF" ? approvedOffFor(name, weekday) : null;
     if (blk) {
       setTimeOffBlock({
@@ -2491,7 +2499,7 @@ export default function SchedulingHub({ session, onSignOut }) {
   // role picker changed: remember the choice and reset the cell's shift if the
   // current code belongs to a different role
   function setCellRole(name, weekday, role) {
-    if (scheduleLocked) return;
+    if (lockedSections.foh) return;
     setCellRoleSel((prev) => ({ ...prev, [`${name}|${weekday}`]: role }));
     const current = (activePatterns[name] || ALL_OFF_WEEK)[weekday];
     if (current !== "OFF" && roleFromCode(current) !== role) {
@@ -4026,8 +4034,14 @@ export default function SchedulingHub({ session, onSignOut }) {
                 <button className="print-btn" disabled={pdfBusy === "schedule"} onClick={exportSchedulePdf}>
                   <FileDown size={13} /> {pdfBusy === "schedule" ? "Saving…" : "Save as PDF"}
                 </button>
-                <button className={`print-btn ${scheduleLocked ? "lock-active" : ""}`} onClick={() => setScheduleLocked((l) => !l)}>
-                  {scheduleLocked ? <Lock size={13} /> : <Unlock size={13} />} {scheduleLocked ? "Locked" : "Lock Schedule"}
+                {/* Locks only the sub-tab on screen — the other two are unaffected. */}
+                <button
+                  className={`print-btn ${scheduleLocked ? "lock-active" : ""}`}
+                  onClick={() => setLockedSections((l) => ({ ...l, [scheduleView]: !l[scheduleView] }))}
+                  title={scheduleLocked ? `Unlock ${SECTION_LABEL[scheduleView]}` : `Lock ${SECTION_LABEL[scheduleView]} only`}
+                >
+                  {scheduleLocked ? <Lock size={13} /> : <Unlock size={13} />}{" "}
+                  {scheduleLocked ? "Locked ✓" : `Lock ${SECTION_LABEL[scheduleView]}`}
                 </button>
                 <button
                   className={`print-btn ${weekIsFinalized ? "finalized-active" : ""}`}
@@ -4076,7 +4090,7 @@ export default function SchedulingHub({ session, onSignOut }) {
             </div>
             {scheduleLocked && (
               <div className="template-note" style={{ marginBottom: 14, marginTop: -8 }}>
-                🔒 Schedule is locked — cells won't respond to clicks. Hit "Locked" above to unlock and make changes.
+                🔒 {SECTION_LABEL[scheduleView]} is locked — its cells won't respond to clicks. Other sections are unaffected. Hit "Locked ✓" above to unlock.
               </div>
             )}
 
@@ -4114,7 +4128,14 @@ export default function SchedulingHub({ session, onSignOut }) {
                   <thead>
                     <tr>
                       <th></th>
-                      {WEEKDAY_LABELS.map((w) => <th key={w}>{w}</th>)}
+                      {WEEKDAY_LABELS.map((w, wi) => {
+                        const day = activeWeek?.[wi];
+                        return (
+                          <th key={w} className={day?.isToday ? "today-col" : ""}>
+                            {w} {day ? day.day : ""}
+                          </th>
+                        );
+                      })}
                     </tr>
                   </thead>
                   <tbody>
@@ -4196,7 +4217,14 @@ export default function SchedulingHub({ session, onSignOut }) {
                   <thead>
                     <tr>
                       <th></th>
-                      {WEEKDAY_LABELS.map((w) => <th key={w}>{w}</th>)}
+                      {WEEKDAY_LABELS.map((w, wi) => {
+                        const day = activeWeek?.[wi];
+                        return (
+                          <th key={w} className={day?.isToday ? "today-col" : ""}>
+                            {w} {day ? day.day : ""}
+                          </th>
+                        );
+                      })}
                     </tr>
                   </thead>
                   <tbody>
@@ -4221,7 +4249,14 @@ export default function SchedulingHub({ session, onSignOut }) {
                   <thead>
                     <tr>
                       <th></th>
-                      {WEEKDAY_LABELS.map((w) => <th key={w}>{w}</th>)}
+                      {WEEKDAY_LABELS.map((w, wi) => {
+                        const day = activeWeek?.[wi];
+                        return (
+                          <th key={w} className={day?.isToday ? "today-col" : ""}>
+                            {w} {day ? day.day : ""}
+                          </th>
+                        );
+                      })}
                     </tr>
                   </thead>
                   <tbody>
