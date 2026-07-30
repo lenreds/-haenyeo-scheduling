@@ -33,6 +33,10 @@ import {
   notesTableAvailable,
   fetchScheduleWeeks,
   setWeekPublished,
+  fetchCalendarNotes,
+  insertCalendarNote,
+  deleteCalendarNote,
+  calendarNotesAvailable,
 } from "./lib/data.js";
 import QRCode from "qrcode";
 
@@ -1061,6 +1065,10 @@ export default function SchedulingHub({ session, onSignOut }) {
   const [qrModal, setQrModal] = useState(null); // open QR key
   const [qrDataUrl, setQrDataUrl] = useState(""); // generated QR image
   const [deleteTarget, setDeleteTarget] = useState(null); // staff pending delete confirm
+  const [deleteMode, setDeleteMode] = useState(false); // per-row Delete buttons armed?
+  // Calendar date notes (brief item 7): { "YYYY-MM-DD": [rows] }
+  const [calNotes, setCalNotes] = useState({});
+  const [calNoteDraft, setCalNoteDraft] = useState("");
   const [deleting, setDeleting] = useState(false);
   const [qrPrintUrls, setQrPrintUrls] = useState({}); // all 7 QR images for the print sheet
   const [qrPrinting, setQrPrinting] = useState(false);
@@ -1594,6 +1602,33 @@ export default function SchedulingHub({ session, onSignOut }) {
     fetchGmailStatus().then((s) => { if (!cancelled) setGmailStatus(s); });
     return () => { cancelled = true; };
   }, []);
+
+  // Calendar date notes — one fetch drives both the popup and the month dots.
+  useEffect(() => {
+    let cancelled = false;
+    fetchCalendarNotes()
+      .then((m) => { if (!cancelled) setCalNotes(m); })
+      .catch((e) => console.error("Calendar notes load failed:", e));
+    return () => { cancelled = true; };
+  }, []);
+
+  async function addCalendarNote(dateIso) {
+    const text = calNoteDraft.trim();
+    if (!text) return;
+    setCalNoteDraft("");
+    try {
+      const row = await insertCalendarNote(dateIso, text);
+      if (row) setCalNotes((m) => ({ ...m, [dateIso]: [...(m[dateIso] || []), row] }));
+    } catch (e) {
+      console.error("Add calendar note failed:", e);
+      setCalNoteDraft(text); // give it back rather than losing what they typed
+    }
+  }
+  async function removeCalendarNote(dateIso, id) {
+    setCalNotes((m) => ({ ...m, [dateIso]: (m[dateIso] || []).filter((n) => n.id !== id) }));
+    try { await deleteCalendarNote(id); }
+    catch (e) { console.error("Delete calendar note failed:", e); }
+  }
 
   // Finalize/publish state per week. Without this the Finalize button forgot
   // itself on every reload — it wrote to schedule_weeks but nothing read back.
@@ -3469,6 +3504,40 @@ export default function SchedulingHub({ session, onSignOut }) {
         .info-updates-title { color: var(--accent); }
         .info-update-row { border-color: rgba(200,149,108,0.22); }
         .cal-off-chip { background: rgba(74,122,155,0.20); color: #9dc0d6; }
+        .gmail-dot-idle { background: var(--muted); }
+
+        /* ---- item 8: schedule cells read as pills ---- */
+        .cell-select, .cell-select.shift-select, .cell-select.role-select { border-radius: 20px; padding: 4px 8px; }
+        .shift-chip, .cell-blocked { border-radius: 20px; }
+
+        /* ---- item 7: calendar date notes ---- */
+        .cal-note-dot { position: absolute; top: 7px; right: 7px; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+        .cal-day.today .cal-note-dot, .cal-gap-flag ~ .cal-note-dot { right: 20px; }
+        .cal-note-row { display: flex; align-items: flex-start; gap: 8px; padding: 5px 0; border-bottom: 1px dashed var(--line); font-size: 12.5px; }
+        .cal-note-text { flex: 1; color: var(--txt2); line-height: 1.4; word-break: break-word; }
+        .cal-note-del { background: none; border: none; cursor: pointer; color: var(--muted); padding: 2px; flex-shrink: 0; }
+        .cal-note-del:hover { color: #e0796c; }
+        .cal-note-add { display: flex; gap: 7px; margin-top: 9px; }
+
+        /* ---- item 6: two-step delete arm ---- */
+        .staff-delete-arm { display: flex; align-items: center; gap: 10px; margin: 14px 0 4px; flex-wrap: wrap; }
+        .staff-delete-arm-on { background: rgba(178,58,47,0.15) !important; border-color: rgba(178,58,47,0.5) !important; color: #e0796c !important; }
+        .staff-delete-arm-note { font-size: 11.5px; color: var(--txt2); font-style: italic; }
+
+        /* ---- item 10: readable 3-month cells ---- */
+        .cal-grid.multi-month { gap: 26px; }
+        .cal-grid.multi-month .cal-day { min-height: 74px; padding: 7px 6px 8px; font-size: 12.5px; }
+        .cal-grid.multi-month .cal-day-num { font-size: 13px; }
+        .cal-grid.multi-month .cal-day.today .cal-day-num { width: 22px; height: 22px; }
+        .cal-grid.multi-month .cal-weekday { font-size: 10px; padding-bottom: 5px; min-height: 18px; }
+        .cal-grid.multi-month .cal-month-label { font-size: 12px; margin-bottom: 6px; }
+        .cal-grid.multi-month .cal-day-meta { font-size: 10px; margin-top: 7px; }
+        /* Readability wins over fitting three months on a narrow screen: below
+           this width the wrapper scrolls sideways instead of shrinking cells. */
+        @media (max-width: 1180px) {
+          .cal-grid.multi-month { grid-template-columns: repeat(3, minmax(300px, 1fr)); }
+          .cal-multi-scroll { overflow-x: auto; }
+        }
       `}</style>
 
       <div className="hub-header">
@@ -3851,6 +3920,7 @@ export default function SchedulingHub({ session, onSignOut }) {
               <span className="legend-item"><AlertTriangle size={11} color="#B23A2F" />Open shift</span>
               <span className="legend-item" style={{ marginLeft: "auto" }}>Click a day for requests, time off & the week view</span>
             </div>
+            <div className={calMonthView === 3 ? "cal-multi-scroll" : ""}>
             <div className={`cal-grid ${calMonthView === 3 ? "multi-month" : ""}`}>
               {calMonthView === 1 ? (
                 <>
@@ -3867,6 +3937,9 @@ export default function SchedulingHub({ session, onSignOut }) {
                     onClick={() => setDayPopup({ day: d, weekIdx: Math.floor(i / 7) })}
                   >
                     {s.gap && <AlertTriangle size={13} className="cal-gap-flag" />}
+                    {(calNotes[d.iso] || []).length > 0 && (
+                      <span className="cal-note-dot" title={`${calNotes[d.iso].length} note(s)`} />
+                    )}
                     <div className="cal-day-num">{d.day}</div>
                     {holiday && <div className="cal-holiday-label">{holiday}</div>}
                     {offNames.length > 0 && (
@@ -3902,6 +3975,9 @@ export default function SchedulingHub({ session, onSignOut }) {
                               onClick={() => setDayPopup({ day: d, weekIdx: Math.floor(i / 7) })}
                             >
                               {s.gap && <AlertTriangle size={10} className="cal-gap-flag" />}
+                              {(calNotes[d.iso] || []).length > 0 && (
+                                <span className="cal-note-dot" title={`${calNotes[d.iso].length} note(s)`} />
+                              )}
                               <div className="cal-day-num">{d.day}</div>
                               {holiday && <div className="cal-holiday-label" style={{ fontSize: 7 }}>{holiday}</div>}
                               {offNames.length > 0 && (
@@ -3919,6 +3995,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                   })}
                 </>
               )}
+            </div>
             </div>
           </div>
 
@@ -3960,6 +4037,40 @@ export default function SchedulingHub({ session, onSignOut }) {
                           <span className="day-popup-status day-popup-status-approved">approved</span>
                         </div>
                       ))}
+                    </>
+                  )}
+
+                  {/* Notes for this specific date (brief item 7) */}
+                  {calendarNotesAvailable() && (
+                    <>
+                      <div className="day-popup-section">Notes</div>
+                      {(calNotes[d.iso] || []).map((n) => (
+                        <div className="cal-note-row" key={n.id}>
+                          <span className="cal-note-text">{n.note}</span>
+                          <button
+                            className="cal-note-del"
+                            title="Delete this note"
+                            onClick={() => removeCalendarNote(d.iso, n.id)}
+                          ><X size={12} /></button>
+                        </div>
+                      ))}
+                      {(calNotes[d.iso] || []).length === 0 && (
+                        <div className="day-popup-empty">No notes on this date.</div>
+                      )}
+                      <div className="cal-note-add">
+                        <input
+                          className="notes-input"
+                          placeholder="Add a note for this date…"
+                          value={calNoteDraft}
+                          onChange={(e) => setCalNoteDraft(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === "Enter") addCalendarNote(d.iso); }}
+                        />
+                        <button
+                          className="publish-btn"
+                          disabled={!calNoteDraft.trim()}
+                          onClick={() => addCalendarNote(d.iso)}
+                        >Add</button>
+                      </div>
                     </>
                   )}
 
@@ -4402,7 +4513,18 @@ export default function SchedulingHub({ session, onSignOut }) {
 
               <div className="tip-right-col">
                 <div className="week-header" style={{ marginBottom: 12 }}>
-                  <button className="back-btn" onClick={() => shiftTipDate(-1)}><ChevronLeft size={14} /> Prev day</button>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    {/* Today jump, matching the Set Schedule week nav (item 9) */}
+                    <button
+                      className="today-btn"
+                      disabled={tipDateIso === TODAY_ISO}
+                      title={tipDateIso === TODAY_ISO ? "Already on today" : "Jump to today"}
+                      onClick={() => { setTipDateIso(TODAY_ISO); setTipSent(false); }}
+                    >
+                      Today
+                    </button>
+                    <button className="back-btn" onClick={() => shiftTipDate(-1)}><ChevronLeft size={14} /> Prev day</button>
+                  </div>
                   <div className="week-range" style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     {tipDateInfo.dateObj.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" })}
                     {tipDateIso === TODAY_ISO && <span className="today-pill">Today</span>}
@@ -4666,6 +4788,22 @@ export default function SchedulingHub({ session, onSignOut }) {
               </div>
             </div>
 
+            {/* Two-step delete (brief item 6): the per-row Delete buttons stay
+                hidden until this is armed, so a stray click can't start a
+                deletion. The confirm dialog still runs after that. */}
+            <div className="staff-delete-arm">
+              <button
+                className={`qr-btn ${deleteMode ? "staff-delete-arm-on" : ""}`}
+                onClick={() => setDeleteMode((v) => !v)}
+                title={deleteMode ? "Hide the delete buttons" : "Show a Delete button on each staff row"}
+              >
+                {deleteMode ? "Cancel" : "Enable Delete"}
+              </button>
+              {deleteMode && (
+                <span className="staff-delete-arm-note">Delete buttons are showing — you'll still be asked to confirm.</span>
+              )}
+            </div>
+
             {SECTIONS.map((section) => {
               const members = staffList.filter((s) => (s.section || "FOH") === section);
               if (members.length === 0) return null;
@@ -4725,7 +4863,9 @@ export default function SchedulingHub({ session, onSignOut }) {
                         {dirty && (
                           <button className="publish-btn staff-save-btn" onClick={() => handleSaveStaff(s)}>Save</button>
                         )}
-                        <button className="staff-delete-btn" title={`Delete ${s.name}`} onClick={() => setDeleteTarget(s)}>Delete</button>
+                        {deleteMode && (
+                          <button className="staff-delete-btn" title={`Delete ${s.name}`} onClick={() => setDeleteTarget(s)}>Delete</button>
+                        )}
                       </div>
                       {open && (
                         <div className="staff-profile">

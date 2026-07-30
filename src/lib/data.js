@@ -448,6 +448,56 @@ export async function deleteScheduleNote(id) {
   if (error && !isMissingTable(error)) throw error;
 }
 
+/* ------------------------------------------------------- calendar_notes --- */
+// Notes pinned to one date (migration 0011), shown in the Calendar day popup.
+// Migration-gated the same way as schedule_notes: pre-migration every read
+// returns [] and the notes section stays hidden rather than erroring.
+
+let calendarNotesPresent = null;
+export function calendarNotesAvailable() {
+  return calendarNotesPresent !== false;
+}
+
+// -> { "YYYY-MM-DD": [rows] } for every note on file. Small table (one row per
+// note, not per day), so a single fetch beats a request per popup.
+export async function fetchCalendarNotes() {
+  const { data, error } = await supabase
+    .from("calendar_notes")
+    .select("id, date, note, created_at")
+    .order("created_at", { ascending: true });
+  if (error) {
+    if (isMissingTable(error)) { calendarNotesPresent = false; return {}; }
+    throw error;
+  }
+  calendarNotesPresent = true;
+  const byDate = {};
+  (data || []).forEach((row) => {
+    if (!byDate[row.date]) byDate[row.date] = [];
+    byDate[row.date].push(row);
+  });
+  return byDate;
+}
+
+export async function insertCalendarNote(dateIso, note) {
+  if (calendarNotesPresent === false) return null;
+  const { data, error } = await supabase
+    .from("calendar_notes")
+    .insert({ date: dateIso, note })
+    .select()
+    .single();
+  if (error) {
+    if (isMissingTable(error)) { calendarNotesPresent = false; return null; }
+    throw error;
+  }
+  return data;
+}
+
+export async function deleteCalendarNote(id) {
+  if (calendarNotesPresent === false) return;
+  const { error } = await supabase.from("calendar_notes").delete().eq("id", id);
+  if (error && !isMissingTable(error)) throw error;
+}
+
 /* -------------------------------------------------------- schedule_weeks -- */
 // Finalize / publish state, one row per week_start (migration 0009).
 
