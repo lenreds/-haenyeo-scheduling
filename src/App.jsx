@@ -178,12 +178,16 @@ function roleForCell(code, fallbackRole) {
   return roleFromCode(code) || fallbackRole || null;
 }
 // Readable chip triple (text/border/tint) per role accent for the live grid.
+// Screen-only cell chip styling for the Set Schedule grid (the PDF sheet and
+// schedule email read ROLE_COLOR directly, so they are unaffected). Dark Split:
+// same role hues as before, inverted for a dark surface — tinted background,
+// accent-colored text — instead of the previous dark-on-pale-tint.
 const CELL_STYLE_BY_ACCENT = {
-  "#c8956c": { color: "#7d5433", borderColor: "#c8956c", background: "#f7eee3" },
-  "#5a8a6a": { color: "#3d6149", borderColor: "#5a8a6a", background: "#e9f0ea" },
-  "#4a7a9b": { color: "#35576e", borderColor: "#4a7a9b", background: "#e7eef3" },
-  "#8a5a9b": { color: "#63406f", borderColor: "#8a5a9b", background: "#f0e9f3" },
-  "#888888": { color: "#555555", borderColor: "#888888", background: "#ededed" },
+  "#c8956c": { color: "#e0b48f", borderColor: "rgba(200,149,108,0.55)", background: "rgba(200,149,108,0.14)" },
+  "#5a8a6a": { color: "#7fb392", borderColor: "rgba(90,138,106,0.55)", background: "rgba(90,138,106,0.14)" },
+  "#4a7a9b": { color: "#79a8c7", borderColor: "rgba(74,122,155,0.55)", background: "rgba(74,122,155,0.14)" },
+  "#8a5a9b": { color: "#b184c2", borderColor: "rgba(138,90,155,0.55)", background: "rgba(138,90,155,0.14)" },
+  "#888888": { color: "#aaaaaa", borderColor: "rgba(136,136,136,0.55)", background: "rgba(136,136,136,0.14)" },
 };
 function roleCellStyle(role) {
   const accent = ROLE_COLOR[role];
@@ -1020,6 +1024,11 @@ export default function SchedulingHub({ session, onSignOut }) {
   const [qrPrinting, setQrPrinting] = useState(false);
   const [timeOffBlock, setTimeOffBlock] = useState(null); // { name, dayLabel, onOverride } | null
   const [publishBusy, setPublishBusy] = useState(false);
+  // Dark Split Rail: which request the centre detail panel is showing, and a
+  // display-only hide for the auto-action log (the DB is never touched — the
+  // log repopulates from resolved requests on the next load).
+  const [selectedRailId, setSelectedRailId] = useState(null);
+  const [logCleared, setLogCleared] = useState(false);
   const [tipFinalized, setTipFinalized] = useState(false);
   const [tipFinalizedAt, setTipFinalizedAt] = useState(null);
   const [finalizing, setFinalizing] = useState(false);
@@ -1140,12 +1149,17 @@ export default function SchedulingHub({ session, onSignOut }) {
   }
 
   // ---- Per-week notes (migration 0010) ------------------------------------
-  const [notesOpen, setNotesOpen] = useState(false);
+  // notesWeek is the week the modal is showing — Set Schedule opens it on the
+  // week being edited, the Rail panel opens it on the current week.
+  const [notesWeek, setNotesWeek] = useState(null);
   const [notesByWeek, setNotesByWeek] = useState({}); // { weekStartIso: [rows] }
   const [noteDraft, setNoteDraft] = useState("");
   const [noteEditId, setNoteEditId] = useState(null);
   const [noteEditText, setNoteEditText] = useState("");
   const weekNotes = notesByWeek[activeWeekStart] || [];
+  const thisWeekStart = iso(mondayOf(new Date()));
+  const thisWeekNotes = notesByWeek[thisWeekStart] || [];
+  const modalNotes = (notesWeek && notesByWeek[notesWeek]) || [];
 
   async function reloadNotes(weekStartIso) {
     if (!weekStartIso) return;
@@ -1190,12 +1204,13 @@ export default function SchedulingHub({ session, onSignOut }) {
 
   async function handleAddNote() {
     const text = noteDraft.trim();
-    if (!text || !activeWeekStart) return;
+    const ws = notesWeek;
+    if (!text || !ws) return;
     setNoteDraft("");
     try {
-      const row = await insertScheduleNote({ weekStartIso: activeWeekStart, note: text });
+      const row = await insertScheduleNote({ weekStartIso: ws, note: text });
       if (row) {
-        setNotesByWeek((prev) => ({ ...prev, [activeWeekStart]: [row, ...(prev[activeWeekStart] || [])] }));
+        setNotesByWeek((prev) => ({ ...prev, [ws]: [row, ...(prev[ws] || [])] }));
       }
     } catch (e) {
       console.error("Add note failed:", e);
@@ -1204,22 +1219,25 @@ export default function SchedulingHub({ session, onSignOut }) {
   }
   async function handleSaveNoteEdit(id) {
     const text = noteEditText.trim();
-    if (!text) return;
+    const ws = notesWeek;
+    if (!text || !ws) return;
     setNoteEditId(null);
     setNotesByWeek((prev) => ({
       ...prev,
-      [activeWeekStart]: (prev[activeWeekStart] || []).map((n) => (n.id === id ? { ...n, note: text } : n)),
+      [ws]: (prev[ws] || []).map((n) => (n.id === id ? { ...n, note: text } : n)),
     }));
     try { await updateScheduleNote(id, text); }
-    catch (e) { console.error("Edit note failed:", e); reloadNotes(activeWeekStart); }
+    catch (e) { console.error("Edit note failed:", e); reloadNotes(ws); }
   }
   async function handleDeleteNote(id) {
+    const ws = notesWeek;
+    if (!ws) return;
     setNotesByWeek((prev) => ({
       ...prev,
-      [activeWeekStart]: (prev[activeWeekStart] || []).filter((n) => n.id !== id),
+      [ws]: (prev[ws] || []).filter((n) => n.id !== id),
     }));
     try { await deleteScheduleNote(id); }
-    catch (e) { console.error("Delete note failed:", e); reloadNotes(activeWeekStart); }
+    catch (e) { console.error("Delete note failed:", e); reloadNotes(ws); }
   }
 
   const autoSlots = useMemo(
@@ -1570,6 +1588,9 @@ export default function SchedulingHub({ session, onSignOut }) {
   // whether or not the panel is open).
   useEffect(() => {
     if (activeWeekStart && !notesByWeek[activeWeekStart]) reloadNotes(activeWeekStart);
+    // The Rail's notes box always shows the current week, whatever week the
+    // Set Schedule tab happens to be on.
+    if (!notesByWeek[thisWeekStart]) reloadNotes(thisWeekStart);
   }, [activeWeekStart]);
 
   // Pending staff info-update requests (Staff tab review section).
@@ -2872,9 +2893,28 @@ export default function SchedulingHub({ session, onSignOut }) {
         .week-range-text { padding: 3px 8px; border-radius: 6px; }
         .week-range-current { background: rgba(201,138,63,0.2); color: #8a5a20; }
 
+
         @media print {
-          .hub { background: #fff !important; padding: 0 !important; }
-          .tabs, .print-btn, .custom-toggle, .publish-btn, .published-badge, .back-btn, .subject-preview { display: none !important; }
+          /* The dark skin is screen-only: restore light surfaces + dark ink for
+             everything that actually prints. Deliberately enumerated rather than
+             a blanket "hub descendant" rule, which would use !important to
+             stomp the inline colors on the branded schedule sheet and QR sheet. */
+          .hub { background: #fff !important; color: #2B2A25 !important; padding: 0 !important; }
+          .cal-card, .nr-card, .nr-item, .nr-panel, .decision-card,
+          .notes-modal, .delete-modal { background: #fff !important; color: #2B2A25 !important; border-color: rgba(43,42,37,0.2) !important; }
+          .emp-name, .tip-stat, .check-value, .week-range, .print-week-range,
+          .tip-name-display, .tip-position, .cal-day-num, .recon-row.final label,
+          .denom-row.totals { color: #2B2A25 !important; }
+          .week-table th, .tip-field label, .recon-title, .denom-header,
+          .check-label, .cal-weekday { color: #8c8574 !important; }
+          .recon-row label, .denom-label, .check-sub, .legend-item { color: #4a473d !important; }
+          .cal-day { background: #fff !important; border-color: rgba(43,42,37,0.12) !important; }
+          .tip-field input, .tip-table-input, .recon-row input, .denom-row input,
+          .payout-row input[type="text"], .payout-row input[type="number"],
+          .tip-time-input { background: #fff !important; color: #2B2A25 !important; border-color: rgba(43,42,37,0.2) !important; }
+          .role-header { color: #8a5a20 !important; }
+          .recon-row.final span { color: #8a5a20 !important; }
+          .tabs, .hub-header, .print-btn, .custom-toggle, .publish-btn, .published-badge, .back-btn, .subject-preview { display: none !important; }
           .cal-card { box-shadow: none !important; }
           /* Tip Sheet print: hide helper text, buttons, navigation, finalized banner; outline-only boxes; fit one page */
           .footer-note, .recon-note, .fm-banner, .week-header, .tip-finalized-banner { display: none !important; }
@@ -2921,6 +2961,19 @@ export default function SchedulingHub({ session, onSignOut }) {
            this class provides outline-only boxes + compaction for one landscape page
            at the fixed 1280px capture width. Rules are independent, not relying on
            @media print or base styles. */
+        /* html2canvas doesn't evaluate @media print, so the Tip Sheet PDF needs
+           its own light restore — same reason the rules above exist. */
+        .tip-pdf-mode, .tip-pdf-mode .cal-card { background: #fff !important; color: #2B2A25 !important; }
+        .tip-pdf-mode .emp-name, .tip-pdf-mode .tip-stat, .tip-pdf-mode .check-value,
+        .tip-pdf-mode .tip-name-display, .tip-pdf-mode .tip-position,
+        .tip-pdf-mode .denom-row.totals, .tip-pdf-mode .recon-row.final label { color: #2B2A25 !important; }
+        .tip-pdf-mode .week-table th, .tip-pdf-mode .tip-field label,
+        .tip-pdf-mode .recon-title, .tip-pdf-mode .denom-header,
+        .tip-pdf-mode .check-label { color: #8c8574 !important; }
+        .tip-pdf-mode .recon-row label, .tip-pdf-mode .denom-label,
+        .tip-pdf-mode .check-sub { color: #4a473d !important; }
+        .tip-pdf-mode input { background: #fff !important; color: #2B2A25 !important; border-color: rgba(43,42,37,0.2) !important; }
+        .tip-pdf-mode .recon-row.final span { color: #8a5a20 !important; }
         .tip-pdf-mode .check-box, .tip-pdf-mode .cash-recon, .tip-pdf-mode .hero-item { background: transparent !important; }
         .tip-pdf-mode .cash-recon { border: 1px solid rgba(43,42,37,0.2) !important; }
         .tip-pdf-mode .hero-item { border-color: #C98A3E !important; padding: 10px 12px !important; }
@@ -3119,6 +3172,243 @@ export default function SchedulingHub({ session, onSignOut }) {
           .cal-day-meta { font-size: 9px; }
           .week-table { font-size: 10px; }
         }
+
+        /* Dark Split skin lives at the END of the sheet so it wins over every
+           base rule above it. The @media print and .tip-pdf-mode restores use
+           !important, so they still beat these regardless of order. */
+        /* ==================================================================
+           DARK SPLIT SKIN (DARK-SPLIT-REDESIGN-BRIEF item 1)
+           Screen-only. Everything above is the original light-card baseline,
+           which the print + PDF paths still rely on — that's why this block
+           sits BEFORE @media print rather than replacing the rules above.
+           Layout/behaviour is untouched here; colors and surfaces only.
+           ================================================================== */
+        .hub {
+          --bg: #0c0c0c; --s1: #111111; --s2: #141414;
+          --line: #1e1e1e; --line2: #222222;
+          --txt: #ffffff; --txt2: #aaaaaa; --muted: #555555;
+          --accent: #c8956c;
+          background: #0c0c0c; color: #ffffff; padding: 0 0 60px;
+        }
+
+        /* ---- global header + tab bar ---- */
+        .hub-header {
+          background: var(--s1); border-bottom: 1px solid var(--line);
+          max-width: none; margin: 0; padding: 16px 28px; align-items: center;
+        }
+        .hub-title { color: var(--txt); font-size: 15px; letter-spacing: 3px; }
+        .hub-title span { color: var(--accent); }
+        .hub-date { color: var(--txt2); }
+        .hub-icon { height: 26px; }
+        .tabs {
+          max-width: none; margin: 0 0 26px; padding: 0 28px; gap: 26px;
+          background: var(--s1); border-bottom: 1px solid var(--line);
+        }
+        .tab-btn { color: var(--muted); padding: 12px 2px; }
+        .tab-btn:hover { color: var(--txt2); }
+        .tab-btn.active { color: var(--txt); border-bottom-color: var(--accent); }
+        .hub-signout { border-color: var(--line2) !important; color: var(--txt2) !important; }
+        /* .hub lost its own side padding to let the header/tab bars run full
+           width, so the tab content supplies its own. */
+        .nr-wrap, .cal-wrap, .hub-grid { padding: 0 28px; }
+
+        /* ---- panels, cards, surfaces ---- */
+        .nr-card, .cal-card, .decision-card, .ticket { background: var(--s1); color: var(--txt); box-shadow: none; border: 1px solid var(--line); }
+        .nr-item, .nr-panel, .nr-empty, .side-card { background: var(--s2); border-color: var(--line); color: var(--txt); box-shadow: none; }
+        .nr-count { background: var(--line); color: var(--txt2); }
+        .nr-item-name, .nr-item-dates, .gmail-label, .decision-name, .week-range, .emp-name,
+        .tip-stat, .check-value, .tip-name-display, .print-week-range { color: var(--txt); }
+        .nr-item-type, .nr-item-note, .nr-row-status, .gmail-sub, .decision-notice,
+        .decision-note, .template-note, .legend-item, .cal-day-meta, .recon-note,
+        .check-sub, .tip-position, .denom-label, .recon-row label { color: var(--txt2); }
+        .nr-label, .col-label, .cal-weekday, .week-table th, .tip-field label,
+        .recon-title, .denom-header, .check-label, .nr-day-name { color: var(--muted); }
+        .nr-row, .nr-log-row, .roster-row { border-color: var(--line); }
+        .gmail-bar { border-color: var(--line); color: var(--txt2); }
+        .nr-day-num { color: var(--txt); }
+        .nr-day-today { background: rgba(200,149,108,0.14); }
+        .nr-day-today .nr-day-name, .nr-day-today .nr-day-num { color: var(--accent); }
+        .nr-holiday-note, .nr-log-time { color: var(--muted); }
+        .nr-log-neutral { color: var(--txt2); }
+
+        /* ---- controls ---- */
+        .nr-manager-note, .cell-select, .cell-role-select, .manual-field,
+        .tip-field input, .tip-table-input, .recon-row input, .denom-row input,
+        .payout-row input[type="text"], .payout-row input[type="number"],
+        .notes-input, .staff-input, .staff-select {
+          background: var(--s2); border-color: var(--line2); color: var(--txt);
+        }
+        .nr-manager-note::placeholder, .notes-input::placeholder, .tip-time-input::placeholder { color: var(--muted); }
+        .nr-manager-note:focus, .notes-input:focus, .cell-select:focus { border-color: var(--accent); background: var(--s2); }
+        .tip-time-input { color: var(--txt); border-bottom-color: var(--line2); }
+        .nr-btn-approve { background: var(--accent); color: #0c0c0c; }
+        .nr-btn-deny { background: var(--line); color: var(--txt2); }
+        .nr-btn-partial { background: var(--line); color: var(--txt2); border-color: var(--line2); }
+        .gmail-check-btn { background: var(--s2); border-color: var(--line2); color: var(--txt2); }
+        .gmail-check-btn:hover:not(:disabled) { background: var(--line); color: var(--txt); }
+        .print-btn { background: var(--s2); color: var(--txt); border: 1px solid var(--line2); }
+        .print-btn:hover { background: var(--line); }
+        .print-btn.lock-active { background: #B23A2F; color: #fff; border-color: #B23A2F; }
+        .print-btn.finalized-active { background: #5a8a6a; color: #fff; border-color: #5a8a6a; }
+        .subtab-btn { border-color: var(--line2); color: var(--txt2); }
+        .subtab-btn.active { background: var(--accent); color: #0c0c0c; border-color: var(--accent); }
+        .subtab-btn:hover:not(.active) { background: var(--line); color: var(--txt); }
+        .back-btn { color: var(--txt2); }
+        .back-btn:hover { color: var(--txt); }
+        .today-btn { background: var(--accent); border-color: var(--accent); color: #0c0c0c; }
+        .today-btn:disabled { background: transparent; color: var(--muted); border-color: var(--line2); }
+        .custom-toggle { background: var(--s2); border-color: var(--line2); color: var(--txt2); }
+        .custom-toggle.on { background: var(--accent); border-color: var(--accent); color: #0c0c0c; }
+        .add-payout-btn { color: var(--accent); border-color: var(--line2); }
+        .week-range-current { background: rgba(200,149,108,0.18); color: var(--accent); }
+
+        /* ---- calendar ---- */
+        .cal-day { background: var(--s2); border-color: var(--line); }
+        .cal-day:hover { box-shadow: 0 6px 14px rgba(0,0,0,0.5); }
+        .cal-day-num { color: var(--txt); }
+        .cal-day.today { border-color: var(--accent); }
+        .cal-day.today .cal-day-num { background: var(--accent); color: #0c0c0c; }
+        .today-pill { background: var(--accent); color: #0c0c0c; }
+        .cal-grid.multi-month .cal-month-label { color: var(--txt2); }
+        .cal-grid.multi-month .cal-month-label.current { color: var(--accent); }
+        .week-table th.today-col, .week-table td.today-col { background: rgba(200,149,108,0.10); }
+        .week-table th.today-col { color: var(--accent); border-bottom-color: var(--accent); }
+        .emp-name, .week-table td.shift-cell { border-color: var(--line); }
+        .role-header { color: var(--accent); border-color: var(--line); }
+        .tip-position { border-color: var(--line); }
+
+        /* ---- tip sheet + misc panels ---- */
+        .cash-recon { background: var(--s2); border-color: var(--line); }
+        .recon-row { border-color: var(--line); }
+        .recon-row.final { border-top-color: var(--line2); }
+        .recon-row.final label { color: var(--txt); }
+        .recon-row.final span { color: var(--accent); }
+        .denom-table, .denom-row.totals { border-color: var(--line); color: var(--txt); }
+        .payouts-block { border-color: var(--line); }
+        .check-box.match { background: rgba(90,138,106,0.14); border-color: #5a8a6a; }
+        .check-box.mismatch { background: rgba(200,149,108,0.14); border-color: var(--accent); }
+        .tip-finalized-banner { background: rgba(90,138,106,0.14); border-color: #5a8a6a; color: #8fce9f; }
+        .tip-finalized-sub { color: var(--txt2); }
+        .tip-locked input, .tip-locked .add-payout-btn, .tip-locked .custom-toggle { background: var(--line) !important; }
+        .slot-empty, .payout-empty { color: var(--muted); }
+        .tip-name-input { background: var(--s2); border-color: var(--line2); color: var(--txt); }
+
+        /* ---- modals ---- */
+        .notes-modal, .qr-modal, .delete-modal, .day-popup {
+          background: var(--s1); color: var(--txt); border: 1px solid var(--line2);
+        }
+        .notes-row { background: var(--s2); border-color: var(--line); }
+        .notes-row-meta, .notes-empty { color: var(--muted); }
+        .day-popup-date, .delete-modal-title, .notes-row-text { color: var(--txt); }
+        .day-popup-empty, .delete-modal-body, .day-popup-section { color: var(--txt2); }
+        .manual-field-label { color: var(--muted); }
+        .published-badge { color: #5a8a6a; }
+
+        /* ---- Dark Split Rail: queue | detail | log+notes ---- */
+        .rs-card { padding: 0; overflow: hidden; }
+        .rs-head { display: flex; align-items: center; gap: 10px; padding: 16px 20px 14px; border-bottom: 1px solid var(--line); }
+        .rs-head-icon { height: 22px; width: auto; }
+        .rs-head-word { font-family: 'Space Mono', monospace; font-weight: 700; font-size: 14px; letter-spacing: 4px; color: var(--txt); }
+        .rs-head-pending { margin-left: auto; font-family: 'Space Mono', monospace; font-size: 10px; letter-spacing: 1px; text-transform: uppercase; color: var(--accent); background: rgba(200,149,108,0.14); border-radius: 20px; padding: 3px 10px; }
+
+        .rs-strip { display: flex; gap: 4px; padding: 12px 20px; border-bottom: 1px solid var(--line); }
+        .rs-day { flex: 1; text-align: center; padding: 7px 2px 5px; border-radius: 8px; }
+        .rs-day-today { background: rgba(200,149,108,0.12); }
+        .rs-day-name { font-family: 'Space Mono', monospace; font-size: 9px; letter-spacing: 1px; text-transform: uppercase; color: var(--muted); }
+        .rs-day-num { font-family: 'Space Mono', monospace; font-weight: 700; font-size: 14px; color: var(--txt); margin-top: 2px; }
+        .rs-day-today .rs-day-name, .rs-day-today .rs-day-num { color: var(--accent); }
+        .rs-day-marks { display: flex; justify-content: center; gap: 3px; height: 8px; margin-top: 3px; }
+        .rs-mark { width: 5px; height: 5px; border-radius: 50%; display: inline-block; }
+        .rs-mark-today { background: var(--accent); }
+        .rs-mark-pending { background: #4a7a9b; }
+        .rs-mark-holiday { background: #B23A2F; }
+        .rs-holiday-note { padding: 8px 20px 0; font-size: 10.5px; color: var(--muted); text-align: center; }
+
+        .rs-grid { display: grid; grid-template-columns: 220px minmax(0,1fr) 180px; gap: 20px; padding: 18px 20px 24px; align-items: start; }
+        @media (max-width: 980px) { .rs-grid { grid-template-columns: 1fr; } }
+        .rs-col-left, .rs-col-mid, .rs-col-right { min-width: 0; }
+        .rs-label-resolved { margin-top: 18px; }
+
+        .rs-q { display: flex; width: 100%; text-align: left; gap: 9px; align-items: center; background: var(--s2); border: 1px solid var(--line); border-left: 3px solid transparent; border-radius: 10px; padding: 9px 10px; margin-bottom: 7px; cursor: pointer; font-family: inherit; }
+        .rs-q:hover { border-color: var(--line2); }
+        .rs-q-sel { background: #181818; border-left-width: 3px; border-left-style: solid; }
+        .rs-q-done { opacity: 0.45; cursor: default; }
+        .rs-q-avatar { width: 26px; height: 26px; border-radius: 50%; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; color: #0c0c0c; font-weight: 800; font-size: 12px; }
+        .rs-q-body { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+        .rs-q-name { font-size: 13px; font-weight: 700; color: var(--txt); display: flex; align-items: center; gap: 5px; }
+        .rs-q-urgent { width: 6px; height: 6px; border-radius: 50%; background: #B23A2F; flex-shrink: 0; }
+        .rs-q-type { font-size: 10.5px; font-weight: 700; }
+        .rs-q-done .rs-q-type { color: var(--muted) !important; }
+        .rs-q-dates { font-family: 'Space Mono', monospace; font-size: 10.5px; color: var(--txt2); }
+        .rs-empty { padding: 24px 12px; font-size: 12.5px; }
+
+        .rs-prompt { margin-top: 16px; text-align: center; font-family: 'Space Mono', monospace; font-size: 11px; letter-spacing: 2px; text-transform: uppercase; color: var(--muted); border: 1px dashed var(--line2); border-radius: 10px; padding: 22px 10px; }
+        .rs-detail { background: var(--s2); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px 20px; }
+        .rs-detail-top { display: flex; align-items: flex-start; gap: 11px; }
+        .rs-detail-avatar { width: 34px; height: 34px; font-size: 15px; }
+        .rs-detail-name { font-size: 18px; font-weight: 800; color: var(--txt); }
+        .rs-detail-type { display: flex; align-items: center; gap: 7px; margin-top: 5px; flex-wrap: wrap; }
+        .rs-type-badge { font-family: 'Space Mono', monospace; font-size: 9.5px; letter-spacing: 1px; text-transform: uppercase; color: #0c0c0c; padding: 2px 8px; border-radius: 20px; font-weight: 700; }
+        .rs-detail-dates { margin-left: auto; font-family: 'Space Mono', monospace; font-weight: 700; font-size: 16px; color: var(--txt); white-space: nowrap; }
+        .rs-detail-meta { font-size: 11px; color: var(--muted); margin: 10px 0 0; text-transform: uppercase; letter-spacing: 0.5px; font-family: 'Space Mono', monospace; }
+        .rs-detail-note { font-size: 13px; color: var(--txt2); line-height: 1.55; margin: 12px 0 14px; padding: 11px 13px; background: #101010; border-radius: 9px; border: 1px solid var(--line); white-space: pre-wrap; }
+
+        .rs-clear { margin-left: auto; background: none; border: none; cursor: pointer; font-family: 'Space Mono', monospace; font-size: 9.5px; letter-spacing: 1px; text-transform: uppercase; color: var(--muted); padding: 0; }
+        .rs-clear:hover { color: var(--txt2); }
+        .rs-log { max-height: 240px; overflow-y: auto; }
+        .rs-log-empty { font-size: 11px; color: var(--muted); font-style: italic; }
+        .rs-log .nr-log-row { font-size: 11px; }
+        .rs-notes { display: flex; flex-direction: column; gap: 6px; width: 100%; text-align: left; cursor: pointer; font-family: inherit; max-height: 190px; overflow: hidden; }
+        .rs-notes:hover { border-color: var(--line2); }
+        .rs-note-line { font-size: 11px; color: var(--txt2); line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+        .rs-note-more { font-size: 10px; color: var(--accent); font-weight: 700; }
+
+        /* ---- remaining light surfaces ---- */
+        .fm-chip { background: rgba(74,122,155,0.16); border-color: rgba(74,122,155,0.5); }
+        .fm-chip-day { color: #79a8c7; }
+        .fm-chip-name { color: #cfe2ee; }
+        .fm-chip-empty { background: var(--s2); border-color: var(--line2); }
+        .fm-chip-empty .fm-chip-day { color: var(--muted); }
+        .fm-chip-empty .fm-chip-name { color: var(--muted); }
+        .cell-blocked { color: var(--muted); background: repeating-linear-gradient(45deg, rgba(255,255,255,0.04), rgba(255,255,255,0.04) 4px, transparent 4px, transparent 8px); }
+        .staff-edit-modal { background: var(--s1); color: var(--txt); }
+        .day-popup-close { color: var(--txt2); }
+        .day-popup-close:hover { color: var(--txt); }
+        .day-popup-item { border-color: var(--line); }
+        .day-popup-status-pending { color: var(--accent); }
+        .day-popup-status-approved { color: #7fb392; }
+        .shift-chip { border-color: var(--line2); }
+        .nr-empty { border-color: var(--line2); }
+        .empty-decisions, .empty-rail { color: var(--muted); }
+        .manual-add-btn { color: var(--accent); border-color: var(--line2); background: var(--s2); }
+        .hero-item { background: rgba(200,149,108,0.12); border-color: rgba(200,149,108,0.35); }
+        .hero-label { color: var(--accent); }
+        .hero-value { color: var(--accent); }
+        .subject-preview { background: rgba(200,149,108,0.10); border-color: rgba(200,149,108,0.45); color: var(--accent); }
+        .footer-note { color: var(--txt2); }
+        .point-reference { color: #e08a7d; }
+
+        /* ---- staff tab ---- */
+        .staff-add, .staff-profile { background: var(--s2); border-color: var(--line); }
+        .staff-add-title, .staff-profile-key { color: var(--muted); }
+        .staff-row { border-color: var(--line); }
+        .staff-name-input { background: var(--s2); border-color: var(--line2); color: var(--txt); }
+        .staff-role-check { color: var(--txt2); }
+        .staff-role-check input { accent-color: var(--accent); }
+        .staff-delete-btn { background: rgba(178,58,47,0.15); border-color: rgba(178,58,47,0.5); color: #e0796c; }
+        .staff-delete-btn:hover { background: rgba(178,58,47,0.28); }
+        .staff-profile-val { background: var(--s1); border-color: var(--line2); color: var(--txt); }
+        .staff-profile-val:hover { border-color: var(--accent); }
+        .staff-profile-empty { color: var(--muted); }
+        .staff-profile-status.reg-yes { color: #7fb392; }
+        .qr-btn { background: var(--s2); border-color: var(--line2); color: var(--txt2); }
+        .qr-btn:hover { background: var(--line); color: var(--txt); }
+        .qr-caption { color: var(--txt2); }
+        .qr-subject { background: rgba(200,149,108,0.12); color: var(--accent); }
+        .info-updates { background: rgba(200,149,108,0.10); border-color: rgba(200,149,108,0.35); }
+        .info-updates-title { color: var(--accent); }
+        .info-update-row { border-color: rgba(200,149,108,0.22); }
+        .cal-off-chip { background: rgba(74,122,155,0.20); color: #9dc0d6; }
       `}</style>
 
       <div className="hub-header">
@@ -3130,10 +3420,11 @@ export default function SchedulingHub({ session, onSignOut }) {
           <div className="hub-date">TODAY — {TODAY_HEADER}</div>
           {session?.user?.email && (
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <span className="hub-date" style={{ color: "#7d7666" }}>{session.user.email}</span>
+              <span className="hub-date" style={{ color: "#555555" }}>{session.user.email}</span>
               <button
                 onClick={onSignOut}
                 title="Sign out"
+                className="hub-signout"
                 style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "1px solid rgba(237,231,217,0.18)", borderRadius: 6, color: "#A79E8C", fontFamily: "'Space Mono', monospace", fontSize: 10, letterSpacing: 1, textTransform: "uppercase", padding: "5px 9px", cursor: "pointer" }}
               >
                 <LogOut size={12} /> Sign out
@@ -3149,10 +3440,11 @@ export default function SchedulingHub({ session, onSignOut }) {
       )}
 
       <div className="tabs">
+        {/* Order per brief: RAIL · CALENDAR · TIP SHEET · SET SCHEDULE · STAFF · INVOICES · MENU */}
         <button className={`tab-btn ${tab === "rail" ? "active" : ""}`} onClick={() => setTab("rail")}>Rail</button>
         <button className={`tab-btn ${tab === "calendar" ? "active" : ""}`} onClick={() => setTab("calendar")}>Calendar</button>
-        <button className={`tab-btn ${tab === "template" ? "active" : ""}`} onClick={() => setTab("template")}>Set Schedule</button>
         <button className={`tab-btn ${tab === "tips" ? "active" : ""}`} onClick={() => setTab("tips")}>Tip Sheet</button>
+        <button className={`tab-btn ${tab === "template" ? "active" : ""}`} onClick={() => setTab("template")}>Set Schedule</button>
         <button className={`tab-btn ${tab === "staff" ? "active" : ""}`} onClick={() => setTab("staff")}>Staff</button>
         <button className={`tab-btn ${tab === "invoices" ? "active" : ""}`} onClick={() => setTab("invoices")}>Invoices</button>
         <button className={`tab-btn ${tab === "menu" ? "active" : ""}`} onClick={() => setTab("menu")}>Menu</button>
@@ -3160,7 +3452,40 @@ export default function SchedulingHub({ session, onSignOut }) {
 
       {tab === "rail" && (
         <div className="nr-wrap">
-          <div className="nr-card">
+          <div className="nr-card rs-card">
+            {/* ---- brand row: icon + HAENYEO, gmail dot, pending count ---- */}
+            <div className="rs-head">
+              <img src={HAENYEO_ICON} alt="" className="rs-head-icon" />
+              <span className="rs-head-word">HAENYEO</span>
+              <span className="rs-head-pending">{pending.length} pending</span>
+            </div>
+
+            {/* ---- 7-day strip: today tinted + dot, pending markers per day ---- */}
+            <div className="rs-strip">
+              {weekStrip.map((d, i) => {
+                const holidayName = holidayFor(d.iso);
+                const nPending = railItemsForDate(d.iso).filter((x) => x.status === "pending").length;
+                return (
+                  <div
+                    className={`rs-day ${i === 0 ? "rs-day-today" : ""}`}
+                    key={d.iso}
+                    title={[holidayName, nPending ? `${nPending} pending` : ""].filter(Boolean).join(" · ")}
+                  >
+                    <div className="rs-day-name">{d.label}</div>
+                    <div className="rs-day-num">{d.num}</div>
+                    <div className="rs-day-marks">
+                      {i === 0 && <span className="rs-mark rs-mark-today" />}
+                      {nPending > 0 && <span className="rs-mark rs-mark-pending" />}
+                      {holidayName && <span className="rs-mark rs-mark-holiday" />}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            {holidaysThisWeek.length > 0 && (
+              <div className="rs-holiday-note">Holiday this week: {holidaysThisWeek.map((h) => h.name).join(", ")}</div>
+            )}
+
             <div className="gmail-bar">
               {(() => {
                 const st = gmailStatus;
@@ -3193,24 +3518,92 @@ export default function SchedulingHub({ session, onSignOut }) {
                 );
               })()}
             </div>
-            <div className="nr-grid">
-              <div>
+            {/* ---- Dark Split: queue | detail | log+notes ---- */}
+            <div className="rs-grid">
+
+              {/* LEFT — pending queue, resolved below dimmed */}
+              <div className="rs-col-left">
                 <div className="nr-label">
                   <Clock size={13} /> Pending Decisions <span className="nr-count">{pending.length}</span>
                   <button className="manual-add-btn" onClick={() => { setManualError(null); setManualOpen(true); }} title="Manually log a scheduling request made in person">+ Add Request</button>
                 </div>
-                {pending.length === 0 && <div className="nr-empty">Nothing waiting on you right now.</div>}
+                {pending.length === 0 && <div className="nr-empty rs-empty">Nothing waiting on you right now.</div>}
                 {pending.map((item) => {
+                  const style = TYPE_STYLES[item.type] || { badge: "#7B93A3", label: item.type };
+                  const sel = selectedRailId === item.id;
+                  return (
+                    <button
+                      type="button"
+                      className={`rs-q ${sel ? "rs-q-sel" : ""}`}
+                      key={item.id}
+                      style={sel ? { borderLeftColor: style.badge } : undefined}
+                      onClick={() => setSelectedRailId(item.id)}
+                    >
+                      <span className="rs-q-avatar" style={{ background: style.badge }}>{item.name[0]}</span>
+                      <span className="rs-q-body">
+                        <span className="rs-q-name">
+                          {item.name}
+                          {item.urgent && <span className="rs-q-urgent" title="Short notice" />}
+                        </span>
+                        <span className="rs-q-type" style={{ color: style.badge }}>{style.label}</span>
+                        <span className="rs-q-dates">{item.dates}</span>
+                      </span>
+                    </button>
+                  );
+                })}
+
+                {resolvedReqs.length > 0 && (
+                  <>
+                    <div className="nr-label rs-label-resolved">Resolved</div>
+                    {resolvedReqs.slice(0, 12).map((r) => {
+                      const style = TYPE_STYLES[r.type] || { badge: "#7B93A3", label: r.type };
+                      return (
+                        <div className="rs-q rs-q-done" key={r.id}>
+                          <span className="rs-q-avatar" style={{ background: style.badge }}>{r.name[0]}</span>
+                          <span className="rs-q-body">
+                            <span className="rs-q-name">{r.name}</span>
+                            <span className="rs-q-type">{style.label} · {r.status}</span>
+                            <span className="rs-q-dates">{r.dates}</span>
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </>
+                )}
+              </div>
+
+              {/* CENTRE — detail for the selected request, else today's floor */}
+              <div className="rs-col-mid">
+                {(() => {
+                  const item = pending.find((p) => p.id === selectedRailId);
+                  if (!item) {
+                    return (
+                      <>
+                        <div className="nr-label"><Users size={13} /> Today at a Glance</div>
+                        <div className="nr-panel">
+                          {roster.map((r) => (
+                            <div className="nr-row" key={r.name}>
+                              <span><span className="nr-dot" />{r.name}</span>
+                              <span className="nr-row-status">{r.status}</span>
+                            </div>
+                          ))}
+                        </div>
+                        <div className="rs-prompt">
+                          {pending.length ? "Select a request to review" : "No requests waiting"}
+                        </div>
+                      </>
+                    );
+                  }
                   const style = TYPE_STYLES[item.type] || { badge: "#7B93A3", label: item.type };
                   const isTimeOff = item.type === "TIME OFF";
                   const to = isTimeOff ? timeOffDates(item.dates) : null;
                   const busy = railBusy === item.id;
                   return (
-                    <div className="nr-item" key={item.id}>
-                      <div className="nr-item-top">
-                        <div className="nr-hex" style={{ background: style.badge }}><span>{item.name[0]}</span></div>
+                    <div className="rs-detail">
+                      <div className="rs-detail-top">
+                        <span className="rs-q-avatar rs-detail-avatar" style={{ background: style.badge }}>{item.name[0]}</span>
                         <div>
-                          <div className="nr-item-name">
+                          <div className="rs-detail-name">
                             {item.name}
                             {item.unmatchedName && (
                               <span className="nr-unmatched" title="No staff member matches this name — approve after fixing, or add them on the Staff tab">
@@ -3218,96 +3611,99 @@ export default function SchedulingHub({ session, onSignOut }) {
                               </span>
                             )}
                           </div>
-                          <div className="nr-item-type">
-                            {style.label}
-                            {isTimeOff && ` · ${to.consecutive ? "Consecutive" : "Non-consecutive"}${to.dates.length ? ` · ${to.dates.length} day${to.dates.length > 1 ? "s" : ""}` : ""}`}
-                            {!isTimeOff && (item.notice ? ` · ${item.notice}` : item.source === "gmail" ? " · via email" : "")}
+                          <div className="rs-detail-type">
+                            <span className="rs-type-badge" style={{ background: style.badge }}>{style.label}</span>
+                            {item.urgent && <span className="nr-urgent"><AlertTriangle size={11} /> Short notice</span>}
                           </div>
                         </div>
-                        {item.urgent && <span className="nr-urgent"><AlertTriangle size={11} /> Short notice</span>}
-                        <div className="nr-item-dates">{item.dates}</div>
+                        <div className="rs-detail-dates">{item.dates}</div>
                       </div>
-                      <div className="nr-item-note">{item.note}</div>
-                      <div className="nr-item-reply">
+
+                      <div className="rs-detail-meta">
+                        {isTimeOff && `${to.consecutive ? "Consecutive" : "Non-consecutive"}${to.dates.length ? ` · ${to.dates.length} day${to.dates.length > 1 ? "s" : ""}` : ""}`}
+                        {!isTimeOff && (item.notice ? item.notice : item.source === "gmail" ? "via email" : "")}
+                      </div>
+
+                      {item.note && <div className="rs-detail-note">{item.note}</div>}
+
+                      <input
+                        className="nr-manager-note"
+                        type="text"
+                        placeholder={partialOpen[item.id] ? "Note to staff (required for partial approval)…" : "Optional note to staff (used in the email reply)…"}
+                        value={railNotes[item.id] || ""}
+                        onChange={(e) => setRailNotes((n) => ({ ...n, [item.id]: e.target.value }))}
+                        disabled={busy}
+                      />
+                      {isTimeOff && partialOpen[item.id] && (
                         <input
                           className="nr-manager-note"
                           type="text"
-                          placeholder={partialOpen[item.id] ? "Note to staff (required for partial approval)…" : "Optional note to staff (used in the email reply)…"}
-                          value={railNotes[item.id] || ""}
-                          onChange={(e) => setRailNotes((n) => ({ ...n, [item.id]: e.target.value }))}
+                          placeholder='Approved dates only (e.g. "Jul 28, Jul 30")'
+                          value={partialDates[item.id] || ""}
+                          onChange={(e) => setPartialDates((n) => ({ ...n, [item.id]: e.target.value }))}
                           disabled={busy}
                         />
-                        {isTimeOff && partialOpen[item.id] && (
-                          <input
-                            className="nr-manager-note"
-                            type="text"
-                            placeholder='Approved dates only (e.g. "Jul 28, Jul 30")'
-                            value={partialDates[item.id] || ""}
-                            onChange={(e) => setPartialDates((n) => ({ ...n, [item.id]: e.target.value }))}
-                            disabled={busy}
-                          />
+                      )}
+                      <div className="nr-item-actions">
+                        {isTimeOff && partialOpen[item.id] ? (
+                          <>
+                            <button className="nr-btn nr-btn-approve" disabled={busy} onClick={() => resolvePartial(item)}><Check size={14} /> Confirm partial</button>
+                            <button className="nr-btn nr-btn-deny" disabled={busy} onClick={() => setPartialOpen((n) => ({ ...n, [item.id]: false }))}>Cancel</button>
+                          </>
+                        ) : (
+                          <>
+                            <button className="nr-btn nr-btn-approve" disabled={busy} onClick={() => resolve(item, true)}><Check size={14} /> Approve</button>
+                            {isTimeOff && (
+                              <button className="nr-btn nr-btn-partial" disabled={busy} onClick={() => setPartialOpen((n) => ({ ...n, [item.id]: true }))}>Partial</button>
+                            )}
+                            <button className="nr-btn nr-btn-deny" disabled={busy} onClick={() => resolve(item, false)}><X size={14} /> Deny</button>
+                          </>
                         )}
-                        <div className="nr-item-actions">
-                          {isTimeOff && partialOpen[item.id] ? (
-                            <>
-                              <button className="nr-btn nr-btn-approve" disabled={busy} onClick={() => resolvePartial(item)}><Check size={14} /> Confirm partial</button>
-                              <button className="nr-btn nr-btn-deny" disabled={busy} onClick={() => setPartialOpen((n) => ({ ...n, [item.id]: false }))}>Cancel</button>
-                            </>
-                          ) : (
-                            <>
-                              <button className="nr-btn nr-btn-approve" disabled={busy} onClick={() => resolve(item, true)}><Check size={14} /> Approve</button>
-                              {isTimeOff && (
-                                <button className="nr-btn nr-btn-partial" disabled={busy} onClick={() => setPartialOpen((n) => ({ ...n, [item.id]: true }))}>Partial</button>
-                              )}
-                              <button className="nr-btn nr-btn-deny" disabled={busy} onClick={() => resolve(item, false)}><X size={14} /> Deny</button>
-                            </>
-                          )}
-                        </div>
                       </div>
                     </div>
                   );
-                })}
+                })()}
               </div>
 
-              <div>
-                <div className="nr-label"><Calendar size={13} /> Next 7 Days</div>
-                <div className="nr-panel nr-week-panel">
-                  <div className="nr-week-strip">
-                    {weekStrip.map((d, i) => {
-                      const holidayName = holidayFor(d.iso);
-                      const holiday = holidayName ? { name: holidayName } : null;
-                      return (
-                        <div className={`nr-day ${i === 0 ? "nr-day-today" : ""}`} key={d.iso} title={holiday ? holiday.name : ""}>
-                          <div className="nr-day-name">{d.label}</div>
-                          <div className="nr-day-num">{d.num}</div>
-                          {holiday && <div className="nr-holiday-dot" />}
-                        </div>
-                      );
-                    })}
-                  </div>
-                  {holidaysThisWeek.length > 0 && (
-                    <div className="nr-holiday-note">Holiday this week: {holidaysThisWeek.map((h) => h.name).join(", ")}</div>
+              {/* RIGHT — auto-action log + this week's notes */}
+              <div className="rs-col-right">
+                <div className="nr-label">
+                  <Package size={13} /> Auto-Action Log
+                  {log.length > 0 && !logCleared && (
+                    <button className="rs-clear" onClick={() => setLogCleared(true)} title="Hide these entries (nothing is deleted)">Clear</button>
+                  )}
+                </div>
+                <div className="nr-panel rs-log">
+                  {logCleared || log.length === 0 ? (
+                    <div className="rs-log-empty">{logCleared ? "Cleared" : "Nothing logged yet"}</div>
+                  ) : (
+                    log.map((entry) => (
+                      <div className={`nr-log-row nr-log-${entry.tone}`} key={entry.id}>
+                        {entry.text}<span className="nr-log-time">{entry.time}</span>
+                      </div>
+                    ))
                   )}
                 </div>
 
-                <div className="nr-label"><Users size={13} /> Today at a Glance</div>
-                <div className="nr-panel">
-                  {roster.map((r) => (
-                    <div className="nr-row" key={r.name}>
-                      <span><span className="nr-dot" />{r.name}</span>
-                      <span className="nr-row-status">{r.status}</span>
+                {notesTableAvailable() && (
+                  <>
+                    <div className="nr-label">
+                      Notes <span className="nr-count">{thisWeekNotes.length}</span>
                     </div>
-                  ))}
-                </div>
-
-                <div className="nr-label"><Package size={13} /> Auto-Action Log</div>
-                <div className="nr-panel">
-                  {log.map((entry) => (
-                    <div className={`nr-log-row nr-log-${entry.tone}`} key={entry.id}>
-                      {entry.text}<span className="nr-log-time">{entry.time}</span>
-                    </div>
-                  ))}
-                </div>
+                    <button className="nr-panel rs-notes" onClick={() => setNotesWeek(thisWeekStart)} title="Open this week's notes">
+                      {thisWeekNotes.length === 0 ? (
+                        <span className="rs-log-empty">No notes this week</span>
+                      ) : (
+                        thisWeekNotes.slice(0, 5).map((n) => (
+                          <span className="rs-note-line" key={n.id}>{n.note}</span>
+                        ))
+                      )}
+                      {thisWeekNotes.length > 5 && (
+                        <span className="rs-note-more">+{thisWeekNotes.length - 5} more</span>
+                      )}
+                    </button>
+                  </>
+                )}
               </div>
             </div>
           </div>
@@ -3598,7 +3994,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                   {weekIsFinalized ? "✓ Finalized" : "Finalize"}
                 </button>
                 {notesTableAvailable() && (
-                  <button className="print-btn" onClick={() => setNotesOpen(true)} title="Notes for this week">
+                  <button className="print-btn" onClick={() => setNotesWeek(activeWeekStart)} title="Notes for this week">
                     Notes ({weekNotes.length})
                   </button>
                 )}
@@ -4407,12 +4803,14 @@ export default function SchedulingHub({ session, onSignOut }) {
 
       {/* Per-week notes. Scoped to activeWeekStart, so navigating weeks swaps the
           whole list. Rail-sourced notes are tagged but otherwise fully editable. */}
-      {notesOpen && (
-        <div className="day-popup-backdrop" onClick={() => { setNotesOpen(false); setNoteEditId(null); }}>
+      {notesWeek && (
+        <div className="day-popup-backdrop" onClick={() => { setNotesWeek(null); setNoteEditId(null); }}>
           <div className="notes-modal" onClick={(e) => e.stopPropagation()}>
             <div className="day-popup-head">
-              <div className="day-popup-date">Notes — week of {formatWeekRange(activeWeek)}</div>
-              <button className="day-popup-close" onClick={() => { setNotesOpen(false); setNoteEditId(null); }}><X size={15} /></button>
+              <div className="day-popup-date">
+                Notes — week of {formatWeekRange(buildWeekByOffset(weekOffsetFor(new Date(`${notesWeek}T00:00:00`))))}
+              </div>
+              <button className="day-popup-close" onClick={() => { setNotesWeek(null); setNoteEditId(null); }}><X size={15} /></button>
             </div>
 
             <div className="notes-add">
@@ -4426,11 +4824,11 @@ export default function SchedulingHub({ session, onSignOut }) {
               <button className="publish-btn" disabled={!noteDraft.trim()} onClick={handleAddNote}>Add</button>
             </div>
 
-            {weekNotes.length === 0 ? (
+            {modalNotes.length === 0 ? (
               <div className="notes-empty">No notes for this week yet.</div>
             ) : (
               <div className="notes-list">
-                {weekNotes.map((n) => (
+                {modalNotes.map((n) => (
                   <div className="notes-row" key={n.id}>
                     {noteEditId === n.id ? (
                       <>
