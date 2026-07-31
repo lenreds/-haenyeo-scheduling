@@ -37,6 +37,8 @@ import {
   insertCalendarNote,
   deleteCalendarNote,
   calendarNotesAvailable,
+  insertRoleShiftOption,
+  deleteRoleShiftOption,
 } from "./lib/data.js";
 import QRCode from "qrcode";
 
@@ -602,6 +604,26 @@ const DEFAULT_ROLE_OPTIONS = {
 // short role names for the compact in-cell role picker
 const ROLE_SHORT = { Bar: "Bar", Host: "Host", Servers: "Server", "Busser/Runner": "Bus/Run", Expo: "Expo", Training: "Train" };
 
+// Manager-added shift options (brief item 3) need a stable code. Reusing the
+// existing per-role prefixes matters: roleFromCode() reads them to decide which
+// role a shift belongs to, so a hand-rolled code would lose its role color and
+// its Tip Sheet slot.
+// Roles whose dropdowns the Manage Shifts panel exposes, in display order.
+const SHIFT_MANAGED_ROLES = ["Bar", "Host", "Servers", "Busser/Runner", "Expo", "Training", "BOH", "Kitchen", "Management"];
+const ROLE_CODE_PREFIX = {
+  Servers: "SV", "Busser/Runner": "BR", Bar: "BAR", Host: "HOST", Expo: "EXPO",
+  Training: "TRAIN", BOH: "BOH", Kitchen: "KITCHEN", Management: "FM",
+};
+// "7pm-CL" -> "SV_7PMCL", de-duped against the codes already on that role.
+function shiftCodeFor(role, label, existingCodes = []) {
+  const prefix = ROLE_CODE_PREFIX[role] || "SHIFT";
+  const slug = String(label).toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 12) || "NEW";
+  let code = `${prefix}_${slug}`;
+  let n = 2;
+  while (existingCodes.includes(code)) code = `${prefix}_${slug}${n++}`;
+  return code;
+}
+
 // which roles the Staff screen offers per section
 const SECTION_ROLES = {
   FOH: ["Bar", "Host", "Servers", "Busser/Runner", "Expo", "Training"],
@@ -731,10 +753,13 @@ function denomTotal(amounts) {
 // slot-fill priority within a role: higher rank fills the full-point slots
 // first. Second-cut servers take the Server (Swing) slot; the latest-starting
 // bartender takes the Bartender (Swing) slot.
-function slotRankForCode(code) {
-  if (code === "SV_5SC") return 1;
-  if (code.startsWith("BAR_")) return code.includes("_4") ? 3 : code.includes("_5") ? 2 : 1;
-  return 2;
+// Start hour implied by a shift code, for Tip Sheet slot ordering. Every seeded
+// code carries its start after the underscore (SV_4FC, BAR_6CL, HOST_4, EXPO_5).
+// Manager-added codes that don't follow that shape sort last rather than
+// silently displacing someone from slot 1.
+function shiftStartHour(code) {
+  const m = String(code || "").match(/_(\d{1,2})/);
+  return m ? Number(m[1]) : 99;
 }
 
 function dateInfoFromIso(isoStr) {
@@ -852,8 +877,17 @@ function personShiftFor(name, dateObj, patterns, overrides) {
 
 // Routes everyone working that day into a point slot by the ROLE their shift
 // code carries (SV_/BR_/HOST/EXPO/BAR_ prefix) — so the role picked in the
-// schedule determines the slot they fill, whatever their usual section. Within
-// a role, higher rank fills the full-point slots first (see slotRankForCode).
+// schedule determines the slot they fill, whatever their usual section.
+//
+// Fill the Tip Sheet's fixed slots from whoever is working that date. `patterns`
+// is already resolved per-week by the caller, so this reads the week's own saved
+// schedule with schedule_overrides applied on top, falling back to the template
+// for weeks nobody has edited.
+//
+// Slot order is payroll-critical (brief item 6): within a role, earliest start
+// takes the first slot. Servers are the exception — the Swing slot belongs to
+// the 5pm-SC person specifically, so they're lifted out before slots 1 and 2 are
+// filled rather than being ranked against them.
 function autoAssignSlots(dateInfo, patterns, overrides, roster) {
   const byRole = {};
   roster.forEach((p) => {
@@ -862,14 +896,21 @@ function autoAssignSlots(dateInfo, patterns, overrides, roster) {
     const code = normalizeShiftCode(shift.type, p.role);
     const role = roleFromCode(code);
     if (!role) return;
-    // Trainees aren't tipped, so they never fill a tip-out slot (brief item 4).
+    // Trainees aren't tipped, so they never fill a tip-out slot.
     if (role === "Training") return;
     const slotRole = role === "Expo" ? "Expo (Fri–Sun)" : role;
-    (byRole[slotRole] = byRole[slotRole] || []).push({ name: p.name, rank: slotRankForCode(code) });
+    (byRole[slotRole] = byRole[slotRole] || []).push({ name: p.name, code, start: shiftStartHour(code) });
   });
-  Object.keys(byRole).forEach((r) => byRole[r].sort((a, b) => b.rank - a.rank));
+  // Earliest start first: Servers slot 1 then 2, Busser/Runner 1 then 2,
+  // Bartender before Bartender (Swing).
+  Object.keys(byRole).forEach((r) => byRole[r].sort((a, b) => a.start - b.start));
+
+  const swingIdx = (byRole.Servers || []).findIndex((x) => x.code === "SV_5SC");
+  const serverSwing = swingIdx >= 0 ? byRole.Servers.splice(swingIdx, 1)[0] : null;
+
   const used = {};
   return SLOTS.map((slot) => {
+    if (slot.id === "server3") return { ...slot, autoName: serverSwing ? serverSwing.name : "" };
     const list = byRole[slot.role] || [];
     const idx = used[slot.role] || 0;
     used[slot.role] = idx + 1;
@@ -1059,6 +1100,14 @@ export default function SchedulingHub({ session, onSignOut }) {
   // Calendar date notes (brief item 7): { "YYYY-MM-DD": [rows] }
   const [calNotes, setCalNotes] = useState({});
   const [calNoteDraft, setCalNoteDraft] = useState("");
+  // Manage Shifts (brief item 3): which role has its add-field open, and its text
+  const [shiftAddRole, setShiftAddRole] = useState(null);
+  const [shiftAddLabel, setShiftAddLabel] = useState("");
+  const [shiftMsg, setShiftMsg] = useState("");
+  // Today at a Glance swap dialog (brief item 5)
+  const [swapModal, setSwapModal] = useState(null); // { name, role, code } | null
+  const [swapForm, setSwapForm] = useState({ withName: "", shift: "", note: "" });
+  const [swapBusy, setSwapBusy] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [qrPrintUrls, setQrPrintUrls] = useState({}); // all 7 QR images for the print sheet
   const [qrPrinting, setQrPrinting] = useState(false);
@@ -1069,6 +1118,7 @@ export default function SchedulingHub({ session, onSignOut }) {
   // log repopulates from resolved requests on the next load).
   const [selectedRailId, setSelectedRailId] = useState(null);
   const [logCleared, setLogCleared] = useState(false);
+  const [resolvedCleared, setResolvedCleared] = useState(false);
   const [tipFinalized, setTipFinalized] = useState(false);
   const [tipFinalizedAt, setTipFinalizedAt] = useState(null);
   const [finalizing, setFinalizing] = useState(false);
@@ -1239,6 +1289,144 @@ export default function SchedulingHub({ session, onSignOut }) {
       } catch (e) {
         console.error("Auto-note failed:", e);
       }
+    }
+  }
+
+  // ---- Today at a Glance (brief item 5) -----------------------------------
+  // Who is actually on the floor today, read through the same per-week
+  // resolution the Calendar and Tip Sheet use. This replaced a hardcoded demo
+  // list — swapping people needs real names to act on.
+  const todayRoster = useMemo(() => {
+    const di = dateInfoFromIso(TODAY_ISO);
+    const pats = patternsForDate(di);
+    return fohRoster
+      .map((p) => {
+        const shift = personShiftFor(p.name, di, pats, overrides);
+        return { name: p.name, role: p.role, code: shift.type, swapped: !!shift.swap };
+      })
+      .filter((r) => r.code && r.code !== "OFF");
+  }, [fohRoster, patterns, weeklyPatterns, overrides]);
+
+  // Primary role for a staff member, used to pick their shift dropdown.
+  function primaryRoleOf(name) {
+    const fromMap = (staffRolesMap[name] || [])[0];
+    if (fromMap) return fromMap;
+    return staffList.find((s) => s.name === name)?.role || "Servers";
+  }
+
+  function openSwap(entry) {
+    setSwapModal(entry);
+    setSwapForm({ withName: "", shift: "", note: "" });
+  }
+
+  // Replace one person's shift today with someone else's. Writes an OFF
+  // override for the person coming off and the chosen shift for the person
+  // going on. Supabase-js can't wrap two client-side writes in a transaction,
+  // so the second failure rolls the first back rather than leaving the day with
+  // nobody assigned.
+  async function confirmSwap() {
+    if (!swapModal || swapBusy) return;
+    const outName = swapModal.name;
+    const inName = swapForm.withName;
+    const code = swapForm.shift;
+    if (!inName || !code) return;
+
+    const dateLabel = new Date(`${TODAY_ISO}T00:00:00`).toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
+    const ok = window.confirm(
+      `This will update ${outName}'s shift on ${dateLabel} on the finalized schedule and tip sheet. ` +
+      `This change cannot be automatically undone. Are you sure?`
+    );
+    if (!ok) return;
+
+    const outId = nameToId[outName];
+    const inId = nameToId[inName];
+    if (!outId || !inId) {
+      window.alert("Can't save — live staff records haven't loaded for one of these people.");
+      return;
+    }
+    setSwapBusy(true);
+    const prevOverrides = overrides;
+    try {
+      await upsertScheduleOverride({ staffId: outId, dateIso: TODAY_ISO, overrideType: "OFF", isSwap: false, railRequestId: null });
+      try {
+        await upsertScheduleOverride({ staffId: inId, dateIso: TODAY_ISO, overrideType: code, isSwap: true, railRequestId: null });
+      } catch (e) {
+        // Put the first person back rather than leaving the shift uncovered.
+        await upsertScheduleOverride({
+          staffId: outId, dateIso: TODAY_ISO,
+          overrideType: prevOverrides[`${outName}|${TODAY_ISO}`]?.type ?? swapModal.code,
+          isSwap: false, railRequestId: null,
+        }).catch(() => {});
+        throw e;
+      }
+      setOverrides((o) => ({
+        ...o,
+        [`${outName}|${TODAY_ISO}`]: { type: "OFF", swap: false, railId: null },
+        [`${inName}|${TODAY_ISO}`]: { type: code, swap: true, railId: null },
+      }));
+
+      // Leave a trail on the week — this is not automatically reversible.
+      const label = shiftLabelForType(code);
+      const extra = swapForm.note.trim() ? ` — ${swapForm.note.trim()}` : "";
+      await addSwapNote(`${outName} off, ${inName} on ${label} (${dateLabel})${extra}`);
+      addLog(`Swapped ${outName} → ${inName} (${label}) for ${dateLabel}`, "good");
+      setSwapModal(null);
+    } catch (e) {
+      console.error("Swap failed:", e);
+      setOverrides(prevOverrides);
+      window.alert(`Couldn't save the change: ${e.message || e}`);
+    }
+    setSwapBusy(false);
+  }
+
+  async function addSwapNote(text) {
+    const ws = iso(mondayOf(new Date()));
+    try {
+      const row = await insertScheduleNote({ weekStartIso: ws, note: text });
+      if (row) setNotesByWeek((prev) => ({ ...prev, [ws]: [row, ...(prev[ws] || [])] }));
+    } catch (e) {
+      console.error("Swap note failed:", e);
+    }
+  }
+
+  // ---- Manage Shifts (brief item 3) ---------------------------------------
+  async function handleAddShiftOption(role) {
+    const label = shiftAddLabel.trim();
+    if (!label) return;
+    const current = roleOptions[role] || [];
+    if (current.some((o) => o.label.toLowerCase() === label.toLowerCase())) {
+      setShiftMsg(`${role} already has a "${label}" option.`);
+      return;
+    }
+    const code = shiftCodeFor(role, label, current.map((o) => o.code));
+    const sortOrder = current.length;
+    // Optimistic: the dropdowns pick it up immediately, and we roll back if the
+    // write fails so the UI never claims an option that isn't saved.
+    setRoleOptions((prev) => ({ ...prev, [role]: [...(prev[role] || []), { code, label }] }));
+    setShiftAddLabel("");
+    setShiftAddRole(null);
+    setShiftMsg("");
+    try {
+      await insertRoleShiftOption({ role, code, label, sortOrder });
+      setShiftMsg(`Added "${label}" to ${role}.`);
+    } catch (e) {
+      console.error("Add shift option failed:", e);
+      setRoleOptions((prev) => ({ ...prev, [role]: (prev[role] || []).filter((o) => o.code !== code) }));
+      setShiftMsg(`Couldn't add "${label}": ${e.message || e}`);
+    }
+  }
+  async function handleRemoveShiftOption(role, code, label) {
+    if (code === "OFF") return; // Off is structural, not a real shift
+    const prevList = roleOptions[role] || [];
+    setRoleOptions((prev) => ({ ...prev, [role]: (prev[role] || []).filter((o) => o.code !== code) }));
+    setShiftMsg("");
+    try {
+      await deleteRoleShiftOption(role, code);
+      setShiftMsg(`Removed "${label}" from ${role}. Shifts already scheduled with it are unchanged.`);
+    } catch (e) {
+      console.error("Remove shift option failed:", e);
+      setRoleOptions((prev) => ({ ...prev, [role]: prevList }));
+      setShiftMsg(`Couldn't remove "${label}": ${e.message || e}`);
     }
   }
 
@@ -2550,9 +2738,20 @@ export default function SchedulingHub({ session, onSignOut }) {
     }
   }
 
+  // code -> label for every option currently configured, so manager-added
+  // shifts (which have no SHIFT_META entry) still render their label in the
+  // calendar, the PDF sheet and the schedule email instead of a raw code.
+  const optionLabels = useMemo(() => {
+    const m = {};
+    Object.values(roleOptions || {}).forEach((list) => {
+      (list || []).forEach((o) => { if (o?.code) m[o.code] = o.label; });
+    });
+    return m;
+  }, [roleOptions]);
+
   function shiftLabelForType(type) {
     if (!type || type === "OFF") return "Off";
-    return SHIFT_META[type]?.label || type;
+    return SHIFT_META[type]?.label || optionLabels[type] || type;
   }
   function weekDayHeaders(week) {
     return week.map((d) => `${JS_WEEKDAY_NAMES[d.weekday]} ${d.date.getMonth() + 1}/${d.date.getDate()}`);
@@ -2640,7 +2839,7 @@ export default function SchedulingHub({ session, onSignOut }) {
   function placeholderShiftLabel(gk, personName, code) {
     if (!code || code === "OFF") return "Off";
     if (gk === "kitchen" && code === "KITCHEN" && (personName.startsWith("Jenny") || personName.startsWith("Ajuma"))) return "Yes";
-    return SHIFT_META[code]?.label || code;
+    return SHIFT_META[code]?.label || optionLabels[code] || code;
   }
   function buildGroupRows(gk, week) {
     const ph = placeholdersForWeekStart(week?.[0]?.iso);
@@ -3529,6 +3728,24 @@ export default function SchedulingHub({ session, onSignOut }) {
         .rs-head-pending { color: var(--accent); }
         .rs-card .nr-row, .rs-card .nr-log-row { border-color: #1a1a1a; }
         .rs-card .nr-empty { background: #141414; border-color: #1a1a1a; }
+        .rs-clear-block { display: block; margin: 8px 0 0 auto; }
+
+        /* ---- Manage Shifts (item 3) ---- */
+        .shift-mgmt { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+        .shift-mgmt-row { display: flex; align-items: flex-start; gap: 12px; padding: 8px 2px; border-top: 1px solid var(--line); flex-wrap: wrap; }
+        .shift-mgmt-role { font-family: 'Space Mono', monospace; font-size: 10.5px; letter-spacing: 1.5px; text-transform: uppercase; font-weight: 700; width: 120px; flex-shrink: 0; padding-top: 4px; }
+        .shift-mgmt-opts { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex: 1; min-width: 0; }
+        .shift-mgmt-chip { display: inline-flex; align-items: center; gap: 3px; background: #1a1a1a; border: 1px solid var(--line2); border-radius: 20px; padding: 3px 5px 3px 11px; font-family: 'Space Mono', monospace; font-size: 10.5px; color: var(--txt2); }
+        .shift-mgmt-x { background: none; border: none; cursor: pointer; color: var(--muted); padding: 0 2px; display: inline-flex; align-items: center; }
+        .shift-mgmt-x:hover { color: #e0796c; }
+        .shift-mgmt-add { background: rgba(90,138,106,0.16); border: 1px solid rgba(90,138,106,0.5); color: #7fb392; border-radius: 20px; padding: 4px 12px; font-family: 'Manrope', sans-serif; font-weight: 700; font-size: 11px; cursor: pointer; }
+        .shift-mgmt-add:hover { background: rgba(90,138,106,0.28); }
+        .shift-mgmt-input { max-width: 190px; padding: 4px 10px; border-radius: 20px; font-size: 11.5px; }
+
+        /* ---- Today at a Glance swap (item 5) ---- */
+        .swap-icon-btn { background: none; border: none; cursor: pointer; color: var(--muted); font-size: 13px; line-height: 1; padding: 0 0 0 8px; }
+        .swap-icon-btn:hover { color: var(--accent); }
+        .manual-field:disabled { opacity: 0.75; cursor: default; }
 
         /* ---- item 8: schedule cells read as pills ---- */
         .cell-select, .cell-select.shift-select, .cell-select.role-select { border-radius: 20px; padding: 4px 8px; }
@@ -3705,7 +3922,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                   );
                 })}
 
-                {resolvedReqs.length > 0 && (
+                {resolvedReqs.length > 0 && !resolvedCleared && (
                   <>
                     <div className="nr-label rs-label-resolved">Resolved</div>
                     {resolvedReqs.slice(0, 12).map((r) => {
@@ -3721,6 +3938,13 @@ export default function SchedulingHub({ session, onSignOut }) {
                         </div>
                       );
                     })}
+                    {/* Display-only (brief item 4) — nothing is deleted, the
+                        list comes back from the DB on the next load. */}
+                    <button
+                      className="rs-clear rs-clear-block"
+                      onClick={() => setResolvedCleared(true)}
+                      title="Hide these entries (nothing is deleted)"
+                    >Clear resolved</button>
                   </>
                 )}
               </div>
@@ -3734,10 +3958,23 @@ export default function SchedulingHub({ session, onSignOut }) {
                       <>
                         <div className="nr-label"><Users size={13} /> Today at a Glance</div>
                         <div className="nr-panel">
-                          {roster.map((r) => (
+                          {todayRoster.length === 0 && (
+                            <div className="rs-log-empty">Nobody is scheduled today.</div>
+                          )}
+                          {todayRoster.map((r) => (
                             <div className="nr-row" key={r.name}>
-                              <span><span className="nr-dot" />{r.name}</span>
-                              <span className="nr-row-status">{r.status}</span>
+                              <span>
+                                <span className="nr-dot" style={r.code === "GAP" ? { background: "#B23A2F" } : undefined} />
+                                {r.name}
+                              </span>
+                              <span className="nr-row-status">
+                                {r.code === "GAP" ? "Coverage gap" : shiftLabelForType(r.code)}
+                                <button
+                                  className="swap-icon-btn"
+                                  title={`Swap ${r.name} out for today`}
+                                  onClick={() => openSwap(r)}
+                                >⇄</button>
+                              </span>
                             </div>
                           ))}
                         </div>
@@ -4944,6 +5181,55 @@ export default function SchedulingHub({ session, onSignOut }) {
               Role assignments here drive each person's role picker on the Set Schedule. Deactivating someone hides them
               from the Front of House schedule; BOH/Kitchen/Management rows stay put so the grid stays aligned.
             </div>
+
+            {/* ---- Manage Shifts (brief item 3) ---- */}
+            <div className="role-header" style={{ display: "block", padding: "22px 2px 4px" }}>Manage Shifts</div>
+            <div className="template-note" style={{ marginTop: 0, marginBottom: 10 }}>
+              These are the options each role sees in the Set Schedule dropdowns. Removing one stops it being picked
+              going forward — shifts already on the schedule keep it.
+            </div>
+            {shiftMsg && <div className="staff-msg" style={{ display: "block", marginBottom: 10 }}>{shiftMsg}</div>}
+            <div className="shift-mgmt">
+              {SHIFT_MANAGED_ROLES.map((role) => {
+                const list = roleOptions[role] || [];
+                return (
+                  <div className="shift-mgmt-row" key={role}>
+                    <div className="shift-mgmt-role" style={{ color: ROLE_COLOR[role] || undefined }}>{role}</div>
+                    <div className="shift-mgmt-opts">
+                      {list.filter((o) => o.code !== "OFF").map((o) => (
+                        <span className="shift-mgmt-chip" key={o.code} title={o.code}>
+                          {o.label}
+                          <button
+                            className="shift-mgmt-x"
+                            title={`Remove ${o.label} from ${role}`}
+                            onClick={() => handleRemoveShiftOption(role, o.code, o.label)}
+                          ><X size={11} /></button>
+                        </span>
+                      ))}
+                      {shiftAddRole === role ? (
+                        <input
+                          className="notes-input shift-mgmt-input"
+                          autoFocus
+                          placeholder="Shift label, e.g. 7pm-CL"
+                          value={shiftAddLabel}
+                          onChange={(e) => setShiftAddLabel(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") handleAddShiftOption(role);
+                            if (e.key === "Escape") { setShiftAddRole(null); setShiftAddLabel(""); }
+                          }}
+                          onBlur={() => { setShiftAddRole(null); setShiftAddLabel(""); }}
+                        />
+                      ) : (
+                        <button
+                          className="shift-mgmt-add"
+                          onClick={() => { setShiftAddRole(role); setShiftAddLabel(""); setShiftMsg(""); }}
+                        >+ Add Shift</button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
 
           {qrModal && (() => {
@@ -5068,6 +5354,86 @@ export default function SchedulingHub({ session, onSignOut }) {
           </div>
         </div>
       )}
+
+      {/* Today at a Glance swap dialog (brief item 5). Writes schedule_overrides
+          for today, which the Calendar and Tip Sheet both read, so the change
+          shows up in each immediately. */}
+      {swapModal && (() => {
+        const replRole = swapForm.withName ? primaryRoleOf(swapForm.withName) : null;
+        const shiftOpts = (replRole ? roleOptions[replRole] || [] : []).filter((o) => o.code !== "OFF");
+        const dateLabel = new Date(`${TODAY_ISO}T00:00:00`).toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
+        return (
+          <div className="day-popup-backdrop" onClick={() => !swapBusy && setSwapModal(null)}>
+            <div className="delete-modal" onClick={(e) => e.stopPropagation()}>
+              <div className="delete-modal-title">Swap shift</div>
+
+              <label className="manual-field-label">Date</label>
+              <input className="manual-field" type="text" value={dateLabel} readOnly disabled />
+
+              <label className="manual-field-label">Removing</label>
+              <input
+                className="manual-field"
+                type="text"
+                readOnly
+                disabled
+                value={`${swapModal.name} — ${swapModal.code === "GAP" ? "Coverage gap" : shiftLabelForType(swapModal.code)}`}
+              />
+
+              <label className="manual-field-label" htmlFor="swap-with">Replacing with</label>
+              <select
+                id="swap-with"
+                className="manual-field"
+                value={swapForm.withName}
+                disabled={swapBusy}
+                onChange={(e) => setSwapForm((f) => ({ ...f, withName: e.target.value, shift: "" }))}
+              >
+                <option value="">Select staff…</option>
+                {staffList
+                  .filter((s) => s.active !== false && s.name !== swapModal.name)
+                  .map((s) => <option key={s.id || s.name} value={s.name}>{s.name}</option>)}
+              </select>
+
+              <label className="manual-field-label" htmlFor="swap-shift">New shift</label>
+              <select
+                id="swap-shift"
+                className="manual-field"
+                value={swapForm.shift}
+                disabled={swapBusy || !swapForm.withName}
+                onChange={(e) => setSwapForm((f) => ({ ...f, shift: e.target.value }))}
+              >
+                <option value="">{swapForm.withName ? `Select shift (${replRole})…` : "Pick a replacement first…"}</option>
+                {shiftOpts.map((o) => <option key={o.code} value={o.code}>{o.label}</option>)}
+              </select>
+
+              <label className="manual-field-label" htmlFor="swap-note">Note</label>
+              <textarea
+                id="swap-note"
+                className="manual-field"
+                rows={2}
+                disabled={swapBusy}
+                placeholder="Why the change (optional) — saved to this week's notes"
+                value={swapForm.note}
+                onChange={(e) => setSwapForm((f) => ({ ...f, note: e.target.value }))}
+              />
+
+              <div className="delete-modal-warn">
+                This updates the finalized schedule and tip sheet for {dateLabel}. It can't be automatically undone.
+              </div>
+
+              <div className="delete-modal-actions">
+                <button className="nr-btn nr-btn-deny" disabled={swapBusy} onClick={() => setSwapModal(null)}>Cancel</button>
+                <button
+                  className="delete-confirm-btn"
+                  disabled={swapBusy || !swapForm.withName || !swapForm.shift}
+                  onClick={confirmSwap}
+                >
+                  {swapBusy ? "Saving…" : "Confirm Change"}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Per-week notes. Scoped to activeWeekStart, so navigating weeks swaps the
           whole list. Rail-sourced notes are tagged but otherwise fully editable. */}

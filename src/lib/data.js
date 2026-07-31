@@ -187,6 +187,30 @@ export async function fetchRoleShiftOptions() {
   return byRole;
 }
 
+// Add one option to a role's dropdown. sort_order defaults to the end of the
+// role's current list so new shifts append rather than jumping the order.
+export async function insertRoleShiftOption({ role, code, label, sortOrder }) {
+  const { data, error } = await supabase
+    .from("role_shift_options")
+    .insert({ role, code, label, sort_order: sortOrder })
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+// Remove an option from the dropdown. Deliberately does NOT touch
+// schedule_patterns / weekly_schedules — shifts already assigned with this code
+// keep rendering from SHIFT_META, they just can't be picked again.
+export async function deleteRoleShiftOption(role, code) {
+  const { error } = await supabase
+    .from("role_shift_options")
+    .delete()
+    .eq("role", role)
+    .eq("code", code);
+  if (error) throw error;
+}
+
 /* -------------------------------------------------- schedule_patterns ------ */
 // -> { [name]: [7 shift_types] }, indexed 0=Sun..6=Sat.
 // idById maps staff_id -> name so we can key by name like the prototype.
