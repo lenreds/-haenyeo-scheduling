@@ -202,25 +202,15 @@ function roleCellStyle(role) {
 // were tuned for the light card and left a tan border on the dark surface.
 const OFF_CHIP_DARK = { color: "#555555", borderColor: "#2a2a2a", background: "transparent" };
 
-// The Calendar WEEK view reads as a light, scannable sheet rather than an
-// editable dark grid, so its chips use a soft tint of the role color with the
-// role hue as ink — deliberately the inverse of CELL_STYLE_BY_ACCENT above,
-// which styles the editable Set Schedule cells. Keyed by the same ROLE_COLOR
-// accents, so the two stay in step. Ink is a deepened shade of each accent:
-// the accent itself (e.g. #c8956c) sits near 2.3:1 on these backgrounds, which
-// is too faint for 10px bold type.
-const CAL_CHIP_BY_ACCENT = {
-  "#c8956c": { background: "#fff8f4", color: "#a06a34", borderColor: "#e6c8ab" }, // Bar / Expo / Kitchen
-  "#5a8a6a": { background: "#f2f9f4", color: "#3d6149", borderColor: "#aacdb7" }, // Servers
-  "#4a7a9b": { background: "#f1f7fb", color: "#35576e", borderColor: "#a5c4d8" }, // Busser/Runner / BOH
-  "#8a5a9b": { background: "#f9f4fb", color: "#63406f", borderColor: "#c9add4" }, // Host
-  "#888888": { background: "#f5f5f5", color: "#4d4d4d", borderColor: "#cfcfcf" }, // Management
-  "#2a9d8f": { background: "#f0faf8", color: "#1f6f66", borderColor: "#a6d9d2" }, // Training
-};
-const CAL_CHIP_OFF = { background: "#f6f6f4", color: "#9a9385", borderColor: "#e2ded4" };
+// Midnight Solid (MIDNIGHT-SOLID-TIPSHEET-RAIL-BRIEF item 1): the Calendar week
+// view is a read-only sheet on near-black, where every chip is the same solid
+// #1a1a1a and only the INK carries the role. That keeps a dense grid scannable
+// by hue without seven competing background colors. Off days drop the chip
+// entirely and show a recessive dot instead.
+const MIDNIGHT = { bg: "#0a0a0a", panel: "#0f0f0f", chip: "#1a1a1a", line: "#2a2a2a", row: "#141414", off: "#222222" };
 function calChipStyle(role) {
   const accent = ROLE_COLOR[role];
-  return accent ? CAL_CHIP_BY_ACCENT[accent] : undefined;
+  return { background: MIDNIGHT.chip, borderColor: MIDNIGHT.line, color: accent || "#aaaaaa" };
 }
 // Cross-role label (CROSS-ROLE-LABEL-BRIEF): when someone works outside their
 // primary role, a small role name renders under the shift in a lighter shade
@@ -3506,6 +3496,40 @@ export default function SchedulingHub({ session, onSignOut }) {
         .cal-off-chip { background: rgba(74,122,155,0.20); color: #9dc0d6; }
         .gmail-dot-idle { background: var(--muted); }
 
+        /* ================= MIDNIGHT SOLID (brief item 1) =================
+           Calendar week view + Rail move to a near-black base where chips are a
+           single solid tone and role identity lives in the text color only. */
+        .hub { --bg: #0a0a0a; background: #0a0a0a; }
+
+        /* ---- calendar week view ---- */
+        .cal-week-view { background: #0a0a0a; border-color: #141414; }
+        .cal-week-view .week-table th,
+        .cal-week-view .week-table td { border-color: #141414; }
+        .cal-week-view .week-table td.shift-cell,
+        .cal-week-view .emp-name { border-top: 0.5px solid #141414; }
+        .cal-week-view .role-header { border-bottom: 0.5px solid #141414; letter-spacing: 2.5px; font-size: 10px; }
+        .cal-week-view .shift-chip { border-width: 0.5px; border-radius: 20px; font-size: 10px; padding: 5px 4px; }
+        .cal-week-off { display: inline-block; width: 100%; text-align: center; color: #222222; font-size: 15px; line-height: 1.4; user-select: none; }
+        /* Today: orange underline on the header, faint warm tint down the column */
+        .cal-week-view .week-table th.today-col { border-bottom: 2px solid var(--accent); color: var(--accent); background: transparent; }
+        .cal-week-view .week-table td.today-col { background: #131108; }
+        .cal-week-view .week-range { color: #ffffff; }
+
+        /* ---- Rail ---- */
+        .rs-card { background: #0f0f0f; border-color: #141414; }
+        .rs-head, .rs-strip { border-color: #141414; }
+        .rs-q { background: #141414; border-color: #1a1a1a; }
+        .rs-q-sel { background: #1a1a1a; }
+        .rs-detail { background: #141414; border-color: #1a1a1a; }
+        .rs-detail-note { background: #0f0f0f; border-color: #1a1a1a; }
+        .rs-card .nr-panel { background: #141414; border-color: #1a1a1a; }
+        /* Neutral chips only — the type badge and avatar keep their inline
+           request-type color, which is the whole signal in the queue. */
+        .rs-card .nr-count, .rs-head-pending { background: #1a1a1a; }
+        .rs-head-pending { color: var(--accent); }
+        .rs-card .nr-row, .rs-card .nr-log-row { border-color: #1a1a1a; }
+        .rs-card .nr-empty { background: #141414; border-color: #1a1a1a; }
+
         /* ---- item 8: schedule cells read as pills ---- */
         .cell-select, .cell-select.shift-select, .cell-select.role-select { border-radius: 20px; padding: 4px 8px; }
         .shift-chip, .cell-blocked { border-radius: 20px; }
@@ -4094,7 +4118,10 @@ export default function SchedulingHub({ session, onSignOut }) {
 
       {tab === "calendar" && calView === "week" && activeWeek && (
         <div className="cal-wrap" key={`week-${weekIndex}`}>
-          <div className="cal-card">
+          {/* cal-week-view scopes the Midnight Solid treatment to this read-only
+              sheet — .cal-card and .week-table are shared with Set Schedule and
+              the Tip Sheet, which keep the standard dark skin. */}
+          <div className="cal-card cal-week-view">
             <div className="week-header">
               <button className="back-btn" onClick={() => setCalView("month")}><ChevronLeft size={14} /> Back to month</button>
               <div className="week-range">{activeWeek[0].date.toLocaleDateString(undefined, MONTH_FMT)} – {activeWeek[6].date.toLocaleDateString(undefined, MONTH_FMT)}</div>
@@ -4117,7 +4144,8 @@ export default function SchedulingHub({ session, onSignOut }) {
                 {fohRoleGroups.map((role) => (
                   <React.Fragment key={role}>
                     <tr>
-                      <td className="role-header" colSpan={8}>{role}</td>
+                      {/* Section header takes its own role color (Midnight Solid) */}
+                      <td className="role-header" colSpan={8} style={{ color: ROLE_COLOR[role] || undefined }}>{role}</td>
                     </tr>
                     {fohRoster.filter((p) => p.role === role).map((p) => (
                       <tr key={p.name}>
@@ -4125,20 +4153,25 @@ export default function SchedulingHub({ session, onSignOut }) {
                         {activeWeek.map((d) => {
                           const shift = personShiftFor(p.name, d, patternsForDate(d), overrides);
                           const meta = SHIFT_META[shift.type] || SHIFT_META.OFF;
-                          // Colour by the role actually worked (so Akira's bar
-                          // cover reads as Bar), not by shift time. GAP keeps
-                          // its own red treatment, which is already light.
+                          // Off reads as a recessive dot rather than a chip;
+                          // everything else is a solid #1a1a1a chip inked in the
+                          // role actually worked (so Akira's bar cover reads as
+                          // Bar, not Busser/Runner). GAP keeps its red warning.
+                          const isOff = shift.type === "OFF";
                           const chipStyle =
-                            shift.type === "OFF" ? CAL_CHIP_OFF
-                            : shift.type === "GAP" ? { color: meta.fg, borderColor: meta.border, background: meta.bg }
-                            : calChipStyle(roleForCell(shift.type, p.role))
-                              || { color: meta.fg, borderColor: meta.border, background: meta.bg };
+                            shift.type === "GAP"
+                              ? { color: "#e0796c", borderColor: "#5c2a24", background: MIDNIGHT.chip }
+                              : calChipStyle(roleForCell(shift.type, p.role));
                           return (
                             <td key={d.iso} className={`shift-cell ${d.isToday ? "today-col" : ""}`}>
-                              <span className="shift-chip" style={chipStyle}>
-                                {meta.label}
-                                {shift.swap && <span className="swap-ribbon">SWAP</span>}
-                              </span>
+                              {isOff ? (
+                                <span className="cal-week-off" aria-label="Off">·</span>
+                              ) : (
+                                <span className="shift-chip" style={chipStyle}>
+                                  {meta.label}
+                                  {shift.swap && <span className="swap-ribbon">SWAP</span>}
+                                </span>
+                              )}
                             </td>
                           );
                         })}
