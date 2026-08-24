@@ -33,6 +33,9 @@ import {
   notesTableAvailable,
   fetchScheduleWeeks,
   setWeekPublished,
+  setWeekSectionLocked,
+  setRailArchived,
+  deleteRailRequest,
   fetchCalendarNotes,
   insertCalendarNote,
   deleteCalendarNote,
@@ -884,10 +887,12 @@ function personShiftFor(name, dateObj, patterns, overrides) {
 // schedule with schedule_overrides applied on top, falling back to the template
 // for weeks nobody has edited.
 //
-// Slot order is payroll-critical (brief item 6): within a role, earliest start
-// takes the first slot. Servers are the exception — the Swing slot belongs to
-// the 5pm-SC person specifically, so they're lifted out before slots 1 and 2 are
-// filled rather than being ranked against them.
+// Slot order is payroll-critical: within a role, slots fill purely by start
+// time, earliest first. The three Server slots map to cut order — 1st cut, 2nd
+// cut, 3rd cut/closer — so Server (Swing) is simply the 3rd server by start
+// time, with no shift-code restriction. Fewer servers than slots leaves the
+// trailing slots empty (two servers fill 1 and 2; Swing stays empty). Same rule
+// for Bartender before Bartender (Swing).
 function autoAssignSlots(dateInfo, patterns, overrides, roster) {
   const byRole = {};
   roster.forEach((p) => {
@@ -901,16 +906,12 @@ function autoAssignSlots(dateInfo, patterns, overrides, roster) {
     const slotRole = role === "Expo" ? "Expo (Fri–Sun)" : role;
     (byRole[slotRole] = byRole[slotRole] || []).push({ name: p.name, code, start: shiftStartHour(code) });
   });
-  // Earliest start first: Servers slot 1 then 2, Busser/Runner 1 then 2,
-  // Bartender before Bartender (Swing).
+  // Earliest start first: Servers slot 1, then 2, then Swing (3rd cut);
+  // Busser/Runner 1 then 2; Bartender before Bartender (Swing).
   Object.keys(byRole).forEach((r) => byRole[r].sort((a, b) => a.start - b.start));
-
-  const swingIdx = (byRole.Servers || []).findIndex((x) => x.code === "SV_5SC");
-  const serverSwing = swingIdx >= 0 ? byRole.Servers.splice(swingIdx, 1)[0] : null;
 
   const used = {};
   return SLOTS.map((slot) => {
-    if (slot.id === "server3") return { ...slot, autoName: serverSwing ? serverSwing.name : "" };
     const list = byRole[slot.role] || [];
     const idx = used[slot.role] || 0;
     used[slot.role] = idx + 1;
@@ -983,11 +984,20 @@ function weekOffsetFor(date) {
 const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 // Sub-tab display names, used by the per-section Lock button (brief item 2).
 const SECTION_LABEL = { foh: "FOH", bohkitchen: "BOH+Kitchen", management: "Management" };
+// schedule_weeks.section -> sub-tab key. 'ALL' is the week-level finalize/publish
+// row (migration 0013) and deliberately has no sub-tab.
+const DB_SECTION_KEY = { FOH: "foh", BOHKITCHEN: "bohkitchen", MANAGEMENT: "management" };
 const JS_WEEKDAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 // Set Schedule's PERSON_PATTERNS arrays are still index 0=Sun..6=Sat (JS Date convention) —
 // this maps each Mon-first display column back to the right index in those arrays
 const WEEKDAY_ORDER = [1, 2, 3, 4, 5, 6, 0];
 const MONTH_FMT = { month: "short", day: "numeric" };
+// "2026-07-27" -> "Jul 27". Parsed as local midnight so the day never slips back
+// a date the way `new Date("2026-07-27")` (UTC) does west of Greenwich.
+function shortDate(isoStr) {
+  if (!isoStr) return "";
+  return new Date(`${isoStr}T00:00:00`).toLocaleDateString(undefined, MONTH_FMT);
+}
 
 function formatWeekRange(week) {
   if (!week) return "";
@@ -1069,6 +1079,12 @@ export default function SchedulingHub({ session, onSignOut }) {
   const [roleOptions, setRoleOptions] = useState(DEFAULT_ROLE_OPTIONS);
   const [rolesTableReady, setRolesTableReady] = useState(false); // migration 0002 applied?
   const [resolvedReqs, setResolvedReqs] = useState([]); // raw approved/denied rail rows
+  // Archived requests: out of the pending queue, still on record, restorable.
+  const [archivedReqs, setArchivedReqs] = useState([]);
+  const [archivedOpen, setArchivedOpen] = useState(false); // collapsed by default
+  const [railMenuId, setRailMenuId] = useState(null);      // which card's ••• menu is open
+  const [railConfirm, setRailConfirm] = useState(null);    // { mode: 'delete' | 'archive', item }
+  const [railActionBusy, setRailActionBusy] = useState(false);
   const [dayPopup, setDayPopup] = useState(null); // { day, weekIdx } | null
   const [cellRoleSel, setCellRoleSel] = useState({}); // "name|weekday" -> role picked but shift not chosen yet
   const [newStaff, setNewStaff] = useState({ name: "", section: "FOH", roles: [], primary: "" });
@@ -1122,6 +1138,11 @@ export default function SchedulingHub({ session, onSignOut }) {
   const [tipFinalized, setTipFinalized] = useState(false);
   const [tipFinalizedAt, setTipFinalizedAt] = useState(null);
   const [finalizing, setFinalizing] = useState(false);
+  // Lock is per date and separate from Finalize: locking freezes this one day's
+  // inputs, finalizing emails staff. Either can be on without the other.
+  const [tipLocked, setTipLocked] = useState(false);
+  const [tipLockedAt, setTipLockedAt] = useState(null);
+  const [tipLockBusy, setTipLockBusy] = useState(false);
   const [tipDateIso, setTipDateIso] = useState("2026-07-02");
   const [floorCash, setFloorCash] = useState("");
   const [floorCredit, setFloorCredit] = useState("");
@@ -1638,7 +1659,7 @@ export default function SchedulingHub({ session, onSignOut }) {
   }
 
   async function finalizeTipSheet() {
-    if (finalizing || tipFinalized) return;
+    if (finalizing || tipFinalized || tipLocked) return;
     const recipients = tipRecipients();
     const skipped = tipWorkerCount() - recipients.length;
     if (!window.confirm(
@@ -1681,6 +1702,28 @@ export default function SchedulingHub({ session, onSignOut }) {
     catch (e) { console.error("Unlock save failed:", e); }
   }
 
+  // Per-date lock, pressed again to unlock. Nothing is emailed and Finalize is
+  // untouched — this only freezes the inputs for the date on screen. Optimistic,
+  // rolled back if the write fails so the button can't show a lock that didn't save.
+  async function toggleTipLock() {
+    if (tipLockBusy) return;
+    const next = !tipLocked;
+    const at = next ? new Date().toISOString() : null;
+    setTipLockBusy(true);
+    setTipLocked(next);
+    setTipLockedAt(at);
+    try {
+      await upsertTipSheet(tipPayload({ locked: next, locked_at: at }));
+      addLog(`Tip sheet ${next ? "locked" : "unlocked"} — ${shortDate(tipDateIso)}`, next ? "warn" : "good");
+    } catch (e) {
+      console.error("Tip lock save failed:", e);
+      setTipLocked(!next);
+      setTipLockedAt(next ? null : tipLockedAt);
+      addLog(`Couldn't ${next ? "lock" : "unlock"} the tip sheet — run migration 0013?`, "warn");
+    }
+    setTipLockBusy(false);
+  }
+
   const weeks = useMemo(() => buildMonth(calDate), [calDate]);
   const threeMonthWeeks = useMemo(() => {
     if (calMonthView !== 3) return [];
@@ -1693,10 +1736,14 @@ export default function SchedulingHub({ session, onSignOut }) {
   const onCurrentWeek = weekIndex === 0;
   const weekStrip = useMemo(() => getWeekStrip(), []);
   const [scheduleView, setScheduleView] = useState("foh");
-  // Locking is per sub-tab (brief item 2): locking FOH must not lock BOH+Kitchen
-  // or Management. Keyed by scheduleView value.
-  const [lockedSections, setLockedSections] = useState({ foh: false, bohkitchen: false, management: false });
-  const scheduleLocked = !!lockedSections[scheduleView]; // the sub-tab on screen
+  // Locking is per section AND per week, each combination independent: locking
+  // FOH for Jul 27 leaves BOH+Kitchen that week, and FOH every other week,
+  // untouched. Held as a Set of "weekStart|sectionKey" and persisted to
+  // schedule_weeks, so navigating away and back shows that week's own state.
+  const [lockedSectionWeeks, setLockedSectionWeeks] = useState(new Set());
+  const lockKeyFor = (weekStartIso, sectionKey) => `${weekStartIso}|${sectionKey}`;
+  const isSectionLocked = (weekStartIso, sectionKey) => lockedSectionWeeks.has(lockKeyFor(weekStartIso, sectionKey));
+  const scheduleLocked = isSectionLocked(activeWeekStart, scheduleView); // week + sub-tab on screen
   // Which lock applies to a given placeholder group.
   const groupLockKey = (groupKey) => (groupKey === "management" ? "management" : "bohkitchen");
   const [finalizedWeeks, setFinalizedWeeks] = useState(new Set()); // { "2026-07-13" }
@@ -1758,6 +1805,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         setOverrides(d.overrides);
         setPending(d.rail.pending);
         setResolvedReqs(d.rail.resolved);
+        setArchivedReqs(d.rail.archived || []);
         setLog(
           d.rail.resolved.map((r) => ({
             id: r.id,
@@ -1810,6 +1858,7 @@ export default function SchedulingHub({ session, onSignOut }) {
 
   // Finalize/publish state per week. Without this the Finalize button forgot
   // itself on every reload — it wrote to schedule_weeks but nothing read back.
+  // Lock rows live in the same table keyed by section, so they load here too.
   useEffect(() => {
     let cancelled = false;
     fetchScheduleWeeks()
@@ -1817,6 +1866,13 @@ export default function SchedulingHub({ session, onSignOut }) {
         if (cancelled) return;
         setFinalizedWeeks(new Set(rows.filter((r) => r.finalized).map((r) => r.week_start)));
         setPublishedWeekStarts(new Set(rows.filter((r) => r.published).map((r) => r.week_start)));
+        const locks = new Set();
+        rows.forEach((r) => {
+          if (!r.locked) return;
+          const key = DB_SECTION_KEY[r.section];
+          if (key) locks.add(`${r.week_start}|${key}`); // ALL rows carry finalize state, not a lock
+        });
+        setLockedSectionWeeks(locks);
       })
       .catch((e) => console.error("Schedule weeks load failed:", e));
     return () => { cancelled = true; };
@@ -2086,6 +2142,33 @@ export default function SchedulingHub({ session, onSignOut }) {
     }
   }
 
+  // Lock/unlock one section of one week. Independent of Finalize — a week can be
+  // finalized and unlocked, or locked and unfinalized. Optimistic, then rolled
+  // back if the write fails, so the button never claims a lock that isn't saved.
+  async function toggleSectionLock() {
+    const weekStart = activeWeekStart;
+    const sectionKey = scheduleView;
+    const key = lockKeyFor(weekStart, sectionKey);
+    const next = !lockedSectionWeeks.has(key);
+    setLockedSectionWeeks((prev) => {
+      const s = new Set(prev);
+      if (next) s.add(key); else s.delete(key);
+      return s;
+    });
+    try {
+      await setWeekSectionLocked(weekStart, sectionKey, next);
+      addLog(`${SECTION_LABEL[sectionKey]} ${next ? "locked" : "unlocked"} — ${shortDate(weekStart)}`, next ? "warn" : "good");
+    } catch (e) {
+      console.error("Section lock failed:", e);
+      setLockedSectionWeeks((prev) => {
+        const s = new Set(prev);
+        if (next) s.delete(key); else s.add(key);
+        return s;
+      });
+      addLog(`Couldn't ${next ? "lock" : "unlock"} ${SECTION_LABEL[sectionKey]} — run migration 0013?`, "warn");
+    }
+  }
+
   // Send every finalized week, using the same real publish path as the Calendar
   // preview modal did: build one branded PDF per week per section client-side,
   // then hand the payloads + attachments to /api/send-schedule. The previous
@@ -2147,7 +2230,7 @@ export default function SchedulingHub({ session, onSignOut }) {
     const idToName = {};
     staffList.forEach((s) => { if (s.id) idToName[s.id] = s.name; });
     return fetchRailRequests(idToName)
-      .then((rail) => { setPending(rail.pending); setResolvedReqs(rail.resolved); })
+      .then((rail) => { setPending(rail.pending); setResolvedReqs(rail.resolved); setArchivedReqs(rail.archived || []); })
       .catch((e) => console.error("Rail reload failed:", e));
   }
 
@@ -2212,6 +2295,8 @@ export default function SchedulingHub({ session, onSignOut }) {
         setTipSent(!!row?.sent);
         setTipFinalized(!!row?.finalized);
         setTipFinalizedAt(row?.finalized_at || null);
+        setTipLocked(!!row?.locked);
+        setTipLockedAt(row?.locked_at || null);
       })
       .catch((e) => console.error("Tip sheet load failed:", e));
     return () => { cancelled = true; };
@@ -2239,7 +2324,7 @@ export default function SchedulingHub({ session, onSignOut }) {
     })();
   }
   function setPlaceholderShift(groupKey, slotIdx, weekday, newType) {
-    if (lockedSections[groupLockKey(groupKey)]) return;
+    if (isSectionLocked(activeWeekStart, groupLockKey(groupKey))) return;
     const personName = (groupRosters[groupKey] || [])[slotIdx];
     const blk = newType !== "OFF" && personName ? approvedOffFor(personName, weekday) : null;
     if (blk) {
@@ -2270,7 +2355,7 @@ export default function SchedulingHub({ session, onSignOut }) {
   }
 
   function toggleManagementCell(slotIdx, weekday) {
-    if (lockedSections.management) return;
+    if (isSectionLocked(activeWeekStart, "management")) return;
     const name = (groupRosters.management || [])[slotIdx];
     const current = activePlaceholders.management?.[slotIdx]?.[weekday] || "OFF";
     if (current === "OFF") {
@@ -2470,6 +2555,64 @@ export default function SchedulingHub({ session, onSignOut }) {
 
     setRailNotes((n) => { const next = { ...n }; delete next[item.id]; return next; });
     setRailBusy(null);
+  }
+
+  /* ---- Rail: archive / restore / delete a pending request ---- */
+
+  // Archive keeps the row and its email thread, just flips the status so it
+  // leaves the queue. No reply is sent and no schedule override is written —
+  // this is housekeeping, not a decision.
+  async function archiveRequest(item) {
+    if (railActionBusy) return;
+    setRailActionBusy(true);
+    setPending((p) => p.filter((r) => r.id !== item.id));
+    setArchivedReqs((a) => [item, ...a.filter((r) => r.id !== item.id)]);
+    if (selectedRailId === item.id) setSelectedRailId(null);
+    try {
+      await setRailArchived(item.id, true);
+      addLog(`Archived ${item.name} — ${TYPE_STYLES[item.type]?.label || item.type}, ${item.dates}`, "warn");
+    } catch (e) {
+      console.error("Archive failed:", e);
+      setArchivedReqs((a) => a.filter((r) => r.id !== item.id));
+      setPending((p) => [...p, item]);
+      addLog(`Couldn't archive ${item.name}'s request`, "warn");
+    }
+    setRailActionBusy(false);
+  }
+
+  async function restoreRequest(item) {
+    if (railActionBusy) return;
+    setRailActionBusy(true);
+    setArchivedReqs((a) => a.filter((r) => r.id !== item.id));
+    setPending((p) => [...p, item]);
+    try {
+      await setRailArchived(item.id, false);
+      addLog(`Restored ${item.name}'s request to pending`, "good");
+    } catch (e) {
+      console.error("Restore failed:", e);
+      setPending((p) => p.filter((r) => r.id !== item.id));
+      setArchivedReqs((a) => [item, ...a]);
+      addLog(`Couldn't restore ${item.name}'s request`, "warn");
+    }
+    setRailActionBusy(false);
+  }
+
+  // Permanent. Nothing to roll back to if the row is gone, so this waits on the
+  // delete before touching the list rather than removing optimistically.
+  async function deleteRequest(item) {
+    if (railActionBusy) return;
+    setRailActionBusy(true);
+    try {
+      await deleteRailRequest(item.id);
+      setPending((p) => p.filter((r) => r.id !== item.id));
+      setArchivedReqs((a) => a.filter((r) => r.id !== item.id));
+      if (selectedRailId === item.id) setSelectedRailId(null);
+      addLog(`Deleted ${item.name}'s request — ${item.dates}`, "warn");
+    } catch (e) {
+      console.error("Delete failed:", e);
+      addLog(`Couldn't delete ${item.name}'s request`, "warn");
+    }
+    setRailActionBusy(false);
   }
 
   // Partial approval of a TIME OFF request: only the manager-specified dates get
@@ -2714,7 +2857,7 @@ export default function SchedulingHub({ session, onSignOut }) {
     })();
   }
   function setCellShift(name, weekday, code) {
-    if (lockedSections.foh) return; // FOH grid
+    if (isSectionLocked(activeWeekStart, "foh")) return; // FOH grid, this week only
 
     const blk = code !== "OFF" ? approvedOffFor(name, weekday) : null;
     if (blk) {
@@ -2729,7 +2872,7 @@ export default function SchedulingHub({ session, onSignOut }) {
   // role picker changed: remember the choice and reset the cell's shift if the
   // current code belongs to a different role
   function setCellRole(name, weekday, role) {
-    if (lockedSections.foh) return;
+    if (isSectionLocked(activeWeekStart, "foh")) return;
     setCellRoleSel((prev) => ({ ...prev, [`${name}|${weekday}`]: role }));
     const current = (activePatterns[name] || ALL_OFF_WEEK)[weekday];
     if (current !== "OFF" && roleFromCode(current) !== role) {
@@ -3103,6 +3246,10 @@ export default function SchedulingHub({ session, onSignOut }) {
         .tip-finalized-banner { display: flex; align-items: center; gap: 8px; background: #E6F0E6; border: 1px solid #7BA37E; color: #2f5232; font-family: 'Space Mono', monospace; font-weight: 700; font-size: 13px; letter-spacing: 1px; padding: 10px 14px; border-radius: 8px; margin-bottom: 16px; }
         .tip-finalized-sub { font-family: 'Manrope', sans-serif; font-weight: 500; font-size: 11.5px; letter-spacing: 0; color: #5c705d; margin-left: 6px; }
         .tip-locked input, .tip-locked .add-payout-btn, .tip-locked .remove-payout-btn, .tip-locked .custom-toggle { pointer-events: none; opacity: 0.6; background: #f1ece0; }
+        /* Same shape as the finalized banner, red instead of green — a locked
+           date is frozen, not sent. */
+        .tip-locked-banner { display: flex; align-items: center; gap: 8px; background: #F6E7E5; border: 1px solid #B23A2F; color: #8a2b22; font-family: 'Space Mono', monospace; font-weight: 700; font-size: 13px; letter-spacing: 1px; padding: 10px 14px; border-radius: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+        .tip-locked-banner .tip-finalized-sub { color: #8a5049; }
         .tip-page-split { display: flex; gap: 22px; align-items: stretch; }
         .tip-left-col { width: 300px; flex-shrink: 0; display: flex; flex-direction: column; }
         .tip-right-col { flex: 1; min-width: 0; }
@@ -3189,7 +3336,7 @@ export default function SchedulingHub({ session, onSignOut }) {
           .tabs, .hub-header, .print-btn, .custom-toggle, .publish-btn, .published-badge, .back-btn, .subject-preview { display: none !important; }
           .cal-card { box-shadow: none !important; }
           /* Tip Sheet print: hide helper text, buttons, navigation, finalized banner; outline-only boxes; fit one page */
-          .footer-note, .recon-note, .fm-banner, .week-header, .tip-finalized-banner { display: none !important; }
+          .footer-note, .recon-note, .fm-banner, .week-header, .tip-finalized-banner, .tip-locked-banner { display: none !important; }
           .check-box { background: transparent !important; }
           .check-box.match { border-color: #7BA37E; }
           .check-box.mismatch { border-color: #C98A3E; }
@@ -3560,6 +3707,8 @@ export default function SchedulingHub({ session, onSignOut }) {
         .check-box.match { background: rgba(90,138,106,0.14); border-color: #5a8a6a; }
         .check-box.mismatch { background: rgba(200,149,108,0.14); border-color: var(--accent); }
         .tip-finalized-banner { background: rgba(90,138,106,0.14); border-color: #5a8a6a; color: #8fce9f; }
+        .tip-locked-banner { background: rgba(178,58,47,0.16); border-color: #B23A2F; color: #e79289; }
+        .tip-locked-banner .tip-finalized-sub { color: var(--txt2); }
         .tip-finalized-sub { color: var(--txt2); }
         .tip-locked input, .tip-locked .add-payout-btn, .tip-locked .custom-toggle { background: var(--line) !important; }
         .slot-empty, .payout-empty { color: var(--muted); }
@@ -3613,6 +3762,33 @@ export default function SchedulingHub({ session, onSignOut }) {
         .rs-q-done .rs-q-type { color: var(--muted) !important; }
         .rs-q-dates { font-family: 'Space Mono', monospace; font-size: 10.5px; color: var(--txt2); }
         .rs-empty { padding: 24px 12px; font-size: 12.5px; }
+
+        /* ---- rail card ••• menu (delete / archive) ---- */
+        /* The wrapper is the positioning context; the card keeps its own margin
+           so the queue spacing is unchanged. */
+        .rs-q-wrap { position: relative; }
+        .rs-q-wrap .rs-q { padding-right: 30px; }
+        .rs-q-menu-btn { position: absolute; top: 8px; right: 6px; z-index: 2; border: none; background: transparent; color: var(--muted); font-size: 13px; line-height: 1; letter-spacing: 1px; padding: 3px 5px; border-radius: 5px; cursor: pointer; }
+        .rs-q-menu-btn:hover, .rs-q-menu-btn[aria-expanded="true"] { color: var(--txt); background: var(--line); }
+        .rs-q-menu-scrim { position: fixed; inset: 0; z-index: 3; }
+        .rs-q-menu { position: absolute; top: 26px; right: 6px; z-index: 4; min-width: 132px; background: var(--s2); border: 1px solid var(--line2); border-radius: 9px; padding: 4px; box-shadow: 0 8px 20px rgba(0,0,0,0.25); }
+        .rs-q-menu-item { display: block; width: 100%; text-align: left; background: none; border: none; cursor: pointer; font-family: inherit; font-size: 12.5px; font-weight: 600; color: var(--txt); padding: 7px 9px; border-radius: 6px; }
+        .rs-q-menu-item:hover { background: var(--line); }
+        .rs-q-menu-danger { color: #B23A2F; }
+        .rs-q-menu-danger:hover { background: rgba(178,58,47,0.12); }
+
+        /* ---- archived section ---- */
+        .rs-archived { margin-top: 18px; }
+        .rs-archived-toggle { display: flex; align-items: center; gap: 7px; width: 100%; background: none; border: none; cursor: pointer; padding: 4px 0; font-family: 'Space Mono', monospace; font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--muted); }
+        .rs-archived-toggle:hover { color: var(--txt2); }
+        .rs-archived-caret { display: inline-block; transition: transform 0.15s ease; }
+        .rs-archived-caret.open { transform: rotate(90deg); }
+        /* Archived rows reuse the dimmed resolved styling but stay interactive
+           enough to reach Restore. */
+        .rs-q-archived { opacity: 0.6; margin-top: 7px; }
+        .rs-restore-btn { margin-left: auto; flex-shrink: 0; background: none; border: 1px solid var(--line2); border-radius: 7px; cursor: pointer; font-family: 'Space Mono', monospace; font-size: 9.5px; letter-spacing: 1px; text-transform: uppercase; color: var(--txt2); padding: 5px 8px; }
+        .rs-restore-btn:hover:not(:disabled) { color: var(--txt); border-color: var(--txt2); }
+        .rs-restore-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
         .rs-prompt { margin-top: 16px; text-align: center; font-family: 'Space Mono', monospace; font-size: 11px; letter-spacing: 2px; text-transform: uppercase; color: var(--muted); border: 1px dashed var(--line2); border-radius: 10px; padding: 22px 10px; }
         .rs-detail { background: var(--s2); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px 20px; }
@@ -3719,6 +3895,11 @@ export default function SchedulingHub({ session, onSignOut }) {
         .rs-head, .rs-strip { border-color: #141414; }
         .rs-q { background: #141414; border-color: #1a1a1a; }
         .rs-q-sel { background: #1a1a1a; }
+        .rs-q-menu-btn:hover, .rs-q-menu-btn[aria-expanded="true"] { background: #1f1f1f; }
+        .rs-q-menu { background: #1a1a1a; border-color: #262626; box-shadow: 0 10px 24px rgba(0,0,0,0.6); }
+        .rs-q-menu-item:hover { background: #262626; }
+        .rs-q-menu-danger { color: #e07668; }
+        .rs-restore-btn { border-color: #262626; }
         .rs-detail { background: #141414; border-color: #1a1a1a; }
         .rs-detail-note { background: #0f0f0f; border-color: #1a1a1a; }
         .rs-card .nr-panel { background: #141414; border-color: #1a1a1a; }
@@ -3901,24 +4082,63 @@ export default function SchedulingHub({ session, onSignOut }) {
                 {pending.map((item) => {
                   const style = TYPE_STYLES[item.type] || { badge: "#7B93A3", label: item.type };
                   const sel = selectedRailId === item.id;
+                  const menuOpen = railMenuId === item.id;
                   return (
-                    <button
-                      type="button"
-                      className={`rs-q ${sel ? "rs-q-sel" : ""}`}
-                      key={item.id}
-                      style={sel ? { borderLeftColor: style.badge } : undefined}
-                      onClick={() => setSelectedRailId(item.id)}
-                    >
-                      <span className="rs-q-avatar" style={{ background: style.badge }}>{item.name[0]}</span>
-                      <span className="rs-q-body">
-                        <span className="rs-q-name">
-                          {item.name}
-                          {item.urgent && <span className="rs-q-urgent" title="Short notice" />}
+                    // The ••• control can't live inside the card button (nested
+                    // buttons aren't valid), so the two are siblings in a wrapper.
+                    <div className="rs-q-wrap" key={item.id}>
+                      <button
+                        type="button"
+                        className={`rs-q ${sel ? "rs-q-sel" : ""}`}
+                        style={sel ? { borderLeftColor: style.badge } : undefined}
+                        onClick={() => setSelectedRailId(item.id)}
+                      >
+                        <span className="rs-q-avatar" style={{ background: style.badge }}>{item.name[0]}</span>
+                        <span className="rs-q-body">
+                          <span className="rs-q-name">
+                            {item.name}
+                            {item.urgent && <span className="rs-q-urgent" title="Short notice" />}
+                          </span>
+                          <span className="rs-q-type" style={{ color: style.badge }}>{style.label}</span>
+                          <span className="rs-q-dates">{item.dates}</span>
                         </span>
-                        <span className="rs-q-type" style={{ color: style.badge }}>{style.label}</span>
-                        <span className="rs-q-dates">{item.dates}</span>
-                      </span>
-                    </button>
+                      </button>
+                      <button
+                        type="button"
+                        className="rs-q-menu-btn"
+                        title="Delete or archive this request"
+                        aria-label={`More actions for ${item.name}'s request`}
+                        aria-expanded={menuOpen}
+                        onClick={() => setRailMenuId(menuOpen ? null : item.id)}
+                      >
+                        •••
+                      </button>
+                      {menuOpen && (
+                        <>
+                          {/* Click-away layer — closes the menu without the card
+                              underneath picking the click up as a selection. */}
+                          <div className="rs-q-menu-scrim" onClick={() => setRailMenuId(null)} />
+                          <div className="rs-q-menu" role="menu">
+                            <button
+                              type="button"
+                              role="menuitem"
+                              className="rs-q-menu-item"
+                              onClick={() => { setRailMenuId(null); setRailConfirm({ mode: "archive", item }); }}
+                            >
+                              Archive
+                            </button>
+                            <button
+                              type="button"
+                              role="menuitem"
+                              className="rs-q-menu-item rs-q-menu-danger"
+                              onClick={() => { setRailMenuId(null); setRailConfirm({ mode: "delete", item }); }}
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </>
+                      )}
+                    </div>
                   );
                 })}
 
@@ -3946,6 +4166,44 @@ export default function SchedulingHub({ session, onSignOut }) {
                       title="Hide these entries (nothing is deleted)"
                     >Clear resolved</button>
                   </>
+                )}
+
+                {/* Archived — collapsed by default, sits at the bottom so it
+                    never competes with the queue for attention. */}
+                {archivedReqs.length > 0 && (
+                  <div className="rs-archived">
+                    <button
+                      type="button"
+                      className="rs-archived-toggle"
+                      aria-expanded={archivedOpen}
+                      onClick={() => setArchivedOpen((o) => !o)}
+                    >
+                      <span className={`rs-archived-caret ${archivedOpen ? "open" : ""}`}>▸</span>
+                      Archived <span className="nr-count">{archivedReqs.length}</span>
+                    </button>
+                    {archivedOpen && archivedReqs.map((r) => {
+                      const style = TYPE_STYLES[r.type] || { badge: "#7B93A3", label: r.type };
+                      return (
+                        <div className="rs-q rs-q-done rs-q-archived" key={r.id}>
+                          <span className="rs-q-avatar" style={{ background: style.badge }}>{r.name[0]}</span>
+                          <span className="rs-q-body">
+                            <span className="rs-q-name">{r.name}</span>
+                            <span className="rs-q-type">{style.label} · archived</span>
+                            <span className="rs-q-dates">{r.dates}</span>
+                          </span>
+                          <button
+                            type="button"
+                            className="rs-restore-btn"
+                            disabled={railActionBusy}
+                            title={`Move ${r.name}'s request back to the pending queue`}
+                            onClick={() => restoreRequest(r)}
+                          >
+                            Restore
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
                 )}
               </div>
 
@@ -4432,14 +4690,21 @@ export default function SchedulingHub({ session, onSignOut }) {
                 <button className="print-btn" disabled={pdfBusy === "schedule"} onClick={exportSchedulePdf}>
                   <FileDown size={13} /> {pdfBusy === "schedule" ? "Saving…" : "Save as PDF"}
                 </button>
-                {/* Locks only the sub-tab on screen — the other two are unaffected. */}
+                {/* Locks the sub-tab on screen for the week on screen only — the
+                    other two sections, and every other week, are unaffected. */}
                 <button
                   className={`print-btn ${scheduleLocked ? "lock-active" : ""}`}
-                  onClick={() => setLockedSections((l) => ({ ...l, [scheduleView]: !l[scheduleView] }))}
-                  title={scheduleLocked ? `Unlock ${SECTION_LABEL[scheduleView]}` : `Lock ${SECTION_LABEL[scheduleView]} only`}
+                  onClick={toggleSectionLock}
+                  title={
+                    scheduleLocked
+                      ? `Unlock ${SECTION_LABEL[scheduleView]} for the week of ${shortDate(activeWeekStart)}`
+                      : `Lock ${SECTION_LABEL[scheduleView]} for the week of ${shortDate(activeWeekStart)} only`
+                  }
                 >
                   {scheduleLocked ? <Lock size={13} /> : <Unlock size={13} />}{" "}
-                  {scheduleLocked ? "Locked ✓" : `Lock ${SECTION_LABEL[scheduleView]}`}
+                  {scheduleLocked
+                    ? `Locked ✓ — ${shortDate(activeWeekStart)}`
+                    : `Lock ${SECTION_LABEL[scheduleView]} — ${shortDate(activeWeekStart)}`}
                 </button>
                 <button
                   className={`print-btn ${weekIsFinalized ? "finalized-active" : ""}`}
@@ -4488,7 +4753,7 @@ export default function SchedulingHub({ session, onSignOut }) {
             </div>
             {scheduleLocked && (
               <div className="template-note" style={{ marginBottom: 14, marginTop: -8 }}>
-                🔒 {SECTION_LABEL[scheduleView]} is locked — its cells won't respond to clicks. Other sections are unaffected. Hit "Locked ✓" above to unlock.
+                🔒 {SECTION_LABEL[scheduleView]} is locked for the week of {shortDate(activeWeekStart)} — its cells won't respond to clicks. Other sections, and other weeks, are unaffected. Hit "Locked ✓" above to unlock.
               </div>
             )}
 
@@ -4709,7 +4974,16 @@ export default function SchedulingHub({ session, onSignOut }) {
                 <span className="tip-finalized-sub">Inputs are locked. Unlock to edit and re-finalize.</span>
               </div>
             )}
-            <div className={`tip-page-split ${tipFinalized ? "tip-locked" : ""}`}>
+            {/* A date can be locked without being finalized, so this banner is
+                its own thing rather than a branch of the finalized one. */}
+            {tipLocked && (
+              <div className="tip-locked-banner">
+                <Lock size={14} /> LOCKED — {shortDate(tipDateIso).toUpperCase()}
+                {tipLockedAt ? <span className="tip-finalized-sub">Locked {new Date(tipLockedAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</span> : null}
+                <span className="tip-finalized-sub">This date's inputs are read-only. Press "Locked ✓" below to unlock.</span>
+              </div>
+            )}
+            <div className={`tip-page-split ${tipFinalized || tipLocked ? "tip-locked" : ""}`}>
               <div className="tip-left-col">
                 <div className="tip-logo-space">
                   <img src={HAENYEO_LOGO} alt="Haenyeo" className="tip-logo-img" />
@@ -4941,10 +5215,27 @@ export default function SchedulingHub({ session, onSignOut }) {
                     <button className="publish-btn" onClick={sendTipSheet}>Send Tip Sheet</button>
                   )}
                   <div style={{ marginLeft: "auto", display: "flex", gap: 10 }}>
+                    {/* Per-date lock — independent of Finalize, pressed again to
+                        unlock. Only this date is affected. */}
+                    <button
+                      className={`print-btn ${tipLocked ? "lock-active" : ""}`}
+                      disabled={tipLockBusy}
+                      onClick={toggleTipLock}
+                      title={tipLocked ? `Unlock ${shortDate(tipDateIso)}` : `Lock ${shortDate(tipDateIso)} — makes this date's inputs read-only`}
+                    >
+                      {tipLocked ? <Lock size={13} /> : <Unlock size={13} />}{" "}
+                      {tipLocked ? `Locked ✓ — ${shortDate(tipDateIso)}` : `Lock ${shortDate(tipDateIso)}`}
+                    </button>
                     {tipFinalized ? (
                       <button className="print-btn" style={{ background: "#B23A2F" }} onClick={unlockTipSheet}><Unlock size={13} /> Unlock</button>
                     ) : (
-                      <button className="print-btn" style={{ background: "#4C6B4F" }} disabled={finalizing} onClick={finalizeTipSheet}>
+                      <button
+                        className="print-btn"
+                        style={{ background: "#4C6B4F" }}
+                        disabled={finalizing || tipLocked}
+                        onClick={finalizeTipSheet}
+                        title={tipLocked ? `Unlock ${shortDate(tipDateIso)} before finalizing` : "Email everyone who worked and lock the sheet"}
+                      >
                         <Lock size={13} /> {finalizing ? "Finalizing…" : "Finalize"}
                       </button>
                     )}
@@ -5338,6 +5629,46 @@ export default function SchedulingHub({ session, onSignOut }) {
             </div>
           </div>
         ) : null;
+      })()}
+
+      {/* Rail delete / archive confirmation. Delete is permanent, so its
+          confirm button is the red one; archive's is neutral. */}
+      {railConfirm && (() => {
+        const { mode, item } = railConfirm;
+        const isDelete = mode === "delete";
+        const close = () => { if (!railActionBusy) setRailConfirm(null); };
+        return (
+          <div className="day-popup-backdrop" onClick={close}>
+            <div className="delete-modal" onClick={(e) => e.stopPropagation()}>
+              <div className="delete-modal-title">{isDelete ? "Delete request" : "Archive request"}</div>
+              <div className="delete-modal-body">
+                {isDelete
+                  ? `Delete this request from ${item.name} for ${item.dates}? This cannot be undone.`
+                  : `Archive this request from ${item.name} for ${item.dates}? It will be hidden from the pending queue but kept on record.`}
+              </div>
+              <div className="delete-modal-actions">
+                <button className="nr-btn nr-btn-deny" disabled={railActionBusy} onClick={close}>Cancel</button>
+                {isDelete ? (
+                  <button
+                    className="delete-confirm-btn"
+                    disabled={railActionBusy}
+                    onClick={async () => { await deleteRequest(item); setRailConfirm(null); }}
+                  >
+                    Delete permanently
+                  </button>
+                ) : (
+                  <button
+                    className="nr-btn nr-btn-approve"
+                    disabled={railActionBusy}
+                    onClick={async () => { await archiveRequest(item); setRailConfirm(null); }}
+                  >
+                    Archive
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        );
       })()}
 
       {timeOffBlock && (

@@ -523,47 +523,79 @@ export async function deleteCalendarNote(id) {
 }
 
 /* -------------------------------------------------------- schedule_weeks -- */
-// Finalize / publish state, one row per week_start (migration 0009).
+// Finalize / publish state plus per-section lock state (migrations 0009, 0013).
+//
+// The key is (week_start, section). Finalize/publish stay week-level and live on
+// the sentinel section 'ALL' — the row 0009 already wrote, backfilled by 0013.
+// Locks are per section, one row each for FOH / BOHKITCHEN / MANAGEMENT, so
+// locking FOH for one week touches nothing else.
+
+export const WEEK_SECTION_ALL = "ALL";
+// UI sub-tab key -> the section value stored in schedule_weeks.
+const SECTION_DB = { foh: "FOH", bohkitchen: "BOHKITCHEN", management: "MANAGEMENT" };
+export function weekSectionDbValue(sectionKey) {
+  return SECTION_DB[sectionKey] || String(sectionKey || "").toUpperCase();
+}
 
 export async function fetchScheduleWeeks() {
-  const { data, error } = await supabase
+  // section/locked/locked_at arrived in 0013 — fall back to the 0009 column set
+  // so the app still loads against a database that hasn't run it yet.
+  let { data, error } = await supabase
     .from("schedule_weeks")
-    .select("week_start, finalized, published");
+    .select("week_start, section, finalized, published, locked");
   if (error) {
     if (isMissingTable(error)) return [];
-    throw error;
+    ({ data, error } = await supabase
+      .from("schedule_weeks")
+      .select("week_start, finalized, published"));
+    if (error) {
+      if (isMissingTable(error)) return [];
+      throw error;
+    }
   }
-  return data || [];
+  // Pre-0013 rows have no section; treat them as the week-level row.
+  return (data || []).map((r) => ({ ...r, section: r.section || WEEK_SECTION_ALL, locked: !!r.locked }));
+}
+
+// Upsert one schedule_weeks row on the (week_start, section) key from 0013.
+// `legacy` retries on week_start alone, dropping section — correct only for the
+// week-level ALL row, which is the single row the pre-0013 key ever held. Lock
+// rows must never fall back: collapsing them onto week_start would overwrite
+// the finalize/publish row, so they surface the error instead.
+async function upsertWeekRow(weekStartIso, section, fields, { legacy = false } = {}) {
+  const row = { week_start: weekStartIso, section, updated_at: new Date().toISOString(), ...fields };
+  let { error } = await supabase.from("schedule_weeks").upsert(row, { onConflict: "week_start,section" });
+  if (error && legacy && !isMissingTable(error)) {
+    const { section: _dropped, ...older } = row;
+    ({ error } = await supabase.from("schedule_weeks").upsert(older, { onConflict: "week_start" }));
+  }
+  if (error && !isMissingTable(error)) throw error;
 }
 
 export async function setWeekFinalized(weekStartIso, finalized) {
-  const { error } = await supabase
-    .from("schedule_weeks")
-    .upsert(
-      {
-        week_start: weekStartIso,
-        finalized,
-        finalized_at: finalized ? new Date().toISOString() : null,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: "week_start" }
-    );
-  if (error && !isMissingTable(error)) throw error;
+  await upsertWeekRow(
+    weekStartIso,
+    WEEK_SECTION_ALL,
+    { finalized, finalized_at: finalized ? new Date().toISOString() : null },
+    { legacy: true }
+  );
 }
 
 export async function setWeekPublished(weekStartIso) {
-  const { error } = await supabase
-    .from("schedule_weeks")
-    .upsert(
-      {
-        week_start: weekStartIso,
-        published: true,
-        published_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: "week_start" }
-    );
-  if (error && !isMissingTable(error)) throw error;
+  await upsertWeekRow(
+    weekStartIso,
+    WEEK_SECTION_ALL,
+    { published: true, published_at: new Date().toISOString() },
+    { legacy: true }
+  );
+}
+
+// One section of one week. sectionKey is the UI sub-tab key ('foh' etc).
+export async function setWeekSectionLocked(weekStartIso, sectionKey, locked) {
+  await upsertWeekRow(weekStartIso, weekSectionDbValue(sectionKey), {
+    locked,
+    locked_at: locked ? new Date().toISOString() : null,
+  });
 }
 
 /* -------------------------------------------------- schedule_overrides ----- */
@@ -593,6 +625,9 @@ export async function fetchOverrides(idToName) {
 /* -------------------------------------------------------- rail_requests ---- */
 // pending  -> [{ id, type, name, dates, notice, note, urgent }]
 // resolved -> [{ id, name, type, dates, status, created_at }] (for the log)
+// archived -> same shape as pending, for the collapsed Archived section — kept
+//             out of both other buckets so it neither waits on a decision nor
+//             reads as resolved.
 
 export async function fetchRailRequests(idToName) {
   // source/unmatched_name arrived in migration 0003 — select them if present,
@@ -610,13 +645,14 @@ export async function fetchRailRequests(idToName) {
   }
   const pending = [];
   const resolved = [];
+  const archived = [];
   (data || []).forEach((row) => {
     // matched entries resolve staff_id -> name; email entries with no staff
     // match fall back to the raw name from the email, flagged as unmatched.
     const name = idToName[row.staff_id] || row.unmatched_name || "Unknown";
     const unmatchedName = !row.staff_id && row.unmatched_name ? row.unmatched_name : null;
-    if (row.status === "pending") {
-      pending.push({
+    if (row.status === "pending" || row.status === "archived") {
+      const entry = {
         id: row.id,
         type: row.type,
         name,
@@ -627,14 +663,31 @@ export async function fetchRailRequests(idToName) {
         urgent: !!row.urgent,
         source: row.source || "manual",
         unmatchedName,
-      });
+      };
+      (row.status === "archived" ? archived : pending).push(entry);
     } else {
       resolved.push({ id: row.id, name, type: row.type, dates: row.dates, status: row.status, created_at: row.created_at });
     }
   });
   // pending should read oldest-first like the prototype's initial list
   pending.reverse();
-  return { pending, resolved };
+  archived.reverse();
+  return { pending, resolved, archived };
+}
+
+// Archive hides a request from the pending queue without losing it; restoring
+// puts it straight back. Both are just a status write, so the request keeps its
+// note, source and Gmail thread.
+export async function setRailArchived(id, archived) {
+  await updateRailStatus(id, archived ? "archived" : "pending");
+}
+
+// Permanent — the row is gone, not flagged. schedule_overrides.rail_request_id
+// is ON DELETE SET NULL (0004), so an override written from an approval survives
+// with its link cleared rather than cascading away.
+export async function deleteRailRequest(id) {
+  const { error } = await supabase.from("rail_requests").delete().eq("id", id);
+  if (error) throw error;
 }
 
 export async function updateRailStatus(id, status, managerNote) {
