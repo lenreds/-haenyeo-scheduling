@@ -1520,9 +1520,33 @@ export default function SchedulingHub({ session, onSignOut }) {
     setTipSent(false);
   }
 
+  // Nobody marked off for this date may occupy a tip slot. autoAssignSlots
+  // already drops them on the way in, but a saved Custom Schedule bypasses it
+  // entirely: slot_overrides freeze whoever was on the schedule the night the
+  // sheet was first opened, and customMode switches itself back on whenever a
+  // saved row has any. Approve a Rail Request Off after that and the stale name
+  // stays in the slot, earning a full point. This is the last gate before the
+  // math, so blanking here also keeps them out of every total, the floor check,
+  // the emailed rows and the PDF.
+  //
+  // Only names that belong to a real staff member are checked — a slot typed
+  // with someone not on the roster has no schedule to read, so it stands.
+  const tipPatterns = patternsForDate(tipDateInfo);
+  const tipRosterNames = new Set(staffList.map((s) => s.name));
+  function offForTipDate(name) {
+    if (!name || !tipRosterNames.has(name)) return false;
+    const { type } = personShiftFor(name, tipDateInfo, tipPatterns, overrides);
+    return type === "OFF" || type === "GAP";
+  }
+
+  const slotsExcludedOff = [];
   const displaySlots = autoSlots.map((slot) => {
     const ov = slotOverrides[slot.id];
-    const name = customMode && ov?.name !== undefined ? ov.name : slot.autoName;
+    let name = customMode && ov?.name !== undefined ? ov.name : slot.autoName;
+    if (offForTipDate(name)) {
+      slotsExcludedOff.push(name);
+      name = "";
+    }
     let pts = null;
     if (name) {
       pts = slot.role === "Host" ? (coversNum > 80 ? slot.defaultPts : 0) : slot.defaultPts;
@@ -3268,6 +3292,9 @@ export default function SchedulingHub({ session, onSignOut }) {
         .recon-row.final label { font-weight: 700; color: #2B2A25; }
         .recon-row.final span { font-family: 'Space Mono', monospace; font-weight: 700; font-size: 13.5px; color: #C98A3E; }
         .recon-note { font-size: 10.5px; color: #8c8574; font-style: italic; margin-top: 8px; line-height: 1.4; text-align: center; }
+        /* Amber, not red: the sheet is correct, the manager just needs to know
+           a name they may have expected isn't on it. */
+        .tip-off-note { display: flex; align-items: flex-start; gap: 7px; margin-top: 14px; padding: 9px 12px; border: 1px solid #C98A3E; background: #FBF0DE; color: #8a5a20; border-radius: 7px; font-size: 11.5px; line-height: 1.45; }
 
         .denom-table { margin-bottom: 10px; border-bottom: 1px solid rgba(43,42,37,0.15); padding-bottom: 8px; }
         .denom-header { display: grid; grid-template-columns: 44px 1fr 1fr; gap: 6px; font-family: 'Space Mono', monospace; font-size: 9.5px; letter-spacing: 1px; text-transform: uppercase; color: #8c8574; padding-bottom: 3px; }
@@ -3708,6 +3735,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         .check-box.mismatch { background: rgba(200,149,108,0.14); border-color: var(--accent); }
         .tip-finalized-banner { background: rgba(90,138,106,0.14); border-color: #5a8a6a; color: #8fce9f; }
         .tip-locked-banner { background: rgba(178,58,47,0.16); border-color: #B23A2F; color: #e79289; }
+        .tip-off-note { background: rgba(200,149,108,0.14); border-color: var(--accent); color: var(--accent); }
         .tip-locked-banner .tip-finalized-sub { color: var(--txt2); }
         .tip-finalized-sub { color: var(--txt2); }
         .tip-locked input, .tip-locked .add-payout-btn, .tip-locked .custom-toggle { background: var(--line) !important; }
@@ -5202,6 +5230,20 @@ export default function SchedulingHub({ session, onSignOut }) {
                     {customMode ? "✓ Custom Schedule" : "Custom Schedule"}
                   </button>
                 </div>
+
+                {/* Never drop someone from the sheet silently — payroll needs to
+                    know why a name it expected isn't there. */}
+                {slotsExcludedOff.length > 0 && (() => {
+                  const names = [...new Set(slotsExcludedOff)];
+                  const one = names.length === 1;
+                  return (
+                    <div className="tip-off-note">
+                      <AlertTriangle size={12} />
+                      {names.join(", ")} {one ? "is" : "are"} scheduled off on {shortDate(tipDateIso)}, so {one ? "that slot was" : "those slots were"} left empty.
+                      Give them a shift on the Set Schedule for this date to include them.
+                    </div>
+                  );
+                })()}
 
                 <div className="footer-note">
                   Distributed: ${money(totalDistributed)} of ${money(floorPool + barPool)} total pool (floor + bar). Host only earns their point if covers exceed 80 for the day. Expo and Host are paid flat — their hours aren't part of any pooled rate. Type times like "4:00 PM" or "9:30" — if you leave off AM/PM, it assumes PM. Clock times round to the nearest 15 minutes (≤7 min rounds down, ≥8 rounds up).
