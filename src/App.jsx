@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef } from "react";
-import { Check, X, AlertTriangle, Users, Package, Clock, ChevronLeft, ChevronRight, Printer, FileDown, Calendar, Lock, Unlock, LogOut } from "lucide-react";
+import { Check, X, AlertTriangle, Users, Package, Clock, ChevronLeft, ChevronRight, Printer, FileDown, Calendar, CalendarDays, StickyNote, Lock, Unlock, LogOut } from "lucide-react";
 import {
   fetchInitial,
   fetchRailRequests,
@@ -38,6 +38,7 @@ import {
   deleteRailRequest,
   fetchCalendarNotes,
   insertCalendarNote,
+  updateCalendarNote,
   deleteCalendarNote,
   calendarNotesAvailable,
   insertRoleShiftOption,
@@ -97,6 +98,10 @@ async function captureNodeForPdf(node, { header, strip = [] } = {}) {
         root.querySelectorAll("input").forEach((inp, i) => {
           const span = doc.createElement("span");
           span.style.cssText = "font-family:inherit;font-size:12px;color:#2B2A25;";
+          // Carry the input's classes plus a marker, so stylesheet rules that
+          // targeted the input still reach its stand-in — the Tip Sheet's
+          // denomination writing-rules depend on this.
+          span.className = `${inp.className} pdf-field`.trim();
           span.textContent = liveInputs[i] ? String(liveInputs[i].value || "") : "";
           inp.replaceWith(span);
         });
@@ -1146,8 +1151,18 @@ export default function SchedulingHub({ session, onSignOut }) {
   const [pending, setPending] = useState(initialPending);
   const [log, setLog] = useState(initialLog);
   const [nameToId, setNameToId] = useState({});
-  const [calView, setCalView] = useState("month"); // 'month' | 'week'
-  const [calDate, setCalDate] = useState(new Date(2026, 6, 1)); // month/year being viewed
+  // 'month' | 'day' | 'week'. 'day' is the date notes page (brief item 5) —
+  // it replaced the old click-a-day popup, and the week view can bounce back to
+  // whichever date opened it.
+  const [calView, setCalView] = useState("month");
+  const [calDayIso, setCalDayIso] = useState(null); // the date whose page is open
+  // Month/year being viewed. Opens on the CURRENT month (brief item 4) — it used
+  // to be pinned to the July 2026 sample week, so the calendar always landed on
+  // a month nobody was looking for.
+  const [calDate, setCalDate] = useState(() => {
+    const n = new Date();
+    return new Date(n.getFullYear(), n.getMonth(), 1);
+  });
   const [weekIndex, setWeekIndex] = useState(0); // week offset from the current week (0 = this week, negative = past)
   const [calMonthView, setCalMonthView] = useState(1); // 1 or 3 months
   const [patterns, setPatterns] = useState(() => normalizePatterns(PERSON_PATTERNS, DEFAULT_PRIMARY_ROLE));
@@ -1166,7 +1181,6 @@ export default function SchedulingHub({ session, onSignOut }) {
   const [railMenuId, setRailMenuId] = useState(null);      // which card's ••• menu is open
   const [railConfirm, setRailConfirm] = useState(null);    // { mode: 'delete' | 'archive', item }
   const [railActionBusy, setRailActionBusy] = useState(false);
-  const [dayPopup, setDayPopup] = useState(null); // { day, weekIdx } | null
   const [cellRoleSel, setCellRoleSel] = useState({}); // "name|weekday" -> role picked but shift not chosen yet
   const [newStaff, setNewStaff] = useState({ name: "", section: "FOH", roles: [], primary: "" });
   const [staffDrafts, setStaffDrafts] = useState({}); // staff id -> edited { name, active, roles, primary }
@@ -1197,6 +1211,14 @@ export default function SchedulingHub({ session, onSignOut }) {
   // Calendar date notes (brief item 7): { "YYYY-MM-DD": [rows] }
   const [calNotes, setCalNotes] = useState({});
   const [calNoteDraft, setCalNoteDraft] = useState("");
+  const [calNoteEditId, setCalNoteEditId] = useState(null);
+  const [calNoteEditText, setCalNoteEditText] = useState("");
+  // Rail's Date Note quick-add (brief item 3) — same calendar_notes rows the
+  // Calendar's date page reads, just a second way in. Defaults to today.
+  const [quickNoteDate, setQuickNoteDate] = useState(TODAY_ISO);
+  const [quickNoteDraft, setQuickNoteDraft] = useState("");
+  const [quickNoteBusy, setQuickNoteBusy] = useState(false);
+  const [quickNoteMsg, setQuickNoteMsg] = useState("");
   // Manage Shifts (brief item 3): which role has its add-field open, and its text
   const [shiftAddRole, setShiftAddRole] = useState(null);
   const [shiftAddLabel, setShiftAddLabel] = useState("");
@@ -1215,11 +1237,12 @@ export default function SchedulingHub({ session, onSignOut }) {
   // watermarks in `railCleared` below — the DB is never touched, entries simply
   // stop being rendered once a Clear timestamp sits after their created_at.
   const [selectedRailId, setSelectedRailId] = useState(null);
+  // Finalized is no longer its own button (brief item 1) — a successful Send
+  // sets it, and Unlock clears it. It still drives the FINALIZED banner and the
+  // read-only inputs.
   const [tipFinalized, setTipFinalized] = useState(false);
   const [tipFinalizedAt, setTipFinalizedAt] = useState(null);
-  const [finalizing, setFinalizing] = useState(false);
-  // Lock is per date and separate from Finalize: locking freezes this one day's
-  // inputs, finalizing emails staff. Either can be on without the other.
+  // Lock is the manual half: freeze or reopen a date without emailing anyone.
   const [tipLocked, setTipLocked] = useState(false);
   const [tipLockedAt, setTipLockedAt] = useState(null);
   const [tipLockBusy, setTipLockBusy] = useState(false);
@@ -1238,6 +1261,9 @@ export default function SchedulingHub({ session, onSignOut }) {
   const [customMode, setCustomMode] = useState(false);
   const [slotOverrides, setSlotOverrides] = useState({}); // slotId -> { name, pts }
   const [tipSent, setTipSent] = useState(false);
+  // When the emails actually went out, for the "Sent ✓ 11:42 PM" button label
+  // (migration 0015). Null on sheets sent before that column existed.
+  const [tipSentAt, setTipSentAt] = useState(null);
   // Send Tip Sheet confirmation screen (brief item 5). Nothing is emailed until
   // Confirm & Send — the modal owns the editable subject, the optional message
   // notes, and which recipients are excluded.
@@ -1612,18 +1638,15 @@ export default function SchedulingHub({ session, onSignOut }) {
   }
   function setSlotName(slotId, value) {
     setSlotOverrides((o) => ({ ...o, [slotId]: { ...o[slotId], name: value } }));
-    setTipSent(false);
   }
   function setSlotPts(slotId, value) {
     setSlotOverrides((o) => ({ ...o, [slotId]: { ...o[slotId], pts: parseFloat(value) || 0 } }));
-    setTipSent(false);
   }
   function getTimes(slotId) {
     return tipTimes[slotId] || { in: "", out: "" };
   }
   function setSlotTime(slotId, field, value) {
     setTipTimes((tt) => ({ ...tt, [slotId]: { ...getTimes(slotId), [field]: value } }));
-    setTipSent(false);
   }
 
   // Nobody marked off for this date may occupy a tip slot. autoAssignSlots
@@ -1732,15 +1755,12 @@ export default function SchedulingHub({ session, onSignOut }) {
   }, 0);
   const floorCheckMatches = Math.abs(floorCheckTotal - floorPool) < 0.1;
 
-  const tipMM = String(tipDateInfo.dateObj.getMonth() + 1).padStart(2, "0");
-  const tipDD = String(tipDateInfo.dateObj.getDate()).padStart(2, "0");
-  const tipSubject = `[SCHEDULING] – TIP SHEET – ${tipMM}/${tipDD}`;
-
   function shiftTipDate(delta) {
     const d = new Date(tipDateInfo.dateObj);
     d.setDate(d.getDate() + delta);
     setTipDateIso(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`);
-    setTipSent(false);
+    // sent / sent_at come from the new date's own row (see the load effect) —
+    // they aren't cleared here any more.
   }
 
   // Shared tip_sheets row payload; `extra` overrides/adds columns (sent, finalized…).
@@ -1893,9 +1913,18 @@ export default function SchedulingHub({ session, onSignOut }) {
   }, [finalSlots, staffList]);
 
   const tipSendDayLabel = tipDateInfo.dateObj.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
+  // "" for a sheet sent before sent_at existed, so the button just reads "Sent ✓".
+  const tipSentAtLabel = tipSentAt
+    ? new Date(tipSentAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+    : "";
   const tipSendChosen = tipSendRoster.filter((r) => r.email && !tipSendExcluded.includes(r.name));
 
+  // A sheet that already went out asks before opening the screen again, so a
+  // stray click on "Sent ✓" can't start a second round of emails (brief item 1).
   function openTipSendModal() {
+    if (tipSent && !window.confirm(
+      `This tip sheet was already sent${tipSentAtLabel ? ` at ${tipSentAtLabel}` : ""}. Send it again?`
+    )) return;
     setTipSendSubject(`Haenyeo Tip Sheet — ${tipSendDayLabel}`);
     setTipSendNotes("");
     setTipSendExcluded([]);
@@ -1906,9 +1935,10 @@ export default function SchedulingHub({ session, onSignOut }) {
     setTipSendExcluded((prev) => (prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name]));
   }
 
-  // The only path that actually emails. Reuses the same rows/floor-check payload
-  // Finalize sends, so the tip breakdown in the email is identical — the subject
-  // line, the notes block and the recipient list are what the manager chose.
+  // The only path that emails. Since Finalize is gone (brief item 1), a
+  // successful send is also what finalizes and locks the sheet — one action, one
+  // write. The tip math is untouched; the subject, the notes block and the
+  // recipient list are what the manager confirmed on the send screen.
   async function confirmSendTipSheet() {
     if (tipSendBusy || !tipSendChosen.length) return;
     setTipSendBusy(true);
@@ -1936,93 +1966,59 @@ export default function SchedulingHub({ session, onSignOut }) {
       addLog(`Tip sheet send failed (${res.error})`, "warn");
       return;
     }
+    const now = new Date().toISOString();
     setTipSendOpen(false);
     setTipSent(true);
-    addLog(`Tip sheet sent — ${tipDateInfo.dateObj.toLocaleDateString(undefined, MONTH_FMT)} — emailed ${res?.sent ?? 0} staff`, "good");
-    try { await upsertTipSheet(tipPayload({ sent: true })); }
-    catch (e) { console.error("Save tip sheet failed:", e); }
-  }
-
-  // Recipients for the finalized tip email: each unique worker who is registered
-  // with an email, plus their personalized payout.
-  function tipRecipients() {
-    const seen = new Set();
-    const out = [];
-    finalSlots.forEach((p) => {
-      if (!p.name || seen.has(p.name)) return;
-      seen.add(p.name);
-      const staff = staffList.find((st) => st.name === p.name);
-      if (staff && staff.registered && staff.personal_email) {
-        out.push({ name: p.name, email: staff.personal_email, payout: money(p.final || 0) });
-      }
-    });
-    return out;
-  }
-  function tipWorkerCount() {
-    return new Set(finalSlots.filter((p) => p.name).map((p) => p.name)).size;
-  }
-
-  async function finalizeTipSheet() {
-    if (finalizing || tipFinalized || tipLocked) return;
-    const recipients = tipRecipients();
-    const skipped = tipWorkerCount() - recipients.length;
-    if (!window.confirm(
-      `Finalize tonight's tip sheet? This will email all staff who worked tonight and lock the sheet. ` +
-      `Sending to ${recipients.length} staff — ${skipped} have no email on file and will be skipped.`
-    )) return;
-
-    setFinalizing(true);
-    const now = new Date().toISOString();
+    setTipSentAt(now);
     setTipFinalized(true);
     setTipFinalizedAt(now);
-    try { await upsertTipSheet(tipPayload({ finalized: true, finalized_at: now, sent: true })); }
-    catch (e) { console.error("Finalize save failed:", e); }
-
-    const rows = finalSlots.filter((p) => p.name).map((p) => ({
-      name: p.name, position: p.label, points: (p.pts || 0).toFixed(2), hours: (p.hours || 0).toFixed(2), final: money(p.final || 0),
-    }));
-    const floorCheckText = floorCheckMatches
-      ? `Floor check: $${money(floorCheckTotal)} — matches floor cash + CC.`
-      : `Floor check: $${money(floorCheckTotal)} — off by $${money(Math.abs(floorCheckTotal - floorPool))}.`;
-    const res = await triggerTipSheetSend({
-      dayDateLabel: tipDateInfo.dateObj.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" }),
-      floorPool: money(floorPool),
-      rows,
-      barTipOut: money(barTipOutTotal),
-      barRecipients: barTipOutRecipients,
-      floorCheckText,
-      recipients,
-    }, session?.access_token);
-    if (res?.error) addLog(`Tip email failed (${res.error}) — sheet still finalized`, "warn");
-    else addLog(`Tip sheet finalized — emailed ${res?.sent ?? 0} staff`, "good");
-    setFinalizing(false);
+    setTipLocked(true);
+    setTipLockedAt(now);
+    addLog(
+      `Tip sheet sent — ${tipDateInfo.dateObj.toLocaleDateString(undefined, MONTH_FMT)} — emailed ${res?.sent ?? 0} staff, sheet finalized and locked`,
+      "good"
+    );
+    try {
+      await upsertTipSheet(tipPayload({
+        sent: true, sent_at: now,
+        finalized: true, finalized_at: now,
+        locked: true, locked_at: now,
+      }));
+    } catch (e) {
+      console.error("Save tip sheet failed:", e);
+      addLog("Emails went out but the sheet's sent/locked state didn't save — run migration 0015?", "warn");
+    }
   }
 
-  async function unlockTipSheet() {
-    if (!window.confirm("Unlock this tip sheet for edits? Previously sent emails are not recalled.")) return;
-    setTipFinalized(false);
-    setTipFinalizedAt(null);
-    try { await upsertTipSheet(tipPayload({ finalized: false, finalized_at: null })); }
-    catch (e) { console.error("Unlock save failed:", e); }
-  }
-
-  // Per-date lock, pressed again to unlock. Nothing is emailed and Finalize is
-  // untouched — this only freezes the inputs for the date on screen. Optimistic,
-  // rolled back if the write fails so the button can't show a lock that didn't save.
+  // Lock, pressed again to unlock — the only way to freeze or reopen a date
+  // without emailing anyone (brief item 1). Unlocking also clears finalized:
+  // sending is what sets finalized now, so a reopened sheet has to be genuinely
+  // editable again rather than finalized-but-unlocked. Optimistic, rolled back
+  // if the write fails so the button can't show a lock that didn't save.
   async function toggleTipLock() {
     if (tipLockBusy) return;
     const next = !tipLocked;
+    if (!next && tipFinalized &&
+        !window.confirm("Unlock this tip sheet for edits? It stops counting as finalized. Emails already sent are not recalled.")) return;
     const at = next ? new Date().toISOString() : null;
+    const prevFinalized = tipFinalized;
+    const prevFinalizedAt = tipFinalizedAt;
     setTipLockBusy(true);
     setTipLocked(next);
     setTipLockedAt(at);
+    if (!next) { setTipFinalized(false); setTipFinalizedAt(null); }
     try {
-      await upsertTipSheet(tipPayload({ locked: next, locked_at: at }));
+      await upsertTipSheet(tipPayload(
+        next ? { locked: true, locked_at: at }
+             : { locked: false, locked_at: null, finalized: false, finalized_at: null }
+      ));
       addLog(`Tip sheet ${next ? "locked" : "unlocked"} — ${shortDate(tipDateIso)}`, next ? "warn" : "good");
     } catch (e) {
       console.error("Tip lock save failed:", e);
       setTipLocked(!next);
       setTipLockedAt(next ? null : tipLockedAt);
+      setTipFinalized(prevFinalized);
+      setTipFinalizedAt(prevFinalizedAt);
       addLog(`Couldn't ${next ? "lock" : "unlock"} the tip sheet — run migration 0013?`, "warn");
     }
     setTipLockBusy(false);
@@ -2235,9 +2231,44 @@ export default function SchedulingHub({ session, onSignOut }) {
     }
   }
   async function removeCalendarNote(dateIso, id) {
-    setCalNotes((m) => ({ ...m, [dateIso]: (m[dateIso] || []).filter((n) => n.id !== id) }));
+    const prev = calNotes[dateIso] || [];
+    setCalNotes((m) => ({ ...m, [dateIso]: prev.filter((n) => n.id !== id) }));
+    if (calNoteEditId === id) setCalNoteEditId(null);
     try { await deleteCalendarNote(id); }
-    catch (e) { console.error("Delete calendar note failed:", e); }
+    catch (e) { console.error("Delete calendar note failed:", e); setCalNotes((m) => ({ ...m, [dateIso]: prev })); }
+  }
+  async function saveCalendarNoteEdit(dateIso, id) {
+    const text = calNoteEditText.trim();
+    if (!text) return;
+    setCalNotes((m) => ({ ...m, [dateIso]: (m[dateIso] || []).map((n) => (n.id === id ? { ...n, note: text } : n)) }));
+    setCalNoteEditId(null);
+    try { await updateCalendarNote(id, text); }
+    catch (e) { console.error("Edit calendar note failed:", e); }
+  }
+
+  // Rail quick-add: one field for the date, one for the note (brief item 3).
+  // Goes through the same insert the Calendar's date page uses and drops the
+  // row into calNotes, so the note is on the calendar immediately.
+  async function addQuickDateNote() {
+    const text = quickNoteDraft.trim();
+    if (!text || !quickNoteDate || quickNoteBusy) return;
+    setQuickNoteBusy(true);
+    setQuickNoteMsg("");
+    try {
+      const row = await insertCalendarNote(quickNoteDate, text);
+      if (row) {
+        setCalNotes((m) => ({ ...m, [quickNoteDate]: [...(m[quickNoteDate] || []), row] }));
+        setQuickNoteDraft("");
+        setQuickNoteMsg(`Added to ${shortDate(quickNoteDate)}`);
+        setTimeout(() => setQuickNoteMsg(""), 3000);
+      } else {
+        setQuickNoteMsg("Couldn't save — calendar notes table missing?");
+      }
+    } catch (e) {
+      console.error("Quick date note failed:", e);
+      setQuickNoteMsg("Couldn't save that note.");
+    }
+    setQuickNoteBusy(false);
   }
 
   // Finalize/publish state per week. Without this the Finalize button forgot
@@ -2490,7 +2521,7 @@ export default function SchedulingHub({ session, onSignOut }) {
     // Outline-only boxes for the PDF (html2canvas can't read @media print).
     card.classList.add("tip-pdf-mode");
     // Drop helper/hint text and the Custom Schedule toggle from the PDF.
-    const strip = [".footer-note", ".recon-note", ".custom-toggle", ".fm-banner"];
+    const strip = [".footer-note", ".recon-note", ".custom-toggle", ".fm-banner", ".add-payout-btn", ".remove-payout-btn"];
 
     // Pin the width so the layout never depends on the browser window size.
     async function captureAt(widthPx) {
@@ -2708,6 +2739,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         setTipTimes(row?.time_entries || {});
         setCustomMode(row?.slot_overrides && Object.keys(row.slot_overrides).length > 0);
         setTipSent(!!row?.sent);
+        setTipSentAt(row?.sent_at || null);
         setTipFinalized(!!row?.finalized);
         setTipFinalizedAt(row?.finalized_at || null);
         setTipLocked(!!row?.locked);
@@ -3081,6 +3113,24 @@ export default function SchedulingHub({ session, onSignOut }) {
   function zoomToWeek(idx) {
     setWeekIndex(idx);
     setCalView("week");
+  }
+  // Open a date's notes page (brief item 5). Keeps the month grid pointed at
+  // that date's month so "Back to month" lands where you'd expect.
+  function openDayPage(dateObj) {
+    setCalDate(new Date(dateObj.getFullYear(), dateObj.getMonth(), 1));
+    setCalDayIso(iso(dateObj));
+    setCalNoteEditId(null);
+    setCalNoteDraft("");
+    setCalView("day");
+  }
+
+  // Item 6: the Calendar only shows schedules that are real — a week that has
+  // already happened, or one a manager finalized in Set Schedule. Anything else
+  // is still a draft being built, and showing it here would read as settled.
+  // Set Schedule is unaffected; you can still build any week there.
+  function isWeekViewable(weekStartIso) {
+    if (!weekStartIso) return false;
+    return weekStartIso < iso(mondayOf(new Date())) || finalizedWeeks.has(weekStartIso);
   }
 
   /* ---- staff & role management ---- */
@@ -3504,17 +3554,6 @@ export default function SchedulingHub({ session, onSignOut }) {
         .nr-item-note { font-size: 13px; color: #5c625f; line-height: 1.5; margin: 6px 0 14px; padding-left: 40px; }
 
         /* Gmail connection status bar (top of the Rail card) */
-        .gmail-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 18px; padding-bottom: 14px; border-bottom: 1px solid #DFE1DB; font-size: 12.5px; color: #5c625f; }
-        .gmail-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
-        .gmail-dot-on { background: #6E9B72; box-shadow: 0 0 0 3px rgba(110,155,114,0.18); }
-        .gmail-dot-off { background: #B3695E; box-shadow: 0 0 0 3px rgba(179,105,94,0.18); }
-        .gmail-dot-idle { background: #b8b3a6; }
-        .gmail-label { font-weight: 700; color: #2F3432; }
-        .gmail-sub { color: #85897F; font-size: 11.5px; }
-        .gmail-err { color: #B3695E; }
-        .gmail-check-btn { margin-left: auto; font-family: 'Plus Jakarta Sans', sans-serif; font-weight: 700; font-size: 11.5px; padding: 5px 12px; border-radius: 8px; border: 1px solid rgba(47,52,50,0.15); background: #F0F0EC; color: #2F3432; cursor: pointer; }
-        .gmail-check-btn:hover:not(:disabled) { background: #E4E5DF; }
-        .gmail-check-btn:disabled { opacity: 0.5; cursor: not-allowed; }
         .nr-item-reply { padding-left: 40px; }
         .nr-manager-note { width: 100%; box-sizing: border-box; font-family: 'Plus Jakarta Sans', sans-serif; font-size: 12.5px; padding: 8px 11px; border: 1px solid rgba(47,52,50,0.14); border-radius: 9px; background: #FBFBF9; color: #2F3432; margin-bottom: 10px; }
         .nr-manager-note::placeholder { color: #a7aba2; }
@@ -3793,6 +3832,15 @@ export default function SchedulingHub({ session, onSignOut }) {
           .tip-field label { font-size: 10px !important; }
           .tip-stat { font-size: 14px !important; }
           .denom-table { font-size: 10.5px !important; }
+          /* Cash box writing rules (brief item 2) — matches .tip-pdf-mode so a
+             printed sheet and a saved PDF look the same. */
+          .denom-row input {
+            border: 0 !important; border-bottom: 1px solid #d0d0d0 !important;
+            border-radius: 0 !important; background: transparent !important;
+            display: block !important; min-height: 15px !important; padding: 0 2px 1px !important;
+          }
+          /* Nothing to click on paper. */
+          .add-payout-btn, .remove-payout-btn { display: none !important; }
           .recon-row { padding: 5px 0 !important; }
           .hero-stat { gap: 13px !important; margin: 13px 0 !important; }
           /* amber summary boxes -> outline only (amber border, white bg) */
@@ -3833,6 +3881,18 @@ export default function SchedulingHub({ session, onSignOut }) {
         .tip-pdf-mode .check-sub { color: #4a473d !important; }
         .tip-pdf-mode input { background: #fff !important; color: #2B2A25 !important; border-color: rgba(43,42,37,0.2) !important; }
         .tip-pdf-mode .recon-row.final span { color: #8a5a20 !important; }
+        /* Cash box writing rules (brief item 2): each denomination row gets a
+           thin rule under its Opening and Closing cells, so the empty box reads
+           as a form to write on instead of a grid of empty outlines. No vertical
+           borders, no boxes. .pdf-field is the span html2canvas's onclone swaps
+           each input for — without it the rules would vanish in the PDF.
+           (No backticks in here: this whole stylesheet is a template literal.) */
+        .tip-pdf-mode .denom-row input,
+        .tip-pdf-mode .denom-row .pdf-field {
+          border: 0 !important; border-bottom: 1px solid #d0d0d0 !important;
+          border-radius: 0 !important; background: transparent !important;
+          display: block !important; min-height: 15px !important; padding: 0 2px 1px !important;
+        }
         .tip-pdf-mode .check-box, .tip-pdf-mode .cash-recon, .tip-pdf-mode .hero-item { background: transparent !important; }
         .tip-pdf-mode .cash-recon { border: 1px solid rgba(43,42,37,0.2) !important; }
         .tip-pdf-mode .hero-item { border-color: #C98A3E !important; padding: 10px 12px !important; }
@@ -3931,7 +3991,6 @@ export default function SchedulingHub({ session, onSignOut }) {
         .day-popup-status { margin-left: auto; font-family: 'Space Mono', monospace; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
         .day-popup-status-pending { color: #C98A3E; }
         .day-popup-status-approved { color: #4C6B4F; }
-        .day-popup-week-btn { width: 100%; margin-top: 14px; }
 
         /* publish preview modal */
 
@@ -4089,7 +4148,6 @@ export default function SchedulingHub({ session, onSignOut }) {
         .nr-label, .col-label, .cal-weekday, .week-table th, .tip-field label,
         .recon-title, .denom-header, .check-label, .nr-day-name { color: var(--muted); }
         .nr-row, .nr-log-row, .roster-row { border-color: var(--line); }
-        .gmail-bar { border-color: var(--line); color: var(--txt2); }
         .nr-day-num { color: var(--txt); }
         .nr-day-today { background: rgba(200,149,108,0.14); }
         .nr-day-today .nr-day-name, .nr-day-today .nr-day-num { color: var(--accent); }
@@ -4109,8 +4167,6 @@ export default function SchedulingHub({ session, onSignOut }) {
         .nr-btn-approve { background: var(--accent); color: #0c0c0c; }
         .nr-btn-deny { background: var(--line); color: var(--txt2); }
         .nr-btn-partial { background: var(--line); color: var(--txt2); border-color: var(--line2); }
-        .gmail-check-btn { background: var(--s2); border-color: var(--line2); color: var(--txt2); }
-        .gmail-check-btn:hover:not(:disabled) { background: var(--line); color: var(--txt); }
         .print-btn { background: var(--s2); color: var(--txt); border: 1px solid var(--line2); }
         .print-btn:hover { background: var(--line); }
         .print-btn.lock-active { background: #B23A2F; color: #fff; border-color: #B23A2F; }
@@ -4177,7 +4233,66 @@ export default function SchedulingHub({ session, onSignOut }) {
         .rs-head { display: flex; align-items: center; gap: 10px; padding: 16px 20px 14px; border-bottom: 1px solid var(--line); }
         .rs-head-icon { height: 22px; width: auto; }
         .rs-head-word { font-family: 'Space Mono', monospace; font-weight: 700; font-size: 14px; letter-spacing: 4px; color: var(--txt); }
-        .rs-head-pending { margin-left: auto; font-family: 'Space Mono', monospace; font-size: 10px; letter-spacing: 1px; text-transform: uppercase; color: var(--accent); background: rgba(200,149,108,0.14); border-radius: 20px; padding: 3px 10px; }
+
+        /* Gmail status, top-right of the Rail card (brief item 3). Dot + "Gmail",
+           with the last-checked line only when the connection is actually
+           healthy. The whole thing is the Check-now button. */
+        .rs-gmail {
+          margin-left: auto; display: flex; align-items: center; gap: 8px;
+          background: none; border: none; padding: 2px 4px; cursor: pointer; font-family: inherit;
+        }
+        .rs-gmail:disabled { cursor: default; }
+        .rs-gmail:hover:not(:disabled) .rs-gmail-label { color: var(--txt); }
+        .rs-gmail-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+        .rs-gmail-ok .rs-gmail-dot { background: #5a8a6a; }
+        .rs-gmail-bad .rs-gmail-dot { background: #B23A2F; }
+        .rs-gmail-body { display: flex; flex-direction: column; align-items: flex-start; line-height: 1.2; }
+        .rs-gmail-label { font-family: 'Space Mono', monospace; font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: var(--txt2); }
+        .rs-gmail-sub { font-size: 9.5px; color: var(--muted); }
+
+        /* Date Note quick-add strip (brief item 3), where the Gmail bar was. */
+        .rs-quicknote {
+          display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+          padding: 12px 20px 14px; border-bottom: 1px solid var(--line);
+        }
+        .rs-quicknote-label {
+          display: inline-flex; align-items: center; gap: 6px;
+          font-family: 'Space Mono', monospace; font-size: 10px; letter-spacing: 1px;
+          text-transform: uppercase; color: var(--muted); flex-shrink: 0;
+        }
+        .rs-quicknote-date, .rs-quicknote-text {
+          font-family: inherit; font-size: 12.5px; padding: 6px 9px;
+          background: var(--s2); border: 1px solid var(--line); border-radius: 7px; color: var(--txt);
+        }
+        .rs-quicknote-date { flex-shrink: 0; color-scheme: dark; }
+        .rs-quicknote-text { flex: 1; min-width: 180px; }
+        .rs-quicknote-date:focus, .rs-quicknote-text:focus { outline: none; border-color: var(--accent); }
+        .rs-quicknote-text::placeholder { color: var(--muted); }
+        .rs-quicknote-msg { font-size: 11px; color: #5a8a6a; }
+
+        /* ---- Calendar date notes page (brief item 5) ---- */
+        .day-page-head { gap: 12px; }
+        .day-page-icon {
+          display: inline-flex; align-items: center; justify-content: center;
+          width: 32px; height: 32px; border-radius: 8px; cursor: pointer;
+          background: var(--s2); border: 1px solid var(--line); color: var(--txt2);
+        }
+        .day-page-icon:hover { color: var(--accent); border-color: var(--line2); }
+        .day-page-split { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 28px; margin-top: 18px; }
+        @media (max-width: 860px) { .day-page-split { grid-template-columns: 1fr; gap: 20px; } }
+        /* Roomier than the Rail's narrow column — this page has the width. */
+        .day-page-notes { max-height: none; }
+        .day-page-notes .rs-note-text, .day-page-notes .rs-note-edit { font-size: 13.5px; }
+        .day-page-add { margin-top: 10px; }
+        .day-page-col .day-popup-item { margin-bottom: 6px; }
+
+        /* Item 6 blank state: a week the Calendar won't show yet. */
+        .week-not-final {
+          display: flex; flex-direction: column; align-items: center; gap: 6px;
+          padding: 54px 20px; text-align: center; color: var(--muted);
+        }
+        .week-not-final-title { font-family: 'Space Mono', monospace; font-size: 13px; letter-spacing: 1px; color: var(--txt2); }
+        .week-not-final-sub { font-size: 12px; max-width: 380px; }
 
         .rs-strip { display: flex; gap: 4px; padding: 12px 20px; border-bottom: 1px solid var(--line); }
         .rs-day { flex: 1; text-align: center; padding: 7px 2px 5px; border-radius: 8px; }
@@ -4192,11 +4307,21 @@ export default function SchedulingHub({ session, onSignOut }) {
         .rs-mark-holiday { background: #B23A2F; }
         .rs-holiday-note { padding: 8px 20px 0; font-size: 10.5px; color: var(--muted); text-align: center; }
 
-        /* Right column widened from 180px for the bigger Notes box (brief item
-           2) — at 180px a note wrapped to roughly one word per line. */
-        .rs-grid { display: grid; grid-template-columns: 220px minmax(0,1fr) 300px; gap: 20px; padding: 18px 20px 24px; align-items: start; }
-        @media (max-width: 1180px) { .rs-grid { grid-template-columns: 200px minmax(0,1fr) 240px; gap: 14px; } }
+        /* Today at a Glance | Notes (+ selected request) | Pending + log.
+           Notes takes the flexible middle because it's the column that grows;
+           the two fixed columns are sized to their content (a roster row, a
+           request card). */
+        .rs-grid { display: grid; grid-template-columns: 260px minmax(0,1fr) 320px; gap: 20px; padding: 18px 20px 24px; align-items: start; }
+        @media (max-width: 1180px) { .rs-grid { grid-template-columns: 220px minmax(0,1fr) 270px; gap: 14px; } }
         @media (max-width: 980px) { .rs-grid { grid-template-columns: 1fr; } }
+        /* The log sits directly under the pending queue, not in its own column. */
+        .rs-col-right .rs-log { max-height: 300px; }
+        /* Pending Decisions carries the count (brief item 3) and the Add Request
+           button in a 320px column — let it wrap instead of squeezing. */
+        .rs-col-right .nr-label { flex-wrap: wrap; row-gap: 6px; }
+        .rs-col-right .manual-add-btn { white-space: nowrap; }
+        /* The log header sits under the queue, so it needs its own top gap. */
+        .rs-col-right .rs-log-label { margin-top: 20px; }
         .rs-col-left, .rs-col-mid, .rs-col-right { min-width: 0; }
         .rs-label-resolved { margin-top: 18px; }
 
@@ -4240,7 +4365,6 @@ export default function SchedulingHub({ session, onSignOut }) {
         .rs-restore-btn:hover:not(:disabled) { color: var(--txt); border-color: var(--txt2); }
         .rs-restore-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
-        .rs-prompt { margin-top: 16px; text-align: center; font-family: 'Space Mono', monospace; font-size: 11px; letter-spacing: 2px; text-transform: uppercase; color: var(--muted); border: 1px dashed var(--line2); border-radius: 10px; padding: 22px 10px; }
         .rs-detail { background: var(--s2); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px 20px; }
         .rs-detail-top { display: flex; align-items: flex-start; gap: 11px; }
         .rs-detail-avatar { width: 34px; height: 34px; font-size: 15px; }
@@ -4346,7 +4470,6 @@ export default function SchedulingHub({ session, onSignOut }) {
         .info-updates-title { color: var(--accent); }
         .info-update-row { border-color: rgba(200,149,108,0.22); }
         .cal-off-chip { background: rgba(74,122,155,0.20); color: #9dc0d6; }
-        .gmail-dot-idle { background: var(--muted); }
 
         /* ================= MIDNIGHT SOLID (brief item 1) =================
            Calendar week view + Rail move to a near-black base where chips are a
@@ -4382,8 +4505,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         .rs-card .nr-panel { background: #141414; border-color: #1a1a1a; }
         /* Neutral chips only — the type badge and avatar keep their inline
            request-type color, which is the whole signal in the queue. */
-        .rs-card .nr-count, .rs-head-pending { background: #1a1a1a; }
-        .rs-head-pending { color: var(--accent); }
+        .rs-card .nr-count { background: #1a1a1a; }
         .rs-card .nr-row, .rs-card .nr-log-row { border-color: #1a1a1a; }
         .rs-card .nr-empty { background: #141414; border-color: #1a1a1a; }
         .rs-clear-block { display: block; margin: 8px 0 0 auto; }
@@ -4398,6 +4520,13 @@ export default function SchedulingHub({ session, onSignOut }) {
         .save-status-saving { color: var(--accent); }
         .save-status-dirty { color: #d9a441; }
         .save-status-error { color: #e79289; }
+
+        /* Tip Sheet action row — Save · Lock · Send · Save as PDF · Print. */
+        .tip-actions { margin-top: 16px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+        .tip-actions .save-status { margin-right: 2px; }
+        /* A sheet that already went out: green, so "send again" reads as a
+           deliberate act rather than the default next step. */
+        .publish-btn-sent { background: #4C6B4F; border-color: #4C6B4F; display: inline-flex; align-items: center; gap: 6px; }
 
         /* ---- Send Tip Sheet confirmation (brief item 5) ---- */
         .send-modal {
@@ -4519,11 +4648,46 @@ export default function SchedulingHub({ session, onSignOut }) {
       {tab === "rail" && (
         <div className="nr-wrap">
           <div className="nr-card rs-card">
-            {/* ---- brand row: icon + HAENYEO, gmail dot, pending count ---- */}
+            {/* ---- brand row: icon + HAENYEO, Gmail status top-right ----
+                 The pending count moved into the Pending Decisions header
+                 (brief item 3), and Gmail took the corner it left behind. */}
             <div className="rs-head">
               <img src={HAENYEO_ICON} alt="" className="rs-head-icon" />
               <span className="rs-head-word">HAENYEO</span>
-              <span className="rs-head-pending">{pending.length} pending</span>
+              {(() => {
+                const st = gmailStatus;
+                const connected = !!st?.connected;
+                // Green only when the mailbox is actually connected. Anything
+                // else — disconnected, never set up, still checking — is a
+                // problem the manager should see, and shows no "last checked"
+                // line because the time would be reassuring and wrong.
+                const ok = connected;
+                const last = ok && st?.lastPollAt ? new Date(st.lastPollAt) : null;
+                const detail = st == null
+                  ? "Checking Gmail…"
+                  : connected
+                  ? `Connected${st.email ? ` as ${st.email}` : ""}`
+                  : st.configured
+                  ? `Disconnected${st.lastError ? ` — ${st.lastError}` : ""}`
+                  : "Not set up";
+                return (
+                  <button
+                    type="button"
+                    className={`rs-gmail ${ok ? "rs-gmail-ok" : "rs-gmail-bad"}`}
+                    onClick={checkGmailNow}
+                    disabled={gmailChecking || !session?.access_token}
+                    title={`${detail}${session?.access_token ? " · click to check now" : " · sign in to check"}`}
+                  >
+                    <span className="rs-gmail-dot" />
+                    <span className="rs-gmail-body">
+                      <span className="rs-gmail-label">Gmail</span>
+                      {gmailChecking
+                        ? <span className="rs-gmail-sub">checking…</span>
+                        : last && <span className="rs-gmail-sub">last checked {last.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</span>}
+                    </span>
+                  </button>
+                );
+              })()}
             </div>
 
             {/* ---- 7-day strip: today tinted + dot, pending markers per day ---- */}
@@ -4552,43 +4716,219 @@ export default function SchedulingHub({ session, onSignOut }) {
               <div className="rs-holiday-note">Holiday this week: {holidaysThisWeek.map((h) => h.name).join(", ")}</div>
             )}
 
-            <div className="gmail-bar">
-              {(() => {
-                const st = gmailStatus;
-                const connected = !!st?.connected;
-                const dot = connected ? "on" : st?.configured ? "off" : "idle";
-                const label = st == null
-                  ? "Checking Gmail…"
-                  : connected
-                  ? "Gmail connected"
-                  : st.configured
-                  ? "Gmail disconnected"
-                  : "Gmail not set up";
-                const last = st?.lastPollAt ? new Date(st.lastPollAt) : null;
-                return (
-                  <>
-                    <span className={`gmail-dot gmail-dot-${dot}`} />
-                    <span className="gmail-label">{label}</span>
-                    {st?.email && connected && <span className="gmail-sub">· {st.email}</span>}
-                    {last && <span className="gmail-sub">· last checked {last.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</span>}
-                    {st?.lastError && !connected && <span className="gmail-sub gmail-err">· {st.lastError}</span>}
-                    <button
-                      className="gmail-check-btn"
-                      onClick={checkGmailNow}
-                      disabled={gmailChecking || !session?.access_token}
-                      title={!session?.access_token ? "Sign in to check for new emails" : "Check the inbox for new scheduling emails now"}
-                    >
-                      {gmailChecking ? "Checking…" : "Check now"}
-                    </button>
-                  </>
-                );
-              })()}
-            </div>
+            {/* Date Note quick-add (brief item 3), in the strip the Gmail status
+                used to occupy. Writes to calendar_notes — the same rows the
+                Calendar's date page reads, so a note added here shows up there
+                and vice versa. */}
+            {calendarNotesAvailable() && (
+              <div className="rs-quicknote">
+                <span className="rs-quicknote-label"><Calendar size={13} /> Date note</span>
+                <input
+                  className="rs-quicknote-date"
+                  type="date"
+                  value={quickNoteDate}
+                  onChange={(e) => setQuickNoteDate(e.target.value)}
+                  title="Which date this note belongs to"
+                />
+                <input
+                  className="rs-quicknote-text"
+                  type="text"
+                  placeholder="Add a note to this date on the Calendar…"
+                  value={quickNoteDraft}
+                  disabled={quickNoteBusy}
+                  onChange={(e) => setQuickNoteDraft(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") addQuickDateNote(); }}
+                />
+                <button
+                  className="publish-btn"
+                  disabled={!quickNoteDraft.trim() || !quickNoteDate || quickNoteBusy}
+                  onClick={addQuickDateNote}
+                >{quickNoteBusy ? "Adding…" : "Add"}</button>
+                {quickNoteMsg && <span className="rs-quicknote-msg">{quickNoteMsg}</span>}
+              </div>
+            )}
             {/* ---- Dark Split: queue | detail | log+notes ---- */}
             <div className="rs-grid">
 
-              {/* LEFT — pending queue, resolved below dimmed */}
+              {/* LEFT — who is actually on the floor today */}
               <div className="rs-col-left">
+                <div className="nr-label"><Users size={13} /> Today at a Glance</div>
+                <div className="nr-panel">
+                  {todayRoster.length === 0 && (
+                    <div className="rs-log-empty">Nobody is scheduled today.</div>
+                  )}
+                  {todayRoster.map((r) => (
+                    <div className="nr-row" key={r.name}>
+                      <span>
+                        <span className="nr-dot" style={r.code === "GAP" ? { background: "#B23A2F" } : undefined} />
+                        {r.name}
+                      </span>
+                      <span className="nr-row-status">
+                        {r.code === "GAP" ? "Coverage gap" : shiftLabelForType(r.code)}
+                        <button
+                          className="swap-icon-btn"
+                          title={`Swap ${r.name} out for today`}
+                          onClick={() => openSwap(r)}
+                        >⇄</button>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* CENTRE — the selected request, then the standing notes. The
+                  detail sits ABOVE the notes rather than replacing them, so
+                  reviewing a request never hides the note board. */}
+              <div className="rs-col-mid">
+                {(() => {
+                  const item = pending.find((p) => p.id === selectedRailId);
+                  if (!item) return null;
+                    const style = TYPE_STYLES[item.type] || { badge: "#7B93A3", label: item.type };
+                    const isTimeOff = item.type === "TIME OFF";
+                    const to = isTimeOff ? timeOffDates(item.dates) : null;
+                    const busy = railBusy === item.id;
+                    return (
+                      <div className="rs-detail">
+                        <div className="rs-detail-top">
+                          <span className="rs-q-avatar rs-detail-avatar" style={{ background: style.badge }}>{item.name[0]}</span>
+                          <div>
+                            <div className="rs-detail-name">
+                              {item.name}
+                              {item.unmatchedName && (
+                                <span className="nr-unmatched" title="No staff member matches this name — approve after fixing, or add them on the Staff tab">
+                                  <AlertTriangle size={10} /> Unmatched name
+                                </span>
+                              )}
+                            </div>
+                            <div className="rs-detail-type">
+                              <span className="rs-type-badge" style={{ background: style.badge }}>{style.label}</span>
+                              {item.urgent && <span className="nr-urgent"><AlertTriangle size={11} /> Short notice</span>}
+                            </div>
+                          </div>
+                          <div className="rs-detail-dates">{item.dates}</div>
+                        </div>
+
+                        <div className="rs-detail-meta">
+                          {isTimeOff && `${to.consecutive ? "Consecutive" : "Non-consecutive"}${to.dates.length ? ` · ${to.dates.length} day${to.dates.length > 1 ? "s" : ""}` : ""}`}
+                          {!isTimeOff && (item.notice ? item.notice : item.source === "gmail" ? "via email" : "")}
+                        </div>
+
+                        {item.note && <div className="rs-detail-note">{item.note}</div>}
+
+                        <input
+                          className="nr-manager-note"
+                          type="text"
+                          placeholder={partialOpen[item.id] ? "Note to staff (required for partial approval)…" : "Optional note to staff (used in the email reply)…"}
+                          value={railNotes[item.id] || ""}
+                          onChange={(e) => setRailNotes((n) => ({ ...n, [item.id]: e.target.value }))}
+                          disabled={busy}
+                        />
+                        {isTimeOff && partialOpen[item.id] && (
+                          <input
+                            className="nr-manager-note"
+                            type="text"
+                            placeholder='Approved dates only (e.g. "Jul 28, Jul 30")'
+                            value={partialDates[item.id] || ""}
+                            onChange={(e) => setPartialDates((n) => ({ ...n, [item.id]: e.target.value }))}
+                            disabled={busy}
+                          />
+                        )}
+                        <div className="nr-item-actions">
+                          {isTimeOff && partialOpen[item.id] ? (
+                            <>
+                              <button className="nr-btn nr-btn-approve" disabled={busy} onClick={() => resolvePartial(item)}><Check size={14} /> Confirm partial</button>
+                              <button className="nr-btn nr-btn-deny" disabled={busy} onClick={() => setPartialOpen((n) => ({ ...n, [item.id]: false }))}>Cancel</button>
+                            </>
+                          ) : (
+                            <>
+                              <button className="nr-btn nr-btn-approve" disabled={busy} onClick={() => resolve(item, true)}><Check size={14} /> Approve</button>
+                              {isTimeOff && (
+                                <button className="nr-btn nr-btn-partial" disabled={busy} onClick={() => setPartialOpen((n) => ({ ...n, [item.id]: true }))}>Partial</button>
+                              )}
+                              <button className="nr-btn nr-btn-deny" disabled={busy} onClick={() => resolve(item, false)}><X size={14} /> Deny</button>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    );
+                })()}
+
+                {/* General notes (brief item 2): standing notes, no dates, edited
+                    in place. Taller and at full size so the box reads at a
+                    glance without opening anything. Per-week notes still live
+                    behind the Set Schedule Notes button. */}
+                {generalNotesAvailable() && (
+                  <>
+                    <div className="nr-label">
+                      Notes <span className="nr-count">{genNotes.length}</span>
+                    </div>
+                    <div className="nr-panel rs-notes">
+                      {genNotes.length === 0 ? (
+                        <div className="rs-log-empty">No notes yet</div>
+                      ) : (
+                        <div className="rs-note-list">
+                          {genNotes.map((n) => (
+                            <div className="rs-note-row" key={n.id}>
+                              {genNoteEditId === n.id ? (
+                                <>
+                                  <textarea
+                                    className="rs-note-edit"
+                                    /* Grow with the note so editing doesn't hide
+                                       the end of it. ~24 chars fit per line in
+                                       this column; the +1 covers word wrapping
+                                       landing short of a full line. */
+                                    rows={Math.min(9, Math.max(3,
+                                      Math.ceil(genNoteEditText.length / 24) + 1 + (genNoteEditText.match(/\n/g) || []).length))}
+                                    autoFocus
+                                    value={genNoteEditText}
+                                    onChange={(e) => setGenNoteEditText(e.target.value)}
+                                    onKeyDown={(e) => {
+                                      // Enter saves, Shift+Enter keeps a line break.
+                                      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); saveGeneralNoteEdit(n.id); }
+                                      if (e.key === "Escape") setGenNoteEditId(null);
+                                    }}
+                                  />
+                                  <div className="rs-note-actions">
+                                    <button className="rs-note-btn" title="Save" onClick={() => saveGeneralNoteEdit(n.id)}><Check size={13} /></button>
+                                    <button className="rs-note-btn" title="Cancel" onClick={() => setGenNoteEditId(null)}><X size={13} /></button>
+                                  </div>
+                                </>
+                              ) : (
+                                <>
+                                  <button
+                                    className="rs-note-text"
+                                    title="Click to edit"
+                                    onClick={() => { setGenNoteEditId(n.id); setGenNoteEditText(n.note); }}
+                                  >{n.note}</button>
+                                  <div className="rs-note-actions">
+                                    <button className="rs-note-btn rs-note-del" title="Delete note" onClick={() => removeGeneralNote(n.id)}><X size={13} /></button>
+                                  </div>
+                                </>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      <div className="rs-note-add">
+                        <input
+                          className="rs-note-input"
+                          placeholder="Add a note…"
+                          value={genNoteDraft}
+                          disabled={genNoteBusy}
+                          onChange={(e) => setGenNoteDraft(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === "Enter") addGeneralNote(); }}
+                        />
+                        <button className="rs-note-btn" disabled={!genNoteDraft.trim() || genNoteBusy} onClick={addGeneralNote} title="Add note">
+                          <Check size={13} />
+                        </button>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+
+              {/* RIGHT — pending queue, with the auto-action log under it */}
+              <div className="rs-col-right">
                 <div className="nr-label">
                   <Clock size={13} /> Pending Decisions <span className="nr-count">{pending.length}</span>
                   <button className="manual-add-btn" onClick={() => { setManualError(null); setManualOpen(true); }} title="Manually log a scheduling request made in person">+ Add Request</button>
@@ -4732,117 +5072,8 @@ export default function SchedulingHub({ session, onSignOut }) {
                     })}
                   </div>
                 )}
-              </div>
 
-              {/* CENTRE — detail for the selected request, else today's floor */}
-              <div className="rs-col-mid">
-                {(() => {
-                  const item = pending.find((p) => p.id === selectedRailId);
-                  if (!item) {
-                    return (
-                      <>
-                        <div className="nr-label"><Users size={13} /> Today at a Glance</div>
-                        <div className="nr-panel">
-                          {todayRoster.length === 0 && (
-                            <div className="rs-log-empty">Nobody is scheduled today.</div>
-                          )}
-                          {todayRoster.map((r) => (
-                            <div className="nr-row" key={r.name}>
-                              <span>
-                                <span className="nr-dot" style={r.code === "GAP" ? { background: "#B23A2F" } : undefined} />
-                                {r.name}
-                              </span>
-                              <span className="nr-row-status">
-                                {r.code === "GAP" ? "Coverage gap" : shiftLabelForType(r.code)}
-                                <button
-                                  className="swap-icon-btn"
-                                  title={`Swap ${r.name} out for today`}
-                                  onClick={() => openSwap(r)}
-                                >⇄</button>
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                        <div className="rs-prompt">
-                          {pending.length ? "Select a request to review" : "No requests waiting"}
-                        </div>
-                      </>
-                    );
-                  }
-                  const style = TYPE_STYLES[item.type] || { badge: "#7B93A3", label: item.type };
-                  const isTimeOff = item.type === "TIME OFF";
-                  const to = isTimeOff ? timeOffDates(item.dates) : null;
-                  const busy = railBusy === item.id;
-                  return (
-                    <div className="rs-detail">
-                      <div className="rs-detail-top">
-                        <span className="rs-q-avatar rs-detail-avatar" style={{ background: style.badge }}>{item.name[0]}</span>
-                        <div>
-                          <div className="rs-detail-name">
-                            {item.name}
-                            {item.unmatchedName && (
-                              <span className="nr-unmatched" title="No staff member matches this name — approve after fixing, or add them on the Staff tab">
-                                <AlertTriangle size={10} /> Unmatched name
-                              </span>
-                            )}
-                          </div>
-                          <div className="rs-detail-type">
-                            <span className="rs-type-badge" style={{ background: style.badge }}>{style.label}</span>
-                            {item.urgent && <span className="nr-urgent"><AlertTriangle size={11} /> Short notice</span>}
-                          </div>
-                        </div>
-                        <div className="rs-detail-dates">{item.dates}</div>
-                      </div>
-
-                      <div className="rs-detail-meta">
-                        {isTimeOff && `${to.consecutive ? "Consecutive" : "Non-consecutive"}${to.dates.length ? ` · ${to.dates.length} day${to.dates.length > 1 ? "s" : ""}` : ""}`}
-                        {!isTimeOff && (item.notice ? item.notice : item.source === "gmail" ? "via email" : "")}
-                      </div>
-
-                      {item.note && <div className="rs-detail-note">{item.note}</div>}
-
-                      <input
-                        className="nr-manager-note"
-                        type="text"
-                        placeholder={partialOpen[item.id] ? "Note to staff (required for partial approval)…" : "Optional note to staff (used in the email reply)…"}
-                        value={railNotes[item.id] || ""}
-                        onChange={(e) => setRailNotes((n) => ({ ...n, [item.id]: e.target.value }))}
-                        disabled={busy}
-                      />
-                      {isTimeOff && partialOpen[item.id] && (
-                        <input
-                          className="nr-manager-note"
-                          type="text"
-                          placeholder='Approved dates only (e.g. "Jul 28, Jul 30")'
-                          value={partialDates[item.id] || ""}
-                          onChange={(e) => setPartialDates((n) => ({ ...n, [item.id]: e.target.value }))}
-                          disabled={busy}
-                        />
-                      )}
-                      <div className="nr-item-actions">
-                        {isTimeOff && partialOpen[item.id] ? (
-                          <>
-                            <button className="nr-btn nr-btn-approve" disabled={busy} onClick={() => resolvePartial(item)}><Check size={14} /> Confirm partial</button>
-                            <button className="nr-btn nr-btn-deny" disabled={busy} onClick={() => setPartialOpen((n) => ({ ...n, [item.id]: false }))}>Cancel</button>
-                          </>
-                        ) : (
-                          <>
-                            <button className="nr-btn nr-btn-approve" disabled={busy} onClick={() => resolve(item, true)}><Check size={14} /> Approve</button>
-                            {isTimeOff && (
-                              <button className="nr-btn nr-btn-partial" disabled={busy} onClick={() => setPartialOpen((n) => ({ ...n, [item.id]: true }))}>Partial</button>
-                            )}
-                            <button className="nr-btn nr-btn-deny" disabled={busy} onClick={() => resolve(item, false)}><X size={14} /> Deny</button>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })()}
-              </div>
-
-              {/* RIGHT — auto-action log + this week's notes */}
-              <div className="rs-col-right">
-                <div className="nr-label">
+                <div className="nr-label rs-log-label">
                   <Package size={13} /> Auto-Action Log
                   {visibleLog.length > 0 ? (
                     <button
@@ -4871,79 +5102,6 @@ export default function SchedulingHub({ session, onSignOut }) {
                     ))
                   )}
                 </div>
-
-                {/* General notes (brief item 2): standing notes, no dates, edited
-                    in place. Taller and at full size so the box reads at a
-                    glance without opening anything. Per-week notes still live
-                    behind the Set Schedule Notes button. */}
-                {generalNotesAvailable() && (
-                  <>
-                    <div className="nr-label">
-                      Notes <span className="nr-count">{genNotes.length}</span>
-                    </div>
-                    <div className="nr-panel rs-notes">
-                      {genNotes.length === 0 ? (
-                        <div className="rs-log-empty">No notes yet</div>
-                      ) : (
-                        <div className="rs-note-list">
-                          {genNotes.map((n) => (
-                            <div className="rs-note-row" key={n.id}>
-                              {genNoteEditId === n.id ? (
-                                <>
-                                  <textarea
-                                    className="rs-note-edit"
-                                    /* Grow with the note so editing doesn't hide
-                                       the end of it. ~24 chars fit per line in
-                                       this column; the +1 covers word wrapping
-                                       landing short of a full line. */
-                                    rows={Math.min(9, Math.max(3,
-                                      Math.ceil(genNoteEditText.length / 24) + 1 + (genNoteEditText.match(/\n/g) || []).length))}
-                                    autoFocus
-                                    value={genNoteEditText}
-                                    onChange={(e) => setGenNoteEditText(e.target.value)}
-                                    onKeyDown={(e) => {
-                                      // Enter saves, Shift+Enter keeps a line break.
-                                      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); saveGeneralNoteEdit(n.id); }
-                                      if (e.key === "Escape") setGenNoteEditId(null);
-                                    }}
-                                  />
-                                  <div className="rs-note-actions">
-                                    <button className="rs-note-btn" title="Save" onClick={() => saveGeneralNoteEdit(n.id)}><Check size={13} /></button>
-                                    <button className="rs-note-btn" title="Cancel" onClick={() => setGenNoteEditId(null)}><X size={13} /></button>
-                                  </div>
-                                </>
-                              ) : (
-                                <>
-                                  <button
-                                    className="rs-note-text"
-                                    title="Click to edit"
-                                    onClick={() => { setGenNoteEditId(n.id); setGenNoteEditText(n.note); }}
-                                  >{n.note}</button>
-                                  <div className="rs-note-actions">
-                                    <button className="rs-note-btn rs-note-del" title="Delete note" onClick={() => removeGeneralNote(n.id)}><X size={13} /></button>
-                                  </div>
-                                </>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                      <div className="rs-note-add">
-                        <input
-                          className="rs-note-input"
-                          placeholder="Add a note…"
-                          value={genNoteDraft}
-                          disabled={genNoteBusy}
-                          onChange={(e) => setGenNoteDraft(e.target.value)}
-                          onKeyDown={(e) => { if (e.key === "Enter") addGeneralNote(); }}
-                        />
-                        <button className="rs-note-btn" disabled={!genNoteDraft.trim() || genNoteBusy} onClick={addGeneralNote} title="Add note">
-                          <Check size={13} />
-                        </button>
-                      </div>
-                    </div>
-                  </>
-                )}
               </div>
             </div>
           </div>
@@ -5045,7 +5203,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                   <div
                     key={d.iso}
                     className={`cal-day ${!d.inMonth ? "dim" : ""} ${d.isToday ? "today" : ""}`}
-                    onClick={() => setDayPopup({ day: d, weekIdx: Math.floor(i / 7) })}
+                    onClick={() => openDayPage(d.date)}
                   >
                     {s.gap && <AlertTriangle size={13} className="cal-gap-flag" />}
                     {(calNotes[d.iso] || []).length > 0 && (
@@ -5083,7 +5241,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                             <div
                               key={`${monthIdx}-${d.iso}`}
                               className={`cal-day ${!d.inMonth ? "dim" : ""} ${d.isToday ? "today" : ""}`}
-                              onClick={() => setDayPopup({ day: d, weekIdx: Math.floor(i / 7) })}
+                              onClick={() => openDayPage(d.date)}
                             >
                               {s.gap && <AlertTriangle size={10} className="cal-gap-flag" />}
                               {(calNotes[d.iso] || []).length > 0 && (
@@ -5109,25 +5267,100 @@ export default function SchedulingHub({ session, onSignOut }) {
             </div>
             </div>
           </div>
+        </div>
+      )}
 
-          {dayPopup && (() => {
-            const d = dayPopup.day;
-            const holiday = holidayFor(d.iso);
-            const items = railItemsForDate(d.iso);
-            const railNames = new Set(items.filter((it) => it.type === "REQUEST OFF").map((it) => it.name));
-            const scheduleOffs = timeOffNamesForDate(d.iso).filter((n) => !railNames.has(n));
-            return (
-              <div className="day-popup-backdrop" onClick={() => setDayPopup(null)}>
-                <div className="day-popup" onClick={(e) => e.stopPropagation()}>
-                  <div className="day-popup-head">
-                    <div className="day-popup-date">
-                      {d.date.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}
-                    </div>
-                    <button className="day-popup-close" onClick={() => setDayPopup(null)}><X size={15} /></button>
-                  </div>
-                  {holiday && <div className="day-popup-holiday">★ {holiday}</div>}
+      {/* ---- Date notes page (brief item 5) ----
+           Replaces the old click-a-day popup: a full page for one date, showing
+           its notes (add / edit / delete) and the same Rail activity the popup
+           listed. The calendar icon at the top opens that date's week schedule,
+           which has an icon to come back here. Notes are calendar_notes rows —
+           the same ones the Rail's Date Note quick-add writes. */}
+      {tab === "calendar" && calView === "day" && calDayIso && (() => {
+        const dayObj = new Date(`${calDayIso}T00:00:00`);
+        const holiday = holidayFor(calDayIso);
+        const items = railItemsForDate(calDayIso);
+        const railNames = new Set(items.filter((it) => it.type === "REQUEST OFF").map((it) => it.name));
+        const scheduleOffs = timeOffNamesForDate(calDayIso).filter((n) => !railNames.has(n));
+        const notes = calNotes[calDayIso] || [];
+        return (
+          <div className="cal-wrap" key={`day-${calDayIso}`}>
+            <div className="cal-card">
+              <div className="week-header day-page-head">
+                <button className="back-btn" onClick={() => setCalView("month")}><ChevronLeft size={14} /> Back to month</button>
+                <div className="week-range">
+                  {dayObj.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric" })}
+                </div>
+                <button
+                  className="day-page-icon"
+                  title="Open this date's week schedule"
+                  onClick={() => zoomToWeek(weekOffsetFor(dayObj))}
+                ><CalendarDays size={16} /></button>
+              </div>
 
-                  <div className="day-popup-section">Requests touching this date</div>
+              {holiday && <div className="day-popup-holiday">★ {holiday}</div>}
+
+              <div className="day-page-split">
+                <div className="day-page-col">
+                  <div className="nr-label"><StickyNote size={13} /> Notes <span className="nr-count">{notes.length}</span></div>
+                  {!calendarNotesAvailable() ? (
+                    <div className="day-popup-empty">Notes need migration 0011 — run it to start adding them.</div>
+                  ) : (
+                    <>
+                      {notes.length === 0 && <div className="day-popup-empty">No notes on this date.</div>}
+                      <div className="rs-note-list day-page-notes">
+                        {notes.map((n) => (
+                          <div className="rs-note-row" key={n.id}>
+                            {calNoteEditId === n.id ? (
+                              <>
+                                <textarea
+                                  className="rs-note-edit"
+                                  rows={Math.min(9, Math.max(2,
+                                    Math.ceil(calNoteEditText.length / 60) + 1 + (calNoteEditText.match(/\n/g) || []).length))}
+                                  autoFocus
+                                  value={calNoteEditText}
+                                  onChange={(e) => setCalNoteEditText(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); saveCalendarNoteEdit(calDayIso, n.id); }
+                                    if (e.key === "Escape") setCalNoteEditId(null);
+                                  }}
+                                />
+                                <div className="rs-note-actions">
+                                  <button className="rs-note-btn" title="Save" onClick={() => saveCalendarNoteEdit(calDayIso, n.id)}><Check size={13} /></button>
+                                  <button className="rs-note-btn" title="Cancel" onClick={() => setCalNoteEditId(null)}><X size={13} /></button>
+                                </div>
+                              </>
+                            ) : (
+                              <>
+                                <button
+                                  className="rs-note-text"
+                                  title="Click to edit"
+                                  onClick={() => { setCalNoteEditId(n.id); setCalNoteEditText(n.note); }}
+                                >{n.note}</button>
+                                <div className="rs-note-actions">
+                                  <button className="rs-note-btn rs-note-del" title="Delete note" onClick={() => removeCalendarNote(calDayIso, n.id)}><X size={13} /></button>
+                                </div>
+                              </>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                      <div className="rs-note-add day-page-add">
+                        <input
+                          className="rs-note-input"
+                          placeholder="Add a note for this date…"
+                          value={calNoteDraft}
+                          onChange={(e) => setCalNoteDraft(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === "Enter") addCalendarNote(calDayIso); }}
+                        />
+                        <button className="publish-btn" disabled={!calNoteDraft.trim()} onClick={() => addCalendarNote(calDayIso)}>Add</button>
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                <div className="day-page-col">
+                  <div className="nr-label"><Clock size={13} /> Requests touching this date</div>
                   {items.length === 0 && <div className="day-popup-empty">No requests off, swaps, or coverage requests.</div>}
                   {items.map((it) => (
                     <div className="day-popup-item" key={`${it.id}-${it.status}`}>
@@ -5150,58 +5383,12 @@ export default function SchedulingHub({ session, onSignOut }) {
                       ))}
                     </>
                   )}
-
-                  {/* Notes for this specific date (brief item 7) */}
-                  {calendarNotesAvailable() && (
-                    <>
-                      <div className="day-popup-section">Notes</div>
-                      {(calNotes[d.iso] || []).map((n) => (
-                        <div className="cal-note-row" key={n.id}>
-                          <span className="cal-note-text">{n.note}</span>
-                          <button
-                            className="cal-note-del"
-                            title="Delete this note"
-                            onClick={() => removeCalendarNote(d.iso, n.id)}
-                          ><X size={12} /></button>
-                        </div>
-                      ))}
-                      {(calNotes[d.iso] || []).length === 0 && (
-                        <div className="day-popup-empty">No notes on this date.</div>
-                      )}
-                      <div className="cal-note-add">
-                        <input
-                          className="notes-input"
-                          placeholder="Add a note for this date…"
-                          value={calNoteDraft}
-                          onChange={(e) => setCalNoteDraft(e.target.value)}
-                          onKeyDown={(e) => { if (e.key === "Enter") addCalendarNote(d.iso); }}
-                        />
-                        <button
-                          className="publish-btn"
-                          disabled={!calNoteDraft.trim()}
-                          onClick={() => addCalendarNote(d.iso)}
-                        >Add</button>
-                      </div>
-                    </>
-                  )}
-
-                  <button
-                    className="publish-btn day-popup-week-btn"
-                    onClick={() => {
-                      const d = dayPopup.day;
-                      setCalDate(new Date(d.date.getFullYear(), d.date.getMonth(), 1));
-                      setDayPopup(null);
-                      zoomToWeek(weekOffsetFor(d.date));
-                    }}
-                  >
-                    View week
-                  </button>
                 </div>
               </div>
-            );
-          })()}
-        </div>
-      )}
+            </div>
+          </div>
+        );
+      })()}
 
       {tab === "calendar" && calView === "week" && activeWeek && (
         <div className="cal-wrap" key={`week-${weekIndex}`}>
@@ -5212,12 +5399,33 @@ export default function SchedulingHub({ session, onSignOut }) {
             <div className="week-header">
               <button className="back-btn" onClick={() => setCalView("month")}><ChevronLeft size={14} /> Back to month</button>
               <div className="week-range">{activeWeek[0].date.toLocaleDateString(undefined, MONTH_FMT)} – {activeWeek[6].date.toLocaleDateString(undefined, MONTH_FMT)}</div>
+              {/* Back to the date page this week was opened from (brief item 5).
+                  Only shown when we actually came from one. */}
+              {calDayIso && (
+                <button
+                  className="day-page-icon"
+                  title={`Back to ${shortDate(calDayIso)}'s notes`}
+                  onClick={() => setCalView("day")}
+                ><StickyNote size={16} /></button>
+              )}
               {/* Publishing lives on Set Schedule only — the Calendar is read-only.
                   A published week still shows its badge here for reference. */}
               {publishedWeekStarts.has(activeWeek[0].iso) && (
                 <span className="published-badge"><Check size={12} /> Published</span>
               )}
             </div>
+            {!isWeekViewable(activeWeek[0].iso) ? (
+              /* Item 6: an unfinalized future week is still a draft. Showing it
+                 here would read as a settled schedule, so the Calendar shows
+                 nothing until Set Schedule finalizes it (or the week passes). */
+              <div className="week-not-final">
+                <Calendar size={18} />
+                <div className="week-not-final-title">Schedule not finalized yet.</div>
+                <div className="week-not-final-sub">
+                  Finalize the week of {shortDate(activeWeek[0].iso)} on Set Schedule and it will appear here.
+                </div>
+              </div>
+            ) : (
             <table className="week-table">
               <thead>
                 <tr>
@@ -5268,6 +5476,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                 ))}
               </tbody>
             </table>
+            )}
           </div>
 
         </div>
@@ -5664,7 +5873,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                       className="today-btn"
                       disabled={tipDateIso === TODAY_ISO}
                       title={tipDateIso === TODAY_ISO ? "Already on today" : "Jump to today"}
-                      onClick={() => { setTipDateIso(TODAY_ISO); setTipSent(false); }}
+                      onClick={() => { setTipDateIso(TODAY_ISO); }}
                     >
                       Today
                     </button>
@@ -5681,19 +5890,19 @@ export default function SchedulingHub({ session, onSignOut }) {
                   <div className="tip-inputs" style={{ marginBottom: 0 }}>
                     <div className="tip-field">
                       <label>Floor Cash Tips</label>
-                      <input type="number" value={floorCash} onChange={(e) => { setFloorCash(e.target.value); setTipSent(false); }} placeholder="0.00" />
+                      <input type="number" value={floorCash} onChange={(e) => { setFloorCash(e.target.value); }} placeholder="0.00" />
                     </div>
                     <div className="tip-field">
                       <label>Floor CC Tips</label>
-                      <input type="number" value={floorCredit} onChange={(e) => { setFloorCredit(e.target.value); setTipSent(false); }} placeholder="0.00" />
+                      <input type="number" value={floorCredit} onChange={(e) => { setFloorCredit(e.target.value); }} placeholder="0.00" />
                     </div>
                     <div className="tip-field">
                       <label>Bar Cash Tips</label>
-                      <input type="number" value={barCash} onChange={(e) => { setBarCash(e.target.value); setTipSent(false); }} placeholder="0.00" />
+                      <input type="number" value={barCash} onChange={(e) => { setBarCash(e.target.value); }} placeholder="0.00" />
                     </div>
                     <div className="tip-field">
                       <label>Bar CC Tips</label>
-                      <input type="number" value={barCredit} onChange={(e) => { setBarCredit(e.target.value); setTipSent(false); }} placeholder="0.00" />
+                      <input type="number" value={barCredit} onChange={(e) => { setBarCredit(e.target.value); }} placeholder="0.00" />
                     </div>
                     <div className="tip-field">
                       <label>Covers</label>
@@ -5822,54 +6031,48 @@ export default function SchedulingHub({ session, onSignOut }) {
                   Distributed: ${money(totalDistributed)} of ${money(floorPool + barPool)} total pool (floor + bar). Host only earns their point if covers exceed 80 for the day. Expo and Host are paid flat — their hours aren't part of any pooled rate. Type times like "4:00 PM" or "9:30" — if you leave off AM/PM, it assumes PM. Clock times round to the nearest 15 minutes (≤7 min rounds down, ≥8 rounds up).
                 </div>
 
-                <div style={{ marginTop: 16, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-                  <span className="subject-preview">{tipSubject}</span>
-                  {tipSent ? (
-                    <span className="published-badge"><Check size={12} /> Sent</span>
-                  ) : (
-                    /* Opens the confirmation screen (brief item 5) — nothing is
-                       emailed until Confirm & Send there. */
-                    <button className="publish-btn" onClick={openTipSendModal}>Send Tip Sheet</button>
-                  )}
-                  <div style={{ marginLeft: "auto", display: "flex", gap: 10, alignItems: "center" }}>
-                    <SaveStatus state={tipSaveState} />
-                    <button
-                      className="print-btn save-btn"
-                      disabled={tipSaveState === "saving"}
-                      onClick={saveTipSheetNow}
-                      title="Write this sheet to Supabase now (it also autosaves 2s after you stop typing)"
-                    >
-                      {tipSaveState === "saving" ? "Saving…" : "Save"}
-                    </button>
-                    {/* Per-date lock — independent of Finalize, pressed again to
-                        unlock. Only this date is affected. */}
-                    <button
-                      className={`print-btn ${tipLocked ? "lock-active" : ""}`}
-                      disabled={tipLockBusy}
-                      onClick={toggleTipLock}
-                      title={tipLocked ? `Unlock ${shortDate(tipDateIso)}` : `Lock ${shortDate(tipDateIso)} — makes this date's inputs read-only`}
-                    >
-                      {tipLocked ? <Lock size={13} /> : <Unlock size={13} />}{" "}
-                      {tipLocked ? `Locked ✓ — ${shortDate(tipDateIso)}` : `Lock ${shortDate(tipDateIso)}`}
-                    </button>
-                    {tipFinalized ? (
-                      <button className="print-btn" style={{ background: "#B23A2F" }} onClick={unlockTipSheet}><Unlock size={13} /> Unlock</button>
-                    ) : (
-                      <button
-                        className="print-btn"
-                        style={{ background: "#4C6B4F" }}
-                        disabled={finalizing || tipLocked}
-                        onClick={finalizeTipSheet}
-                        title={tipLocked ? `Unlock ${shortDate(tipDateIso)} before finalizing` : "Email everyone who worked and lock the sheet"}
-                      >
-                        <Lock size={13} /> {finalizing ? "Finalizing…" : "Finalize"}
-                      </button>
-                    )}
-                    <button className="print-btn" disabled={pdfBusy === "tips"} onClick={exportTipSheetPdf}>
-                      <FileDown size={13} /> {pdfBusy === "tips" ? "Saving…" : "Save as PDF"}
-                    </button>
-                    <button className="print-btn" onClick={() => window.print()}><Printer size={13} /> Print</button>
-                  </div>
+                {/* Save · Lock · Send Tip Sheet · Save as PDF · Print (brief
+                    item 1). Finalize is gone: sending IS finalizing now, so the
+                    two buttons that used to mean almost the same thing became
+                    one. The subject preview went with it — the subject is
+                    editable on the send screen. */}
+                <div className="tip-actions">
+                  <SaveStatus state={tipSaveState} />
+                  <button
+                    className="print-btn save-btn"
+                    disabled={tipSaveState === "saving"}
+                    onClick={saveTipSheetNow}
+                    title="Write this sheet to Supabase now (it also autosaves 2s after you stop typing)"
+                  >
+                    {tipSaveState === "saving" ? "Saving…" : "Save"}
+                  </button>
+                  {/* Freeze or reopen this one date without emailing anyone.
+                      Unlocking also clears finalized, so a reopened sheet is
+                      genuinely editable again. */}
+                  <button
+                    className={`print-btn ${tipLocked ? "lock-active" : ""}`}
+                    disabled={tipLockBusy}
+                    onClick={toggleTipLock}
+                    title={tipLocked ? `Unlock ${shortDate(tipDateIso)} for edits` : `Lock ${shortDate(tipDateIso)} — makes this date's inputs read-only`}
+                  >
+                    {tipLocked ? <Unlock size={13} /> : <Lock size={13} />}{" "}
+                    {tipLocked ? `Unlock — ${shortDate(tipDateIso)}` : `Lock ${shortDate(tipDateIso)}`}
+                  </button>
+                  {/* Opens the confirmation screen — nothing is emailed until
+                      Confirm & Send there, which also finalizes and locks. */}
+                  <button
+                    className={`publish-btn ${tipSent ? "publish-btn-sent" : ""}`}
+                    onClick={openTipSendModal}
+                    title={tipSent ? "Already sent — you'll be asked to confirm before it goes out again" : "Review recipients and subject, then send"}
+                  >
+                    {tipSent ? (
+                      <><Check size={12} /> Sent ✓{tipSentAtLabel ? ` ${tipSentAtLabel}` : ""}</>
+                    ) : "Send Tip Sheet"}
+                  </button>
+                  <button className="print-btn" disabled={pdfBusy === "tips"} onClick={exportTipSheetPdf}>
+                    <FileDown size={13} /> {pdfBusy === "tips" ? "Saving…" : "Save as PDF"}
+                  </button>
+                  <button className="print-btn" onClick={() => window.print()}><Printer size={13} /> Print</button>
                 </div>
               </div>
             </div>

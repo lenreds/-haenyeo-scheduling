@@ -525,6 +525,14 @@ export async function insertCalendarNote(dateIso, note) {
   return data;
 }
 
+// calendar_notes has no updated_at column (migration 0011), so an edit is just
+// the note text — nothing else about the row changes.
+export async function updateCalendarNote(id, note) {
+  if (calendarNotesPresent === false) return;
+  const { error } = await supabase.from("calendar_notes").update({ note }).eq("id", id);
+  if (error && !isMissingTable(error)) throw error;
+}
+
 export async function deleteCalendarNote(id) {
   if (calendarNotesPresent === false) return;
   const { error } = await supabase.from("calendar_notes").delete().eq("id", id);
