@@ -658,12 +658,12 @@ export async function fetchScheduleWeeks() {
   // so the app still loads against a database that hasn't run it yet.
   let { data, error } = await supabase
     .from("schedule_weeks")
-    .select("week_start, section, finalized, published, locked");
+    .select("week_start, section, finalized, published, published_at, locked");
   if (error) {
     if (isMissingTable(error)) return [];
     ({ data, error } = await supabase
       .from("schedule_weeks")
-      .select("week_start, finalized, published"));
+      .select("week_start, finalized, published, published_at"));
     if (error) {
       if (isMissingTable(error)) return [];
       throw error;
@@ -688,13 +688,14 @@ async function upsertWeekRow(weekStartIso, section, fields, { legacy = false } =
   if (error && !isMissingTable(error)) throw error;
 }
 
+// Finalize marks a week as done and puts it on the Calendar; un-finalizing
+// takes it back off. Un-finalizing ALSO clears published/published_at: a week
+// that gets reopened, edited and re-finalized has to be publishable again, and
+// leaving it marked published would silently exclude it from the next send.
 export async function setWeekFinalized(weekStartIso, finalized) {
-  await upsertWeekRow(
-    weekStartIso,
-    WEEK_SECTION_ALL,
-    { finalized, finalized_at: finalized ? new Date().toISOString() : null },
-    { legacy: true }
-  );
+  const fields = { finalized, finalized_at: finalized ? new Date().toISOString() : null };
+  if (!finalized) { fields.published = false; fields.published_at = null; }
+  await upsertWeekRow(weekStartIso, WEEK_SECTION_ALL, fields, { legacy: true });
 }
 
 export async function setWeekPublished(weekStartIso) {

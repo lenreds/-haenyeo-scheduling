@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef } from "react";
-import { Check, X, AlertTriangle, Users, Package, Clock, ChevronLeft, ChevronRight, Printer, FileDown, Calendar, CalendarDays, StickyNote, Lock, Unlock, LogOut } from "lucide-react";
+import { Check, X, AlertTriangle, Users, Package, Clock, ChevronLeft, ChevronRight, Printer, FileDown, Calendar, CalendarDays, StickyNote, Receipt, Lock, Unlock, LogOut } from "lucide-react";
 import {
   fetchInitial,
   fetchRailRequests,
@@ -32,6 +32,7 @@ import {
   deleteScheduleNote,
   notesTableAvailable,
   fetchScheduleWeeks,
+  setWeekFinalized,
   setWeekPublished,
   setWeekSectionLocked,
   setRailArchived,
@@ -221,6 +222,10 @@ const PDF_PAGE_FILL_TARGET = 0.9;
 const TIP_PDF_BASE_WIDTH = 1080;
 const TIP_PDF_MIN_WIDTH = 820;
 const TIP_PDF_MAX_WIDTH = 1400;
+
+// How far back Set Schedule lets you navigate (brief item 2). Anything older
+// lives on the Calendar, which is read-only by design.
+const SCHEDULE_LOOKBACK_WEEKS = 2;
 
 /* ---- Save / autosave status pill (brief item 3) ---- */
 // How long after the last edit a background save fires.
@@ -1156,6 +1161,9 @@ export default function SchedulingHub({ session, onSignOut }) {
   // whichever date opened it.
   const [calView, setCalView] = useState("month");
   const [calDayIso, setCalDayIso] = useState(null); // the date whose page is open
+  // Set when the Tip Sheet was opened from a Calendar date page (brief item 4),
+  // so the sheet can show a way back. Cleared once you leave that date.
+  const [tipFromDayIso, setTipFromDayIso] = useState(null);
   // Month/year being viewed. Opens on the CURRENT month (brief item 4) — it used
   // to be pinned to the July 2026 sample week, so the calendar always landed on
   // a month nobody was looking for.
@@ -1224,7 +1232,10 @@ export default function SchedulingHub({ session, onSignOut }) {
   const [shiftAddLabel, setShiftAddLabel] = useState("");
   const [shiftMsg, setShiftMsg] = useState("");
   // Today at a Glance swap dialog (brief item 5)
-  const [swapModal, setSwapModal] = useState(null); // { name, role, code } | null
+  // Which day the "Today at a Glance" box is showing (brief item 7). Driven by
+  // the 7-day strip; today until someone picks another day.
+  const [glanceIso, setGlanceIso] = useState(TODAY_ISO);
+  const [swapModal, setSwapModal] = useState(null); // { name, role, code, dateIso } | null
   const [swapForm, setSwapForm] = useState({ withName: "", shift: "", note: "" });
   const [swapBusy, setSwapBusy] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -1445,12 +1456,12 @@ export default function SchedulingHub({ session, onSignOut }) {
     }
   }
 
-  // ---- Today at a Glance (brief item 5) -----------------------------------
-  // Who is actually on the floor today, read through the same per-week
-  // resolution the Calendar and Tip Sheet use. This replaced a hardcoded demo
-  // list — swapping people needs real names to act on.
-  const todayRoster = useMemo(() => {
-    const di = dateInfoFromIso(TODAY_ISO);
+  // ---- Today at a Glance --------------------------------------------------
+  // Who is on the floor on the day picked in the 7-day strip (brief item 7),
+  // defaulting to today. Read through the same per-week resolution the Calendar
+  // and Tip Sheet use, so all three agree about a day.
+  const glanceRoster = useMemo(() => {
+    const di = dateInfoFromIso(glanceIso);
     const pats = patternsForDate(di);
     return fohRoster
       .map((p) => {
@@ -1458,7 +1469,12 @@ export default function SchedulingHub({ session, onSignOut }) {
         return { name: p.name, role: p.role, code: shift.type, swapped: !!shift.swap };
       })
       .filter((r) => r.code && r.code !== "OFF");
-  }, [fohRoster, patterns, weeklyPatterns, overrides]);
+  }, [fohRoster, patterns, weeklyPatterns, overrides, glanceIso]);
+  const glanceIsToday = glanceIso === TODAY_ISO;
+  // "THURSDAY, SEP 24" for any other day; today stays the familiar label.
+  const glanceHeading = glanceIsToday
+    ? "Today at a Glance"
+    : new Date(`${glanceIso}T00:00:00`).toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
 
   // Primary role for a staff member, used to pick their shift dropdown.
   function primaryRoleOf(name) {
@@ -1467,12 +1483,14 @@ export default function SchedulingHub({ session, onSignOut }) {
     return staffList.find((s) => s.name === name)?.role || "Servers";
   }
 
+  // The swap acts on whichever day the glance box is showing, so the modal
+  // carries that date rather than assuming today (brief item 7).
   function openSwap(entry) {
-    setSwapModal(entry);
+    setSwapModal({ ...entry, dateIso: glanceIso });
     setSwapForm({ withName: "", shift: "", note: "" });
   }
 
-  // Replace one person's shift today with someone else's. Writes an OFF
+  // Replace one person's shift on that date with someone else's. Writes an OFF
   // override for the person coming off and the chosen shift for the person
   // going on. Supabase-js can't wrap two client-side writes in a transaction,
   // so the second failure rolls the first back rather than leaving the day with
@@ -1484,7 +1502,9 @@ export default function SchedulingHub({ session, onSignOut }) {
     const code = swapForm.shift;
     if (!inName || !code) return;
 
-    const dateLabel = new Date(`${TODAY_ISO}T00:00:00`).toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
+    // Older modals (opened before this field existed) fall back to today.
+    const dateIso = swapModal.dateIso || TODAY_ISO;
+    const dateLabel = new Date(`${dateIso}T00:00:00`).toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
     const ok = window.confirm(
       `This will update ${outName}'s shift on ${dateLabel} on the finalized schedule and tip sheet. ` +
       `This change cannot be automatically undone. Are you sure?`
@@ -1500,28 +1520,28 @@ export default function SchedulingHub({ session, onSignOut }) {
     setSwapBusy(true);
     const prevOverrides = overrides;
     try {
-      await upsertScheduleOverride({ staffId: outId, dateIso: TODAY_ISO, overrideType: "OFF", isSwap: false, railRequestId: null });
+      await upsertScheduleOverride({ staffId: outId, dateIso, overrideType: "OFF", isSwap: false, railRequestId: null });
       try {
-        await upsertScheduleOverride({ staffId: inId, dateIso: TODAY_ISO, overrideType: code, isSwap: true, railRequestId: null });
+        await upsertScheduleOverride({ staffId: inId, dateIso, overrideType: code, isSwap: true, railRequestId: null });
       } catch (e) {
         // Put the first person back rather than leaving the shift uncovered.
         await upsertScheduleOverride({
-          staffId: outId, dateIso: TODAY_ISO,
-          overrideType: prevOverrides[`${outName}|${TODAY_ISO}`]?.type ?? swapModal.code,
+          staffId: outId, dateIso,
+          overrideType: prevOverrides[`${outName}|${dateIso}`]?.type ?? swapModal.code,
           isSwap: false, railRequestId: null,
         }).catch(() => {});
         throw e;
       }
       setOverrides((o) => ({
         ...o,
-        [`${outName}|${TODAY_ISO}`]: { type: "OFF", swap: false, railId: null },
-        [`${inName}|${TODAY_ISO}`]: { type: code, swap: true, railId: null },
+        [`${outName}|${dateIso}`]: { type: "OFF", swap: false, railId: null },
+        [`${inName}|${dateIso}`]: { type: code, swap: true, railId: null },
       }));
 
       // Leave a trail on the week — this is not automatically reversible.
       const label = shiftLabelForType(code);
       const extra = swapForm.note.trim() ? ` — ${swapForm.note.trim()}` : "";
-      await addSwapNote(`${outName} off, ${inName} on ${label} (${dateLabel})${extra}`);
+      await addSwapNote(`${outName} off, ${inName} on ${label} (${dateLabel})${extra}`, dateIso);
       addLog(`Swapped ${outName} → ${inName} (${label}) for ${dateLabel}`, "good");
       setSwapModal(null);
     } catch (e) {
@@ -1532,8 +1552,9 @@ export default function SchedulingHub({ session, onSignOut }) {
     setSwapBusy(false);
   }
 
-  async function addSwapNote(text) {
-    const ws = iso(mondayOf(new Date()));
+  // The note belongs to the week the swapped day falls in, not to this week.
+  async function addSwapNote(text, dateIso = TODAY_ISO) {
+    const ws = iso(mondayOf(new Date(`${dateIso}T00:00:00`)));
     try {
       const row = await insertScheduleNote({ weekStartIso: ws, note: text });
       if (row) setNotesByWeek((prev) => ({ ...prev, [ws]: [row, ...(prev[ws] || [])] }));
@@ -2044,11 +2065,21 @@ export default function SchedulingHub({ session, onSignOut }) {
   const lockKeyFor = (weekStartIso, sectionKey) => `${weekStartIso}|${sectionKey}`;
   const isSectionLocked = (weekStartIso, sectionKey) => lockedSectionWeeks.has(lockKeyFor(weekStartIso, sectionKey));
   const scheduleLocked = isSectionLocked(activeWeekStart, scheduleView); // week + sub-tab on screen
+  // Look-back limit (brief item 2): Set Schedule reaches 2 weeks back and no
+  // further; older weeks are Calendar territory. Those past weeks are visible
+  // but frozen — a week that has already been worked isn't something to edit.
+  // Forward navigation is unlimited.
+  const schedulePastWeek = weekIndex < 0;
+  const atOldestScheduleWeek = weekIndex <= -SCHEDULE_LOOKBACK_WEEKS;
+  // One flag for "these cells don't take input", whatever the reason.
+  const scheduleFrozen = scheduleLocked || schedulePastWeek;
   // Which lock applies to a given placeholder group.
   const groupLockKey = (groupKey) => (groupKey === "management" ? "management" : "bohkitchen");
   const [finalizedWeeks, setFinalizedWeeks] = useState(new Set()); // { "2026-07-13" }
   const [loadError, setLoadError] = useState("");
   const [publishedWeekStarts, setPublishedWeekStarts] = useState(new Set());
+  const [publishedAtByWeek, setPublishedAtByWeek] = useState({}); // weekStart -> iso
+  const [finalizeBusy, setFinalizeBusy] = useState(false);
 
   // Load everything from Supabase on mount. DB values win where present;
   // anything the DB doesn't have falls back to the seed constants so the UI is
@@ -2281,6 +2312,12 @@ export default function SchedulingHub({ session, onSignOut }) {
         if (cancelled) return;
         setFinalizedWeeks(new Set(rows.filter((r) => r.finalized).map((r) => r.week_start)));
         setPublishedWeekStarts(new Set(rows.filter((r) => r.published).map((r) => r.week_start)));
+        // When each week's emails went out, for the "Published ✓ Sep 21, 4:02 PM"
+        // badge (brief item 3). Weeks published before published_at was read
+        // back simply have no timestamp and fall back to the button.
+        const pubAt = {};
+        rows.forEach((r) => { if (r.published && r.published_at) pubAt[r.week_start] = r.published_at; });
+        setPublishedAtByWeek(pubAt);
         const locks = new Set();
         rows.forEach((r) => {
           if (!r.locked) return;
@@ -2564,28 +2601,54 @@ export default function SchedulingHub({ session, onSignOut }) {
     setPdfBusy(null);
   }
 
+  // Finalize is the Calendar gate and nothing else (brief item 3): it puts the
+  // week on the Calendar, and pressing it again takes it back off. No email.
+  //
+  // Un-finalizing also clears the week's published state (in setWeekFinalized),
+  // so the reopen → edit → re-finalize → Publish loop actually re-sends instead
+  // of the week being stuck as "already published".
+  //
+  // This writes through data.js rather than /api/finalize-week: that endpoint
+  // still keys schedule_weeks on week_start with a null section, which is the
+  // shape from migration 0009 — 0013 moved the key to (week_start, section) and
+  // made section NOT NULL. The client path handles both, with a legacy fallback.
   async function toggleWeekFinalized() {
-    if (!activeWeek || !session?.access_token) return;
+    if (!activeWeek || finalizeBusy) return;
     const weekStart = activeWeek[0].iso; // Monday of week
+    const next = !finalizedWeeks.has(weekStart);
+    if (!next && publishedWeekStarts.has(weekStart) && !window.confirm(
+      `Un-finalize the week of ${shortDate(weekStart)}? It comes off the Calendar, and because it will need publishing again, its "published" mark is cleared. Emails already sent are not recalled.`
+    )) return;
+
+    setFinalizeBusy(true);
     try {
-      const res = await fetch("/api/finalize-week", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
-        body: JSON.stringify({ weekStart, section: null }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const { finalized } = await res.json();
+      await setWeekFinalized(weekStart, next);
       setFinalizedWeeks((prev) => {
-        const next = new Set(prev);
-        if (finalized) next.add(weekStart);
-        else next.delete(weekStart);
-        return next;
+        const s = new Set(prev);
+        if (next) s.add(weekStart); else s.delete(weekStart);
+        return s;
       });
-      addLog(`Week ${weekStart} ${finalized ? "finalized" : "unfinalized"}`, "good");
+      if (!next) {
+        setPublishedWeekStarts((prev) => {
+          const s = new Set(prev);
+          s.delete(weekStart);
+          return s;
+        });
+        setPublishedAtByWeek((prev) => {
+          const m = { ...prev };
+          delete m[weekStart];
+          return m;
+        });
+      }
+      addLog(
+        `Week of ${shortDate(weekStart)} ${next ? "finalized — now on the Calendar" : "un-finalized — off the Calendar"}`,
+        next ? "good" : "warn"
+      );
     } catch (e) {
       console.error("Finalize toggle failed:", e);
       addLog(`Finalize failed: ${e.message}`, "warn");
     }
+    setFinalizeBusy(false);
   }
 
   // Lock/unlock one section of one week. Independent of Finalize — a week can be
@@ -2625,8 +2688,10 @@ export default function SchedulingHub({ session, onSignOut }) {
     if (publishBusy) return;
     const token = session?.access_token;
     if (!token) { addLog("Sign in to publish", "warn"); return; }
-    const starts = [...finalizedWeeks].sort();
-    if (!starts.length) { addLog("No finalized weeks to publish", "warn"); return; }
+    // Finalized AND not already sent (brief item 3) — publishing twice would
+    // re-email staff a schedule they already have.
+    const starts = unpublishedFinalizedWeeks;
+    if (!starts.length) { addLog("No finalized weeks waiting to be published", "warn"); return; }
 
     setPublishBusy(true);
     try {
@@ -2658,8 +2723,14 @@ export default function SchedulingHub({ session, onSignOut }) {
         addLog(`Publish email issue (${err})`, "warn");
       } else {
         // Only mark published once the sends actually came back clean.
+        const publishedAt = new Date().toISOString();
         await Promise.all(starts.map((s) => setWeekPublished(s).catch(() => {})));
         setPublishedWeekStarts((prev) => new Set([...prev, ...starts]));
+        setPublishedAtByWeek((prev) => {
+          const m = { ...prev };
+          starts.forEach((s) => { m[s] = publishedAt; });
+          return m;
+        });
         const n = starts.length;
         addLog(`Published ${n} week${n === 1 ? "" : "s"} — FOH ${fohRes?.sent ?? 0}, BOH & Kitchen ${bkRes?.sent ?? 0}`, "good");
       }
@@ -2779,7 +2850,7 @@ export default function SchedulingHub({ session, onSignOut }) {
     })();
   }
   function setPlaceholderShift(groupKey, slotIdx, weekday, newType) {
-    if (isSectionLocked(activeWeekStart, groupLockKey(groupKey))) return;
+    if (schedulePastWeek || isSectionLocked(activeWeekStart, groupLockKey(groupKey))) return;
     const personName = (groupRosters[groupKey] || [])[slotIdx];
     const blk = newType !== "OFF" && personName ? approvedOffFor(personName, weekday) : null;
     if (blk) {
@@ -2810,7 +2881,7 @@ export default function SchedulingHub({ session, onSignOut }) {
   }
 
   function toggleManagementCell(slotIdx, weekday) {
-    if (isSectionLocked(activeWeekStart, "management")) return;
+    if (schedulePastWeek || isSectionLocked(activeWeekStart, "management")) return;
     const name = (groupRosters.management || [])[slotIdx];
     const current = activePlaceholders.management?.[slotIdx]?.[weekday] || "OFF";
     if (current === "OFF") {
@@ -2848,7 +2919,7 @@ export default function SchedulingHub({ session, onSignOut }) {
               <select
                 className="cell-select shift-select"
                 value={value}
-                disabled={scheduleLocked}
+                disabled={scheduleFrozen}
                 style={value === "OFF" ? undefined : roleCellStyle(workedRole)}
                 onChange={(e) => setPlaceholderShift(groupKey, idx, realWeekday, e.target.value)}
               >
@@ -3114,6 +3185,14 @@ export default function SchedulingHub({ session, onSignOut }) {
     setWeekIndex(idx);
     setCalView("week");
   }
+  // Jump to a date's Tip Sheet from the Calendar (brief item 4). Remembers
+  // where we came from so the sheet can offer a way back to the date page.
+  function openTipSheetForDate(dateIso) {
+    setTipDateIso(dateIso);
+    setTipFromDayIso(dateIso);
+    setTab("tips");
+  }
+
   // Open a date's notes page (brief item 5). Keeps the month grid pointed at
   // that date's month so "Back to month" lands where you'd expect.
   function openDayPage(dateObj) {
@@ -3343,7 +3422,7 @@ export default function SchedulingHub({ session, onSignOut }) {
     })();
   }
   function setCellShift(name, weekday, code) {
-    if (isSectionLocked(activeWeekStart, "foh")) return; // FOH grid, this week only
+    if (schedulePastWeek || isSectionLocked(activeWeekStart, "foh")) return; // FOH grid, this week only
 
     const blk = code !== "OFF" ? approvedOffFor(name, weekday) : null;
     if (blk) {
@@ -3358,7 +3437,7 @@ export default function SchedulingHub({ session, onSignOut }) {
   // role picker changed: remember the choice and reset the cell's shift if the
   // current code belongs to a different role
   function setCellRole(name, weekday, role) {
-    if (isSectionLocked(activeWeekStart, "foh")) return;
+    if (schedulePastWeek || isSectionLocked(activeWeekStart, "foh")) return;
     setCellRoleSel((prev) => ({ ...prev, [`${name}|${weekday}`]: role }));
     const current = (activePatterns[name] || ALL_OFF_WEEK)[weekday];
     if (current !== "OFF" && roleFromCode(current) !== role) {
@@ -3501,9 +3580,14 @@ export default function SchedulingHub({ session, onSignOut }) {
 
   const activeWeek = buildWeekByOffset(weekIndex);
   const weekIsFinalized = finalizedWeeks.has(activeWeekStart);
-  // Publish is gated on the CURRENT week specifically, not the one on screen —
-  // you can be looking at any week and still send the finalized batch.
-  const currentWeekFinalized = finalizedWeeks.has(iso(mondayOf(new Date())));
+  const weekPublishedAt = publishedWeekStarts.has(activeWeekStart) ? publishedAtByWeek[activeWeekStart] : null;
+  // Publish is gated on the week ON SCREEN being finalized — current or future,
+  // not just this week (brief item 3) — and sends every finalized week that
+  // hasn't gone out yet. Past weeks are excluded: Publish isn't offered there.
+  const unpublishedFinalizedWeeks = useMemo(
+    () => [...finalizedWeeks].filter((w) => !publishedWeekStarts.has(w)).sort(),
+    [finalizedWeeks, publishedWeekStarts]
+  );
 
   return (
     <div className="hub">
@@ -3518,7 +3602,6 @@ export default function SchedulingHub({ session, onSignOut }) {
         .hub-icon { height: 30px; width: auto; }
         .template-icon { height: 46px; width: auto; display: block; margin: 4px 0 10px; }
         .hub-title { font-family: 'Space Mono', monospace; font-weight: 700; font-size: 22px; letter-spacing: 4px; color: #EDE7D9; }
-        .hub-title span { color: #C98A3E; }
         .hub-date { font-family: 'Space Mono', monospace; font-size: 12px; letter-spacing: 1px; color: #A79E8C; }
 
         .tabs { max-width: 1180px; margin: 0 auto 28px; display: flex; gap: 22px; border-bottom: 1px solid rgba(237,231,217,0.14); }
@@ -4055,6 +4138,13 @@ export default function SchedulingHub({ session, onSignOut }) {
         .print-btn.finalized-active { background: #5a8a6a; border-color: #5a8a6a; color: #fff; }
         .week-finalized-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #5a8a6a; margin-left: 6px; vertical-align: middle; }
         .week-range-finalized { color: #5a8a6a; }
+        /* Past week on Set Schedule — read-only, no edit controls (item 2). */
+        .past-week-tag {
+          display: inline-flex; align-items: center; gap: 6px;
+          font-family: 'Space Mono', monospace; font-size: 10.5px; letter-spacing: 1px;
+          text-transform: uppercase; color: #8c8574;
+          background: rgba(140,133,116,0.12); border-radius: 20px; padding: 5px 12px;
+        }
         .qr-img { width: 260px; height: 260px; max-width: 100%; background: #fff; border-radius: 8px; padding: 8px; }
         .qr-loading { height: 260px; display: flex; align-items: center; justify-content: center; color: #8c8574; }
         .qr-caption { font-size: 12px; color: #5c625f; margin-top: 10px; }
@@ -4121,7 +4211,6 @@ export default function SchedulingHub({ session, onSignOut }) {
           max-width: none; margin: 0; padding: 16px 28px; align-items: center;
         }
         .hub-title { color: var(--txt); font-size: 15px; letter-spacing: 3px; }
-        .hub-title span { color: var(--accent); }
         .hub-date { color: var(--txt2); }
         .hub-icon { height: 26px; }
         .tabs {
@@ -4295,7 +4384,10 @@ export default function SchedulingHub({ session, onSignOut }) {
         .week-not-final-sub { font-size: 12px; max-width: 380px; }
 
         .rs-strip { display: flex; gap: 4px; padding: 12px 20px; border-bottom: 1px solid var(--line); }
-        .rs-day { flex: 1; text-align: center; padding: 7px 2px 5px; border-radius: 8px; }
+        /* Each day is a button now (brief item 7) — reset the button chrome so
+           it still reads as a strip, not a row of controls. */
+        .rs-day { flex: 1; text-align: center; padding: 7px 2px 5px; border-radius: 8px; background: none; border: none; font-family: inherit; cursor: pointer; }
+        .rs-day:hover:not(.rs-day-today) { background: var(--s2); }
         .rs-day-today { background: rgba(200,149,108,0.12); }
         .rs-day-name { font-family: 'Space Mono', monospace; font-size: 9px; letter-spacing: 1px; text-transform: uppercase; color: var(--muted); }
         .rs-day-num { font-family: 'Space Mono', monospace; font-weight: 700; font-size: 14px; color: var(--txt); margin-top: 2px; }
@@ -4382,8 +4474,13 @@ export default function SchedulingHub({ session, onSignOut }) {
         .rs-log .nr-log-row { font-size: 11px; }
         /* Notes box (brief item 2): taller, full-size text, no dates, and edited
            in place. The list scrolls; the add-field is pinned under it. */
-        .rs-notes { display: flex; flex-direction: column; gap: 8px; max-height: 420px; }
-        .rs-note-list { display: flex; flex-direction: column; gap: 6px; overflow-y: auto; max-height: 340px; padding-right: 2px; }
+        /* Fixed, comfortable height rather than growing down the whole column
+           (brief item 6) — the list scrolls inside, the add-field stays pinned
+           under it so it never scrolls out of reach. */
+        .rs-notes { display: flex; flex-direction: column; gap: 8px; height: 268px; }
+        .rs-note-list { display: flex; flex-direction: column; gap: 6px; overflow-y: auto; flex: 1; min-height: 0; padding-right: 2px; }
+        /* Empty state takes the same space, so the add-field doesn't jump up. */
+        .rs-notes > .rs-log-empty { flex: 1; }
         .rs-note-row { display: flex; align-items: flex-start; gap: 4px; }
         .rs-note-text {
           flex: 1; min-width: 0; text-align: left; font-family: inherit; font-size: 13px; line-height: 1.45;
@@ -4609,7 +4706,8 @@ export default function SchedulingHub({ session, onSignOut }) {
       <div className="hub-header">
         <div className="hub-brand">
           <img src={HAENYEO_ICON} alt="Haenyeo" className="hub-icon" />
-          <div className="hub-title">HAENYEO <span>/ SCHEDULING</span></div>
+          {/* Brand is the mark plus the name — nothing else (brief item 1). */}
+          <div className="hub-title">HAENYEO</div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
           <div className="hub-date">TODAY — {TODAY_HEADER}</div>
@@ -4690,16 +4788,27 @@ export default function SchedulingHub({ session, onSignOut }) {
               })()}
             </div>
 
-            {/* ---- 7-day strip: today tinted + dot, pending markers per day ---- */}
+            {/* ---- 7-day strip: pick a day to load it below (brief item 7).
+                 The selected day carries the highlight; today keeps its dot
+                 whether or not it's the one selected, so you never lose track
+                 of where today is. ---- */}
             <div className="rs-strip">
               {weekStrip.map((d, i) => {
                 const holidayName = holidayFor(d.iso);
                 const nPending = railItemsForDate(d.iso).filter((x) => x.status === "pending").length;
+                const selected = d.iso === glanceIso;
                 return (
-                  <div
-                    className={`rs-day ${i === 0 ? "rs-day-today" : ""}`}
+                  <button
+                    type="button"
+                    className={`rs-day ${selected ? "rs-day-today" : ""}`}
                     key={d.iso}
-                    title={[holidayName, nPending ? `${nPending} pending` : ""].filter(Boolean).join(" · ")}
+                    onClick={() => setGlanceIso(d.iso)}
+                    aria-pressed={selected}
+                    title={[
+                      `Show ${d.date.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" })}`,
+                      holidayName,
+                      nPending ? `${nPending} pending` : "",
+                    ].filter(Boolean).join(" · ")}
                   >
                     <div className="rs-day-name">{d.label}</div>
                     <div className="rs-day-num">{d.num}</div>
@@ -4708,7 +4817,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                       {nPending > 0 && <span className="rs-mark rs-mark-pending" />}
                       {holidayName && <span className="rs-mark rs-mark-holiday" />}
                     </div>
-                  </div>
+                  </button>
                 );
               })}
             </div>
@@ -4722,7 +4831,9 @@ export default function SchedulingHub({ session, onSignOut }) {
                 and vice versa. */}
             {calendarNotesAvailable() && (
               <div className="rs-quicknote">
-                <span className="rs-quicknote-label"><Calendar size={13} /> Date note</span>
+                {/* Icon only — the date picker and the placeholder already say
+                    what this is (brief item 5). */}
+                <span className="rs-quicknote-label" title="Add a note to a date on the Calendar"><Calendar size={15} /></span>
                 <input
                   className="rs-quicknote-date"
                   type="date"
@@ -4750,14 +4861,21 @@ export default function SchedulingHub({ session, onSignOut }) {
             {/* ---- Dark Split: queue | detail | log+notes ---- */}
             <div className="rs-grid">
 
-              {/* LEFT — who is actually on the floor today */}
+              {/* LEFT — who is on the floor on the day picked in the strip */}
               <div className="rs-col-left">
-                <div className="nr-label"><Users size={13} /> Today at a Glance</div>
-                <div className="nr-panel">
-                  {todayRoster.length === 0 && (
-                    <div className="rs-log-empty">Nobody is scheduled today.</div>
+                <div className="nr-label">
+                  <Users size={13} /> {glanceHeading}
+                  {!glanceIsToday && (
+                    <button className="rs-clear" onClick={() => setGlanceIso(TODAY_ISO)} title="Back to today">Today</button>
                   )}
-                  {todayRoster.map((r) => (
+                </div>
+                <div className="nr-panel">
+                  {glanceRoster.length === 0 && (
+                    <div className="rs-log-empty">
+                      Nobody is scheduled {glanceIsToday ? "today" : `on ${shortDate(glanceIso)}`}.
+                    </div>
+                  )}
+                  {glanceRoster.map((r) => (
                     <div className="nr-row" key={r.name}>
                       <span>
                         <span className="nr-dot" style={r.code === "GAP" ? { background: "#B23A2F" } : undefined} />
@@ -4767,7 +4885,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                         {r.code === "GAP" ? "Coverage gap" : shiftLabelForType(r.code)}
                         <button
                           className="swap-icon-btn"
-                          title={`Swap ${r.name} out for today`}
+                          title={`Swap ${r.name} out for ${glanceIsToday ? "today" : shortDate(glanceIso)}`}
                           onClick={() => openSwap(r)}
                         >⇄</button>
                       </span>
@@ -5296,6 +5414,14 @@ export default function SchedulingHub({ session, onSignOut }) {
                   title="Open this date's week schedule"
                   onClick={() => zoomToWeek(weekOffsetFor(dayObj))}
                 ><CalendarDays size={16} /></button>
+                {/* This date's Tip Sheet (brief item 4). The sheet itself decides
+                    whether it's editable — a sent or locked date is already
+                    read-only there, so nothing extra is needed here. */}
+                <button
+                  className="day-page-icon"
+                  title="Open this date's Tip Sheet"
+                  onClick={() => openTipSheetForDate(calDayIso)}
+                ><Receipt size={16} /></button>
               </div>
 
               {holiday && <div className="day-popup-holiday">★ {holiday}</div>}
@@ -5487,62 +5613,96 @@ export default function SchedulingHub({ session, onSignOut }) {
           <div className="cal-card" ref={scheduleCardRef}>
             <div className="print-header">
               <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <SaveStatus state={schedSaveState} />
-                <button
-                  className="print-btn save-btn"
-                  disabled={schedSaveState === "saving"}
-                  onClick={saveScheduleNow}
-                  title={`Write the week of ${shortDate(activeWeekStart)} to Supabase now (cells also save as you click them)`}
-                >
-                  {schedSaveState === "saving" ? "Saving…" : "Save"}
-                </button>
+                {/* Nothing on a past week can become dirty, so Save and its
+                    status go with the other edit controls (brief item 2).
+                    Print / PDF / Notes stay — those only read. */}
+                {!schedulePastWeek && (
+                  <>
+                    <SaveStatus state={schedSaveState} />
+                    <button
+                      className="print-btn save-btn"
+                      disabled={schedSaveState === "saving"}
+                      onClick={saveScheduleNow}
+                      title={`Write the week of ${shortDate(activeWeekStart)} to Supabase now (cells also save as you click them)`}
+                    >
+                      {schedSaveState === "saving" ? "Saving…" : "Save"}
+                    </button>
+                  </>
+                )}
                 <button className="print-btn" onClick={printSchedule}><Printer size={13} /> Print</button>
                 <button className="print-btn" disabled={pdfBusy === "schedule"} onClick={exportSchedulePdf}>
                   <FileDown size={13} /> {pdfBusy === "schedule" ? "Saving…" : "Save as PDF"}
                 </button>
-                {/* Locks the sub-tab on screen for the week on screen only — the
-                    other two sections, and every other week, are unaffected. */}
-                <button
-                  className={`print-btn ${scheduleLocked ? "lock-active" : ""}`}
-                  onClick={toggleSectionLock}
-                  title={
-                    scheduleLocked
-                      ? `Unlock ${SECTION_LABEL[scheduleView]} for the week of ${shortDate(activeWeekStart)}`
-                      : `Lock ${SECTION_LABEL[scheduleView]} for the week of ${shortDate(activeWeekStart)} only`
-                  }
-                >
-                  {scheduleLocked ? <Lock size={13} /> : <Unlock size={13} />}{" "}
-                  {scheduleLocked
-                    ? `Locked ✓ — ${shortDate(activeWeekStart)}`
-                    : `Lock ${SECTION_LABEL[scheduleView]} — ${shortDate(activeWeekStart)}`}
-                </button>
-                <button
-                  className={`print-btn ${weekIsFinalized ? "finalized-active" : ""}`}
-                  onClick={toggleWeekFinalized}
-                  title={weekIsFinalized ? "Un-finalize this week" : "Mark this week as ready to publish (does not send anything)"}
-                >
-                  {weekIsFinalized ? "✓ Finalized" : "Finalize"}
-                </button>
+                {/* Lock / Finalize / Publish are all edit-state controls, so a
+                    past week shows none of them (brief item 2) — just a label
+                    saying why the grid won't respond. */}
+                {schedulePastWeek ? (
+                  <span className="past-week-tag"><Lock size={12} /> Past week — view only</span>
+                ) : (
+                  <>
+                    {/* Locks the sub-tab on screen for the week on screen only — the
+                        other two sections, and every other week, are unaffected. */}
+                    <button
+                      className={`print-btn ${scheduleLocked ? "lock-active" : ""}`}
+                      onClick={toggleSectionLock}
+                      title={
+                        scheduleLocked
+                          ? `Unlock ${SECTION_LABEL[scheduleView]} for the week of ${shortDate(activeWeekStart)}`
+                          : `Lock ${SECTION_LABEL[scheduleView]} for the week of ${shortDate(activeWeekStart)} only`
+                      }
+                    >
+                      {scheduleLocked ? <Lock size={13} /> : <Unlock size={13} />}{" "}
+                      {scheduleLocked
+                        ? `Locked ✓ — ${shortDate(activeWeekStart)}`
+                        : `Lock ${SECTION_LABEL[scheduleView]} — ${shortDate(activeWeekStart)}`}
+                    </button>
+                    {/* Finalize is purely a Calendar gate (brief item 3): it puts
+                        the week on the Calendar and takes it off again. No email
+                        is sent either way — that's Publish. */}
+                    <button
+                      className={`print-btn ${weekIsFinalized ? "finalized-active" : ""}`}
+                      disabled={finalizeBusy}
+                      onClick={toggleWeekFinalized}
+                      title={
+                        weekIsFinalized
+                          ? "Un-finalize — removes this week from the Calendar and clears its published state so it can be sent again"
+                          : "Mark this week final so it shows on the Calendar (sends no email)"
+                      }
+                    >
+                      {finalizeBusy ? "Saving…" : weekIsFinalized ? "✓ Finalized" : "Finalize"}
+                    </button>
+                  </>
+                )}
                 {notesTableAvailable() && (
                   <button className="print-btn" onClick={() => setNotesWeek(activeWeekStart)} title="Notes for this week">
                     Notes ({weekNotes.length})
                   </button>
                 )}
-                {/* Publish lives here only, never on the Calendar. It sends every
-                    finalized week at once, so it stays visible on any week and is
-                    gated on the CURRENT week being finalized. */}
-                <button
-                  className="publish-btn"
-                  disabled={publishBusy || !currentWeekFinalized}
-                  onClick={publishFinalizedWeeks}
-                  title={
-                    currentWeekFinalized
-                      ? `Send schedule emails for ${finalizedWeeks.size} finalized week${finalizedWeeks.size === 1 ? "" : "s"}`
-                      : "Finalize the current week before publishing"
-                  }
-                >
-                  {publishBusy ? "Sending…" : `Publish (${finalizedWeeks.size})`}
-                </button>
+                {/* Publish lives here only, never on the Calendar. It emails every
+                    finalized week that hasn't gone out yet, and is enabled on ANY
+                    finalized week on screen — current or future (brief item 3). */}
+                {!schedulePastWeek && (
+                  weekPublishedAt && weekIsFinalized ? (
+                    <span className="published-badge" title={`Schedule emails sent ${new Date(weekPublishedAt).toLocaleString()}`}>
+                      <Check size={12} /> Published ✓ {new Date(weekPublishedAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+                    </span>
+                  ) : (
+                    <button
+                      className="publish-btn"
+                      disabled={publishBusy || !weekIsFinalized || unpublishedFinalizedWeeks.length === 0}
+                      onClick={publishFinalizedWeeks}
+                      title={
+                        !weekIsFinalized
+                          ? "Finalize this week before publishing"
+                          : unpublishedFinalizedWeeks.length === 0
+                          ? "Every finalized week has already been published"
+                          : `Send schedule emails for ${unpublishedFinalizedWeeks.length} finalized week${unpublishedFinalizedWeeks.length === 1 ? "" : "s"}`
+                      }
+                    >
+                      {publishBusy ? "Sending…" : `Publish (${unpublishedFinalizedWeeks.length})`}
+                    </button>
+                  )
+                )}
               </div>
               <div className="print-week-range">
                 <button
@@ -5553,7 +5713,16 @@ export default function SchedulingHub({ session, onSignOut }) {
                 >
                   Today
                 </button>
-                <button className="back-btn" onClick={() => setWeekIndex((i) => i - 1)}><ChevronLeft size={13} /></button>
+                {/* Stops 2 weeks back (brief item 2) — older weeks are on the
+                    Calendar, not here. Forward is unlimited. */}
+                <button
+                  className="back-btn"
+                  disabled={atOldestScheduleWeek}
+                  title={atOldestScheduleWeek
+                    ? `Set Schedule goes back ${SCHEDULE_LOOKBACK_WEEKS} weeks — use the Calendar for anything older`
+                    : "Previous week"}
+                  onClick={() => setWeekIndex((i) => Math.max(-SCHEDULE_LOOKBACK_WEEKS, i - 1))}
+                ><ChevronLeft size={13} /></button>
                 <span className={`week-range-text ${onCurrentWeek ? "week-range-current" : ""} ${weekIsFinalized ? "week-range-finalized" : ""}`}>
                   {formatWeekRange(activeWeek)}
                   {weekIsFinalized && <span className="week-finalized-dot" title="Finalized" />}
@@ -5597,7 +5766,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                   })}
                 </div>
 
-                <table className={`week-table ${scheduleLocked ? "schedule-locked" : ""}`}>
+                <table className={`week-table ${scheduleFrozen ? "schedule-locked" : ""}`}>
                   <thead>
                     <tr>
                       <th></th>
@@ -5639,7 +5808,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                                         <select
                                           className="cell-select role-select"
                                           value={cellRole}
-                                          disabled={scheduleLocked}
+                                          disabled={scheduleFrozen}
                                           onChange={(e) => setCellRole(p.name, weekday, e.target.value)}
                                         >
                                           {personRoles.map((r) => (
@@ -5650,7 +5819,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                                       <select
                                         className="cell-select shift-select"
                                         value={value}
-                                        disabled={scheduleLocked}
+                                        disabled={scheduleFrozen}
                                         style={value === "OFF" ? undefined : roleCellStyle(workedRole)}
                                         onChange={(e) => setCellShift(p.name, weekday, e.target.value)}
                                       >
@@ -5686,7 +5855,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                     Pick a shift from each cell's dropdown. ("3p – Close" shows as "Yes" for Jenny &amp; Ajuma.) Freddy works both — scheduling one section blocks the other that day.
                   </span>
                 </div>
-                <table className={`week-table ${scheduleLocked ? "schedule-locked" : ""}`}>
+                <table className={`week-table ${scheduleFrozen ? "schedule-locked" : ""}`}>
                   <thead>
                     <tr>
                       <th></th>
@@ -5718,7 +5887,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                   <span className="legend-item">Management</span>
                   <span className="legend-item" style={{ marginLeft: "auto" }}>Click a cell to toggle: Off ↔ FM (Floor Manager)</span>
                 </div>
-                <table className={`week-table ${scheduleLocked ? "schedule-locked" : ""}`}>
+                <table className={`week-table ${scheduleFrozen ? "schedule-locked" : ""}`}>
                   <thead>
                     <tr>
                       <th></th>
@@ -5868,6 +6037,16 @@ export default function SchedulingHub({ session, onSignOut }) {
               <div className="tip-right-col">
                 <div className="week-header" style={{ marginBottom: 12 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    {/* Back to the Calendar date page this sheet was opened from
+                        (brief item 4). Only while we're still on that date —
+                        paging to another day drops the link. */}
+                    {tipFromDayIso === tipDateIso && (
+                      <button
+                        className="day-page-icon"
+                        title={`Back to ${shortDate(tipFromDayIso)}'s notes`}
+                        onClick={() => { setCalDayIso(tipFromDayIso); setCalView("day"); setTab("calendar"); }}
+                      ><StickyNote size={15} /></button>
+                    )}
                     {/* Today jump, matching the Set Schedule week nav (item 9) */}
                     <button
                       className="today-btn"
@@ -6521,7 +6700,10 @@ export default function SchedulingHub({ session, onSignOut }) {
       {swapModal && (() => {
         const replRole = swapForm.withName ? primaryRoleOf(swapForm.withName) : null;
         const shiftOpts = (replRole ? roleOptions[replRole] || [] : []).filter((o) => o.code !== "OFF");
-        const dateLabel = new Date(`${TODAY_ISO}T00:00:00`).toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
+        // The date the glance box was showing when the swap was opened, not
+        // necessarily today (brief item 7).
+        const dateLabel = new Date(`${swapModal.dateIso || TODAY_ISO}T00:00:00`)
+          .toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
         return (
           <div className="day-popup-backdrop" onClick={() => !swapBusy && setSwapModal(null)}>
             <div className="delete-modal" onClick={(e) => e.stopPropagation()}>
