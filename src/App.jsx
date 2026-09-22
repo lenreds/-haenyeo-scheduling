@@ -42,6 +42,14 @@ import {
   calendarNotesAvailable,
   insertRoleShiftOption,
   deleteRoleShiftOption,
+  fetchGeneralNotes,
+  insertGeneralNote,
+  updateGeneralNote,
+  deleteGeneralNote,
+  generalNotesAvailable,
+  fetchRailViewState,
+  setRailCleared as persistRailCleared,
+  RAIL_LISTS,
 } from "./lib/data.js";
 import QRCode from "qrcode";
 
@@ -58,9 +66,13 @@ function numOrNull(v) {
 // the offscreen clone: interactive chrome is stripped, <select>/<input> become
 // plain text (html2canvas doesn't paint a select's chosen option), and an
 // optional logo header is prepended. Tall captures paginate onto extra pages.
-const PDF_STRIP_ALWAYS = [".subject-preview", ".published-badge", ".publish-btn", ".print-btn", ".today-btn", ".back-btn"];
-async function exportNodeAsPdf(node, filename, { header, orientation = "portrait", strip = [] } = {}) {
-  const [{ default: html2canvas }, { jsPDF }] = await Promise.all([import("html2canvas"), import("jspdf")]);
+const PDF_STRIP_ALWAYS = [".subject-preview", ".published-badge", ".publish-btn", ".print-btn", ".today-btn", ".back-btn", ".save-status", ".save-btn"];
+// Snapshot a node into a cropped canvas. Split out of exportNodeAsPdf so the Tip
+// Sheet can capture, measure how much of the page the result would fill, and
+// re-capture at a different width before committing to a page (see
+// exportTipSheetPdf and PDF_PAGE_FILL_TARGET).
+async function captureNodeForPdf(node, { header, strip = [] } = {}) {
+  const [{ default: html2canvas }] = await Promise.all([import("html2canvas")]);
   // Cloned selects/inputs lose their JS-set values — read them from the live
   // node (querySelectorAll order matches the structurally identical clone).
   const liveSelects = Array.from(node.querySelectorAll("select"));
@@ -132,16 +144,29 @@ async function exportNodeAsPdf(node, filename, { header, orientation = "portrait
     out.height = outH;
     out.getContext("2d").drawImage(canvas, 0, 0);
   }
+  return out;
+}
 
+const PDF_MARGIN = 26;
+// Usable box on a letter page in points, for either orientation.
+function pdfPageBox(orientation) {
+  const [pageW, pageH] = orientation === "landscape" ? [792, 612] : [612, 792];
+  return { pageW, pageH, availW: pageW - PDF_MARGIN * 2, availH: pageH - PDF_MARGIN * 2 };
+}
+
+// Width-fit, paginating down onto extra pages when the capture is taller than
+// one page. Used by everything except the Tip Sheet.
+async function paginateCanvasToPdf(canvas, filename, orientation) {
+  const { jsPDF } = await import("jspdf");
   const pdf = new jsPDF({ orientation, unit: "pt", format: "letter" });
   const pageW = pdf.internal.pageSize.getWidth();
   const pageH = pdf.internal.pageSize.getHeight();
-  const margin = 26;
+  const margin = PDF_MARGIN;
   const availW = pageW - margin * 2;
   const availH = pageH - margin * 2;
   const imgW = availW;
-  const imgH = (out.height / out.width) * imgW;
-  const data = out.toDataURL("image/png");
+  const imgH = (canvas.height / canvas.width) * imgW;
+  const data = canvas.toDataURL("image/png");
   const pages = Math.max(1, Math.ceil(imgH / availH));
   for (let p = 0; p < pages; p++) {
     if (p > 0) pdf.addPage();
@@ -152,6 +177,62 @@ async function exportNodeAsPdf(node, filename, { header, orientation = "portrait
     pdf.rect(0, pageH - margin, pageW, margin + 1, "F");
   }
   pdf.save(filename);
+}
+
+// One page, scaled from BOTH dimensions and centred (brief item 4). min() is the
+// only ratio-preserving fit that can't crop: whichever axis runs out first sets
+// the scale, and the slack on the other axis becomes even margins. Whether the
+// slack is small enough is the caller's problem — canvasPageFill() measures it.
+function canvasPageFill(canvas, orientation) {
+  const { availW, availH } = pdfPageBox(orientation);
+  const scale = Math.min(availW / canvas.width, availH / canvas.height);
+  return { scale, widthFill: (canvas.width * scale) / availW, heightFill: (canvas.height * scale) / availH };
+}
+async function onePageCanvasToPdf(canvas, filename, orientation) {
+  const { jsPDF } = await import("jspdf");
+  const pdf = new jsPDF({ orientation, unit: "pt", format: "letter" });
+  const { pageW, pageH } = pdfPageBox(orientation);
+  const { scale } = canvasPageFill(canvas, orientation);
+  const w = canvas.width * scale;
+  const h = canvas.height * scale;
+  pdf.addImage(canvas.toDataURL("image/png"), "PNG", (pageW - w) / 2, (pageH - h) / 2, w, h);
+  pdf.save(filename);
+}
+
+async function exportNodeAsPdf(node, filename, { header, orientation = "portrait", strip = [] } = {}) {
+  const canvas = await captureNodeForPdf(node, { header, strip });
+  await paginateCanvasToPdf(canvas, filename, orientation);
+}
+
+// Tip Sheet PDF (brief item 4): how much of the usable page height the content
+// must cover before we stop adjusting. A ratio-preserving fit can only fill both
+// axes when the capture's aspect ratio matches the page's (landscape letter
+// ≈ 1.32 wide once margins are off), so filling the height comes down to how
+// wide the capture is — a narrower CSS width reflows the layout taller. The card
+// is captured at the base width, measured, and re-captured narrower if it would
+// leave a band at the bottom, so a light night (few payout lines) and a heavy one
+// both land on a full page.
+const PDF_PAGE_FILL_TARGET = 0.9;
+const TIP_PDF_BASE_WIDTH = 1080;
+const TIP_PDF_MIN_WIDTH = 820;
+const TIP_PDF_MAX_WIDTH = 1400;
+
+/* ---- Save / autosave status pill (brief item 3) ---- */
+// How long after the last edit a background save fires.
+const AUTOSAVE_DEBOUNCE_MS = 2000;
+const SAVE_STATUS_TEXT = {
+  saved: "Saved",
+  saving: "Saving…",
+  dirty: "Unsaved changes",
+  error: "Not saved — press Save",
+};
+function SaveStatus({ state }) {
+  const key = SAVE_STATUS_TEXT[state] ? state : "saved";
+  return <span className={`save-status save-status-${key}`}>{SAVE_STATUS_TEXT[key]}</span>;
+}
+// States that mean work would be lost on a refresh.
+function isUnsaved(state) {
+  return state === "dirty" || state === "saving" || state === "error";
 }
 
 /* ---- Branded schedule sheet (colored Save-as-PDF design) ---- */
@@ -1129,12 +1210,11 @@ export default function SchedulingHub({ session, onSignOut }) {
   const [qrPrinting, setQrPrinting] = useState(false);
   const [timeOffBlock, setTimeOffBlock] = useState(null); // { name, dayLabel, onOverride } | null
   const [publishBusy, setPublishBusy] = useState(false);
-  // Dark Split Rail: which request the centre detail panel is showing, and a
-  // display-only hide for the auto-action log (the DB is never touched — the
-  // log repopulates from resolved requests on the next load).
+  // Dark Split Rail: which request the centre detail panel is showing. The
+  // auto-action log and the resolved list are hidden by the shared cleared_at
+  // watermarks in `railCleared` below — the DB is never touched, entries simply
+  // stop being rendered once a Clear timestamp sits after their created_at.
   const [selectedRailId, setSelectedRailId] = useState(null);
-  const [logCleared, setLogCleared] = useState(false);
-  const [resolvedCleared, setResolvedCleared] = useState(false);
   const [tipFinalized, setTipFinalized] = useState(false);
   const [tipFinalizedAt, setTipFinalizedAt] = useState(null);
   const [finalizing, setFinalizing] = useState(false);
@@ -1158,6 +1238,33 @@ export default function SchedulingHub({ session, onSignOut }) {
   const [customMode, setCustomMode] = useState(false);
   const [slotOverrides, setSlotOverrides] = useState({}); // slotId -> { name, pts }
   const [tipSent, setTipSent] = useState(false);
+  // Send Tip Sheet confirmation screen (brief item 5). Nothing is emailed until
+  // Confirm & Send — the modal owns the editable subject, the optional message
+  // notes, and which recipients are excluded.
+  const [tipSendOpen, setTipSendOpen] = useState(false);
+  const [tipSendSubject, setTipSendSubject] = useState("");
+  const [tipSendNotes, setTipSendNotes] = useState("");
+  const [tipSendExcluded, setTipSendExcluded] = useState([]); // names unchecked in the modal
+  const [tipSendBusy, setTipSendBusy] = useState(false);
+  const [tipSendResult, setTipSendResult] = useState(null); // error string after a failed send
+  // Save / autosave state (brief item 3): "saved" | "dirty" | "saving" | "error".
+  const [tipSaveState, setTipSaveState] = useState("saved");
+  const [schedSaveState, setSchedSaveState] = useState("saved");
+  // Bumped every time a date's saved row lands, which is the signal to re-take
+  // the autosave baseline: that state came FROM the DB, so it isn't a change.
+  const [tipLoadSeq, setTipLoadSeq] = useState(0);
+  // Persistent Rail clears (brief item 1). GLOBAL, not per user: one shared
+  // watermark per list, so a Clear by any manager hides those entries for
+  // everyone. Hide-only — rail_requests is never touched.
+  const [railCleared, setRailCleared] = useState({ auto_log: null, resolved: null });
+  const [railClearBusy, setRailClearBusy] = useState(null);
+  // General notes for the Rail's Notes box (brief item 2) — undated, standing
+  // notes, not tied to a week or a date.
+  const [genNotes, setGenNotes] = useState([]);
+  const [genNoteDraft, setGenNoteDraft] = useState("");
+  const [genNoteEditId, setGenNoteEditId] = useState(null);
+  const [genNoteEditText, setGenNoteEditText] = useState("");
+  const [genNoteBusy, setGenNoteBusy] = useState(false);
 
   const tipDateInfo = dateInfoFromIso(tipDateIso);
   const coversNum = parseFloat(covers) || 0;
@@ -1269,7 +1376,6 @@ export default function SchedulingHub({ session, onSignOut }) {
   const [noteEditText, setNoteEditText] = useState("");
   const weekNotes = notesByWeek[activeWeekStart] || [];
   const thisWeekStart = iso(mondayOf(new Date()));
-  const thisWeekNotes = notesByWeek[thisWeekStart] || [];
   const modalNotes = (notesWeek && notesByWeek[notesWeek]) || [];
 
   async function reloadNotes(weekStartIso) {
@@ -1657,10 +1763,184 @@ export default function SchedulingHub({ session, onSignOut }) {
     };
   }
 
-  function sendTipSheet() {
+  // ---- Tip Sheet save + autosave (brief item 3) ---------------------------
+  // The sheet used to reach Supabase only on Finalize / Lock / Send, so a refresh
+  // mid-count lost the night's numbers. Every field in tipPayload() is
+  // serialized into a key; when the key drifts from the last-saved baseline the
+  // sheet is dirty and a 2s debounce flushes it. The payload is snapshotted when
+  // the timer is set, so moving to another date mid-debounce still writes those
+  // edits to the date they were made on.
+  const tipFormKey = useMemo(
+    () => JSON.stringify([
+      floorCash, floorCredit, barCash, barCredit, covers,
+      openingCounts, closingCounts, closingSum, payoutItems, cashSales,
+      customMode ? slotOverrides : {}, tipTimes,
+    ]),
+    [floorCash, floorCredit, barCash, barCredit, covers, openingCounts, closingCounts,
+     closingSum, payoutItems, cashSales, customMode, slotOverrides, tipTimes]
+  );
+  const tipBaselineRef = useRef(null);   // tipFormKey as last written / last loaded
+  const tipBaselineSeqRef = useRef(-1);  // which tipLoadSeq that baseline belongs to
+  const tipFormKeyRef = useRef(tipFormKey);
+
+  // Write one snapshot. `key` is the form key that snapshot represents — it
+  // becomes the new baseline, and the status only reads "Saved" if the form
+  // hasn't moved on while the write was in flight.
+  async function flushTipSheet(snapshot, key) {
+    setTipSaveState("saving");
+    try {
+      await upsertTipSheet(snapshot);
+      tipBaselineRef.current = key;
+      setTipSaveState(key === tipFormKeyRef.current ? "saved" : "dirty");
+      return true;
+    } catch (e) {
+      console.error("Tip sheet save failed:", e);
+      setTipSaveState("error");
+      return false;
+    }
+  }
+  async function saveTipSheetNow() {
+    if (tipSaveState === "saving") return;
+    await flushTipSheet(tipPayload(), tipFormKey);
+  }
+
+  useEffect(() => {
+    tipFormKeyRef.current = tipFormKey;
+    if (tipBaselineSeqRef.current !== tipLoadSeq) {
+      tipBaselineSeqRef.current = tipLoadSeq;
+      tipBaselineRef.current = tipFormKey;
+      setTipSaveState("saved");
+      return;
+    }
+    if (tipFormKey === tipBaselineRef.current) return;
+    setTipSaveState("dirty");
+    const snapshot = tipPayload(); // captured now, including this date
+    const key = tipFormKey;
+    const t = setTimeout(() => { flushTipSheet(snapshot, key); }, AUTOSAVE_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [tipFormKey, tipLoadSeq]);
+
+  // ---- Set Schedule save state (brief item 3) -----------------------------
+  // Set Schedule already writes each cell straight through to Supabase as you
+  // click it, so there is nothing to debounce — the indicator tracks those
+  // writes instead: dirty the instant a cell changes, saving while a write is in
+  // flight, saved when the last one lands. The Save button re-writes the whole
+  // displayed week, which also covers a cell whose earlier write failed.
+  const schedInflightRef = useRef(0);
+  const schedFailedRef = useRef(false);
+  function schedSaveStart() {
+    schedInflightRef.current += 1;
+    setSchedSaveState("saving");
+  }
+  function schedSaveEnd(ok) {
+    if (!ok) schedFailedRef.current = true;
+    schedInflightRef.current = Math.max(0, schedInflightRef.current - 1);
+    if (schedInflightRef.current === 0) {
+      setSchedSaveState(schedFailedRef.current ? "error" : "saved");
+      schedFailedRef.current = false;
+    }
+  }
+  // Explicit Save: push the week on screen in full — FOH patterns and the
+  // BOH/Kitchen/Management placeholder rows — rather than just the last cell.
+  async function saveScheduleNow() {
+    if (schedSaveState === "saving") return;
+    const ws = activeWeekStart;
+    schedSaveStart();
+    let ok = false;
+    try {
+      // Both, not short-circuited — a week can have FOH rows and no placeholder
+      // rows (or the other way round) and we want each attempted.
+      const wroteFoh = await seedWeeklySchedule(ws, activePatterns, nameToId);
+      const wroteGroups = await seedWeeklyPlaceholders(ws, activePlaceholders, groupRosters);
+      ok = wroteFoh && wroteGroups;
+      if (ok) {
+        // The week now has its own complete record, so later template edits
+        // can't leak into it — the invariant writeCellShift's first-edit seed
+        // sets up.
+        setWeeklyPatterns((prev) => (prev[ws] ? prev : { ...prev, [ws]: activePatterns }));
+        setWeeklyPlaceholders((prev) => (prev[ws] ? prev : { ...prev, [ws]: activePlaceholders }));
+      }
+    } catch (e) {
+      console.error("Save schedule failed:", e);
+      ok = false;
+    }
+    schedSaveEnd(ok);
+  }
+
+  // Warn before leaving with work that hasn't reached Supabase (brief item 3).
+  useEffect(() => {
+    if (!isUnsaved(tipSaveState) && !isUnsaved(schedSaveState)) return;
+    const onBeforeUnload = (e) => { e.preventDefault(); e.returnValue = ""; };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [tipSaveState, schedSaveState]);
+
+  // ---- Send Tip Sheet (brief item 5) --------------------------------------
+  // Everyone who worked that night, in slot order, with the email we'd use.
+  // Staff without one are listed too, flagged as skipped, so the manager can see
+  // who won't get it rather than finding out afterwards.
+  const tipSendRoster = useMemo(() => {
+    const seen = new Set();
+    const out = [];
+    finalSlots.forEach((p) => {
+      if (!p.name || seen.has(p.name)) return;
+      seen.add(p.name);
+      const staff = staffList.find((st) => st.name === p.name);
+      const email = staff && staff.registered && staff.personal_email ? staff.personal_email : null;
+      out.push({ name: p.name, position: p.label, email, payout: money(p.final || 0) });
+    });
+    return out;
+  }, [finalSlots, staffList]);
+
+  const tipSendDayLabel = tipDateInfo.dateObj.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
+  const tipSendChosen = tipSendRoster.filter((r) => r.email && !tipSendExcluded.includes(r.name));
+
+  function openTipSendModal() {
+    setTipSendSubject(`Haenyeo Tip Sheet — ${tipSendDayLabel}`);
+    setTipSendNotes("");
+    setTipSendExcluded([]);
+    setTipSendResult(null);
+    setTipSendOpen(true);
+  }
+  function toggleTipRecipient(name) {
+    setTipSendExcluded((prev) => (prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name]));
+  }
+
+  // The only path that actually emails. Reuses the same rows/floor-check payload
+  // Finalize sends, so the tip breakdown in the email is identical — the subject
+  // line, the notes block and the recipient list are what the manager chose.
+  async function confirmSendTipSheet() {
+    if (tipSendBusy || !tipSendChosen.length) return;
+    setTipSendBusy(true);
+    setTipSendResult(null);
+    const rows = finalSlots.filter((p) => p.name).map((p) => ({
+      name: p.name, position: p.label, points: (p.pts || 0).toFixed(2), hours: (p.hours || 0).toFixed(2), final: money(p.final || 0),
+    }));
+    const floorCheckText = floorCheckMatches
+      ? `Floor check: $${money(floorCheckTotal)} — matches floor cash + CC.`
+      : `Floor check: $${money(floorCheckTotal)} — off by $${money(Math.abs(floorCheckTotal - floorPool))}.`;
+    const res = await triggerTipSheetSend({
+      dayDateLabel: tipSendDayLabel,
+      floorPool: money(floorPool),
+      rows,
+      barTipOut: money(barTipOutTotal),
+      barRecipients: barTipOutRecipients,
+      floorCheckText,
+      subject: tipSendSubject.trim(),
+      notes: tipSendNotes.trim(),
+      recipients: tipSendChosen.map((r) => ({ name: r.name, email: r.email, payout: r.payout })),
+    }, session?.access_token);
+    setTipSendBusy(false);
+    if (res?.error) {
+      setTipSendResult(res.error);
+      addLog(`Tip sheet send failed (${res.error})`, "warn");
+      return;
+    }
+    setTipSendOpen(false);
     setTipSent(true);
-    addLog(`Tip sheet sent — ${tipDateInfo.dateObj.toLocaleDateString(undefined, MONTH_FMT)} — ${tipSubject}`, "good");
-    upsertTipSheet(tipPayload({ sent: true })).catch((e) => console.error("Save tip sheet failed:", e));
+    addLog(`Tip sheet sent — ${tipDateInfo.dateObj.toLocaleDateString(undefined, MONTH_FMT)} — emailed ${res?.sent ?? 0} staff`, "good");
+    try { await upsertTipSheet(tipPayload({ sent: true })); }
+    catch (e) { console.error("Save tip sheet failed:", e); }
   }
 
   // Recipients for the finalized tip email: each unique worker who is registered
@@ -1835,6 +2115,7 @@ export default function SchedulingHub({ session, onSignOut }) {
             id: r.id,
             text: `${r.status === "approved" ? "Approved" : "Denied"} ${r.name} — ${TYPE_STYLES[r.type]?.label || r.type}, ${r.dates}`,
             time: new Date(r.created_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
+            at: r.created_at,
             tone: r.status === "approved" ? "good" : "warn",
           }))
         );
@@ -1861,6 +2142,85 @@ export default function SchedulingHub({ session, onSignOut }) {
       .catch((e) => console.error("Calendar notes load failed:", e));
     return () => { cancelled = true; };
   }, []);
+
+  // ---- Persistent, global Rail clears (brief item 1) ----------------------
+  // The watermarks live in rail_view_state, one row per list, shared by every
+  // manager. Pre-migration the fetch returns nulls and Clear falls back to the
+  // old session-only behaviour rather than erroring.
+  useEffect(() => {
+    let cancelled = false;
+    fetchRailViewState()
+      .then((s) => { if (!cancelled) setRailCleared(s); })
+      .catch((e) => console.error("Rail view state load failed:", e));
+    return () => { cancelled = true; };
+  }, []);
+
+  // Everything created at or before the watermark is hidden. Entries with no
+  // timestamp (shouldn't happen — addLog stamps them) are kept rather than
+  // silently dropped.
+  const visibleLog = useMemo(
+    () => (railCleared.auto_log ? log.filter((e) => !e.at || e.at > railCleared.auto_log) : log),
+    [log, railCleared.auto_log]
+  );
+  const visibleResolved = useMemo(
+    () => (railCleared.resolved ? resolvedReqs.filter((r) => !r.created_at || r.created_at > railCleared.resolved) : resolvedReqs),
+    [resolvedReqs, railCleared.resolved]
+  );
+
+  // Press Clear -> watermark moves to now. Pass null to unhide the list again.
+  // Optimistic: the UI hides immediately, and a failed write only means the
+  // clear won't survive a refresh (logged, never silently swallowed).
+  async function setRailClearWatermark(list, clearedAt) {
+    if (railClearBusy) return;
+    setRailClearBusy(list);
+    setRailCleared((prev) => ({ ...prev, [list]: clearedAt }));
+    try {
+      const ok = await persistRailCleared(list, clearedAt, session?.user?.id || null);
+      if (!ok) console.warn(`Rail clear not persisted (run migration 0014?) — ${list}`);
+    } catch (e) {
+      console.error("Rail clear save failed:", e);
+    }
+    setRailClearBusy(null);
+  }
+
+  // ---- General notes for the Rail Notes box (brief item 2) ----------------
+  useEffect(() => {
+    let cancelled = false;
+    fetchGeneralNotes()
+      .then((rows) => { if (!cancelled) setGenNotes(rows); })
+      .catch((e) => console.error("General notes load failed:", e));
+    return () => { cancelled = true; };
+  }, []);
+
+  async function addGeneralNote() {
+    const text = genNoteDraft.trim();
+    if (!text || genNoteBusy) return;
+    setGenNoteBusy(true);
+    setGenNoteDraft("");
+    try {
+      const row = await insertGeneralNote(text);
+      if (row) setGenNotes((prev) => [...prev, row]);
+    } catch (e) {
+      console.error("Add note failed:", e);
+      setGenNoteDraft(text); // hand the text back rather than losing it
+    }
+    setGenNoteBusy(false);
+  }
+  async function saveGeneralNoteEdit(id) {
+    const text = genNoteEditText.trim();
+    if (!text) return;
+    setGenNotes((prev) => prev.map((n) => (n.id === id ? { ...n, note: text } : n)));
+    setGenNoteEditId(null);
+    try { await updateGeneralNote(id, text); }
+    catch (e) { console.error("Edit note failed:", e); }
+  }
+  async function removeGeneralNote(id) {
+    const prev = genNotes;
+    setGenNotes((list) => list.filter((n) => n.id !== id));
+    if (genNoteEditId === id) setGenNoteEditId(null);
+    try { await deleteGeneralNote(id); }
+    catch (e) { console.error("Delete note failed:", e); setGenNotes(prev); }
+  }
 
   async function addCalendarNote(dateIso) {
     const text = calNoteDraft.trim();
@@ -1928,8 +2288,8 @@ export default function SchedulingHub({ session, onSignOut }) {
   // whether or not the panel is open).
   useEffect(() => {
     if (activeWeekStart && !notesByWeek[activeWeekStart]) reloadNotes(activeWeekStart);
-    // The Rail's notes box always shows the current week, whatever week the
-    // Set Schedule tab happens to be on.
+    // The current week too: Rail approvals auto-note against it (noteApproval)
+    // regardless of which week Set Schedule happens to be showing.
     if (!notesByWeek[thisWeekStart]) reloadNotes(thisWeekStart);
   }, [activeWeekStart]);
 
@@ -2115,29 +2475,60 @@ export default function SchedulingHub({ session, onSignOut }) {
     document.body.classList.remove("printing-schedule");
     portal.innerHTML = "";
   }
+  // One landscape page, filled (brief item 4). The old version pinned the
+  // capture to 1280px and let the shared width-fit place it, which left a large
+  // empty band at the bottom whenever the content came out shorter than the
+  // page. Now the capture is measured and, if it would cover less than
+  // PDF_PAGE_FILL_TARGET of the page height, re-taken at a narrower CSS width so
+  // the layout reflows taller. Placement then scales from both axes and centres.
   async function exportTipSheetPdf() {
     if (pdfBusy || !tipCardRef.current) return;
     setPdfBusy("tips");
     const card = tipCardRef.current;
     const origW = card.style.width;
+    const origMax = card.style.maxWidth;
     // Outline-only boxes for the PDF (html2canvas can't read @media print).
-    // Pin the capture width to 1280px so the layout is consistent and fits one
-    // landscape page regardless of the browser window size.
     card.classList.add("tip-pdf-mode");
-    card.style.width = "1280px";
-    card.style.maxWidth = "none";
+    // Drop helper/hint text and the Custom Schedule toggle from the PDF.
+    const strip = [".footer-note", ".recon-note", ".custom-toggle", ".fm-banner"];
+
+    // Pin the width so the layout never depends on the browser window size.
+    async function captureAt(widthPx) {
+      card.style.width = `${widthPx}px`;
+      card.style.maxWidth = "none";
+      const canvas = await captureNodeForPdf(card, { strip });
+      return { widthPx, canvas, fill: canvasPageFill(canvas, "landscape") };
+    }
+
     try {
-      await exportNodeAsPdf(card, `Haenyeo-TipSheet-${tipDateIso}.pdf`, {
-        orientation: "landscape",
-        // Drop helper/hint text and the Custom Schedule toggle from the PDF.
-        strip: [".footer-note", ".recon-note", ".custom-toggle", ".fm-banner"],
-      });
+      let best = await captureAt(TIP_PDF_BASE_WIDTH);
+      const { availW, availH } = pdfPageBox("landscape");
+      // Reflow roughly conserves area, so the width whose aspect ratio matches
+      // the page is about sqrt(W · H · pageRatio). One or two passes converge;
+      // we stop early once the target is met, the estimate stops moving, or a
+      // narrower capture comes out worse than the one we already have.
+      for (let pass = 0; pass < 2 && best.fill.heightFill < PDF_PAGE_FILL_TARGET; pass++) {
+        const cssH = best.canvas.height / (best.canvas.width / best.widthPx);
+        const next = Math.round(Math.sqrt(best.widthPx * cssH * (availW / availH)));
+        const clamped = Math.max(TIP_PDF_MIN_WIDTH, Math.min(TIP_PDF_MAX_WIDTH, next));
+        if (Math.abs(clamped - best.widthPx) < 20) break;
+        const attempt = await captureAt(clamped);
+        if (attempt.fill.heightFill <= best.fill.heightFill) break;
+        best = attempt;
+      }
+      if (best.fill.heightFill < PDF_PAGE_FILL_TARGET) {
+        console.warn(
+          `[tip-pdf] best capture (${best.widthPx}px) still fills only ` +
+          `${(best.fill.heightFill * 100).toFixed(1)}% of the page height`
+        );
+      }
+      await onePageCanvasToPdf(best.canvas, `Haenyeo-TipSheet-${tipDateIso}.pdf`, "landscape");
     } catch (e) {
       console.error("Tip sheet PDF export failed:", e);
     } finally {
       card.classList.remove("tip-pdf-mode");
       card.style.width = origW;
-      card.style.maxWidth = "";
+      card.style.maxWidth = origMax;
     }
     setPdfBusy(null);
   }
@@ -2321,6 +2712,9 @@ export default function SchedulingHub({ session, onSignOut }) {
         setTipFinalizedAt(row?.finalized_at || null);
         setTipLocked(!!row?.locked);
         setTipLockedAt(row?.locked_at || null);
+        // Bumped last, in the same batch as the setters above, so the autosave
+        // baseline is re-taken from the values that just landed.
+        setTipLoadSeq((n) => n + 1);
       })
       .catch((e) => console.error("Tip sheet load failed:", e));
     return () => { cancelled = true; };
@@ -2338,13 +2732,18 @@ export default function SchedulingHub({ session, onSignOut }) {
     const nextWeek = { ...base, [groupKey]: rows };
     setWeeklyPlaceholders((prev) => ({ ...prev, [ws]: nextWeek }));
     const slotName = (groupRosters[groupKey] || [])[slotIdx] || "";
+    setSchedSaveState("dirty");
     (async () => {
+      schedSaveStart();
+      let ok = false;
       try {
         if (!alreadySeeded) await seedWeeklyPlaceholders(ws, base, groupRosters);
-        await upsertWeeklyPlaceholder(ws, groupKey, slotIdx, slotName, weekday, newType);
+        ok = await upsertWeeklyPlaceholder(ws, groupKey, slotIdx, slotName, weekday, newType);
       } catch (e) {
         console.error("Save weekly placeholder failed:", e);
+        ok = false;
       }
+      schedSaveEnd(ok);
     })();
   }
   function setPlaceholderShift(groupKey, slotIdx, weekday, newType) {
@@ -2442,8 +2841,13 @@ export default function SchedulingHub({ session, onSignOut }) {
     .map((d) => { const name = holidayFor(d.iso); return name ? { date: d.iso, name } : null; })
     .filter(Boolean);
 
+  // `at` is what the persistent Clear watermark filters on (brief item 1), so
+  // every entry — DB-derived or added live — carries one.
   function addLog(text, tone) {
-    setLog((l) => [{ id: `l-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, text, time: timeNow(), tone }, ...l]);
+    setLog((l) => [
+      { id: `l-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, text, time: timeNow(), at: new Date().toISOString(), tone },
+      ...l,
+    ]);
   }
 
   // Approved time-off block (item 2): for a cell's weekday, map to the actual
@@ -2871,13 +3275,21 @@ export default function SchedulingHub({ session, onSignOut }) {
       return next;
     });
     const staffId = nameToId[name];
+    setSchedSaveState("dirty");
     (async () => {
+      schedSaveStart();
+      // The cell's own write is what decides the indicator: a skipped write
+      // (pre-migration tables, unknown staff member) returns false and shows as
+      // "Not saved" rather than a save that never happened.
+      let ok = false;
       try {
         if (!alreadySeeded) await seedWeeklySchedule(ws, base, nameToId);
-        if (staffId) await upsertWeeklyShift(ws, staffId, weekday, code);
+        ok = staffId ? await upsertWeeklyShift(ws, staffId, weekday, code) : false;
       } catch (e) {
         console.error("Save weekly shift failed:", e);
+        ok = false;
       }
+      schedSaveEnd(ok);
     })();
   }
   function setCellShift(name, weekday, code) {
@@ -3360,7 +3772,8 @@ export default function SchedulingHub({ session, onSignOut }) {
           .tip-time-input { background: #fff !important; color: #2B2A25 !important; border-color: rgba(43,42,37,0.2) !important; }
           .role-header { color: #8a5a20 !important; }
           .recon-row.final span { color: #8a5a20 !important; }
-          .tabs, .hub-header, .print-btn, .custom-toggle, .publish-btn, .published-badge, .back-btn, .subject-preview { display: none !important; }
+          .tabs, .hub-header, .print-btn, .custom-toggle, .publish-btn, .published-badge, .back-btn, .subject-preview,
+          .save-status, .day-popup-backdrop { display: none !important; }
           .cal-card { box-shadow: none !important; }
           /* Tip Sheet print: hide helper text, buttons, navigation, finalized banner; outline-only boxes; fit one page */
           .footer-note, .recon-note, .fm-banner, .week-header, .tip-finalized-banner, .tip-locked-banner { display: none !important; }
@@ -3424,19 +3837,25 @@ export default function SchedulingHub({ session, onSignOut }) {
         .tip-pdf-mode .cash-recon { border: 1px solid rgba(43,42,37,0.2) !important; }
         .tip-pdf-mode .hero-item { border-color: #C98A3E !important; padding: 10px 12px !important; }
         .tip-pdf-mode .hero-stat { gap: 10px !important; margin: 10px 0 !important; }
-        .tip-pdf-mode .hero-value { font-size: 18px !important; }
-        .tip-pdf-mode .hero-label { margin-bottom: 2px !important; font-size: 8.5px !important; }
-        .tip-pdf-mode .tip-logo-space { min-height: 80px !important; margin-bottom: 10px !important; }
-        .tip-pdf-mode .tip-logo-img { max-height: 76px !important; }
-        .tip-pdf-mode .tip-page-split { font-size: 87%; gap: 18px !important; }
-        .tip-pdf-mode .tip-left-col { width: 310px !important; }
-        .tip-pdf-mode .week-table { font-size: 10px !important; }
-        .tip-pdf-mode .week-table td { padding: 4px 3px !important; }
-        .tip-pdf-mode .tip-stat { font-size: 12px !important; }
-        .tip-pdf-mode .denom-table { font-size: 10px !important; }
-        .tip-pdf-mode .recon-row { padding: 3px 0 !important; }
-        .tip-pdf-mode .tip-inputs { gap: 12px !important; margin-bottom: 6px !important; }
-        .tip-pdf-mode .tip-top-row { gap: 14px !important; }
+        /* Sizes below were shrunk to squeeze the sheet onto one page when the
+           capture was pinned at 1280px and only width-fitted — which is exactly
+           what left the empty band at the bottom. exportTipSheetPdf now picks the
+           capture width to match the page's aspect ratio, so these go back up to
+           near their on-screen size: the content is taller, the type is bigger,
+           and it still lands on one landscape page (brief item 4). */
+        .tip-pdf-mode .hero-value { font-size: 20px !important; }
+        .tip-pdf-mode .hero-label { margin-bottom: 3px !important; font-size: 9px !important; }
+        .tip-pdf-mode .tip-logo-space { min-height: 84px !important; margin-bottom: 12px !important; }
+        .tip-pdf-mode .tip-logo-img { max-height: 80px !important; }
+        .tip-pdf-mode .tip-page-split { font-size: 100%; gap: 20px !important; }
+        .tip-pdf-mode .tip-left-col { width: 320px !important; }
+        .tip-pdf-mode .week-table { font-size: 12px !important; }
+        .tip-pdf-mode .week-table td { padding: 7px 5px !important; }
+        .tip-pdf-mode .tip-stat { font-size: 14px !important; }
+        .tip-pdf-mode .denom-table { font-size: 11.5px !important; }
+        .tip-pdf-mode .recon-row { padding: 5px 0 !important; }
+        .tip-pdf-mode .tip-inputs { gap: 14px !important; margin-bottom: 10px !important; }
+        .tip-pdf-mode .tip-top-row { gap: 16px !important; }
 
         /* QR print sheet — branded single portrait page. Colors are accents on
            white (B&W friendly); color-adjust keeps the dark band + pills from
@@ -3773,7 +4192,10 @@ export default function SchedulingHub({ session, onSignOut }) {
         .rs-mark-holiday { background: #B23A2F; }
         .rs-holiday-note { padding: 8px 20px 0; font-size: 10.5px; color: var(--muted); text-align: center; }
 
-        .rs-grid { display: grid; grid-template-columns: 220px minmax(0,1fr) 180px; gap: 20px; padding: 18px 20px 24px; align-items: start; }
+        /* Right column widened from 180px for the bigger Notes box (brief item
+           2) — at 180px a note wrapped to roughly one word per line. */
+        .rs-grid { display: grid; grid-template-columns: 220px minmax(0,1fr) 300px; gap: 20px; padding: 18px 20px 24px; align-items: start; }
+        @media (max-width: 1180px) { .rs-grid { grid-template-columns: 200px minmax(0,1fr) 240px; gap: 14px; } }
         @media (max-width: 980px) { .rs-grid { grid-template-columns: 1fr; } }
         .rs-col-left, .rs-col-mid, .rs-col-right { min-width: 0; }
         .rs-label-resolved { margin-top: 18px; }
@@ -3834,10 +4256,37 @@ export default function SchedulingHub({ session, onSignOut }) {
         .rs-log { max-height: 240px; overflow-y: auto; }
         .rs-log-empty { font-size: 11px; color: var(--muted); font-style: italic; }
         .rs-log .nr-log-row { font-size: 11px; }
-        .rs-notes { display: flex; flex-direction: column; gap: 6px; width: 100%; text-align: left; cursor: pointer; font-family: inherit; max-height: 190px; overflow: hidden; }
-        .rs-notes:hover { border-color: var(--line2); }
-        .rs-note-line { font-size: 11px; color: var(--txt2); line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-        .rs-note-more { font-size: 10px; color: var(--accent); font-weight: 700; }
+        /* Notes box (brief item 2): taller, full-size text, no dates, and edited
+           in place. The list scrolls; the add-field is pinned under it. */
+        .rs-notes { display: flex; flex-direction: column; gap: 8px; max-height: 420px; }
+        .rs-note-list { display: flex; flex-direction: column; gap: 6px; overflow-y: auto; max-height: 340px; padding-right: 2px; }
+        .rs-note-row { display: flex; align-items: flex-start; gap: 4px; }
+        .rs-note-text {
+          flex: 1; min-width: 0; text-align: left; font-family: inherit; font-size: 13px; line-height: 1.45;
+          color: var(--txt); background: var(--s1); border: 1px solid var(--line); border-radius: 7px;
+          padding: 7px 9px; cursor: text; white-space: pre-wrap; word-break: break-word;
+        }
+        .rs-note-text:hover { border-color: var(--line2); }
+        .rs-note-edit {
+          flex: 1; min-width: 0; font-family: inherit; font-size: 13px; line-height: 1.45; resize: vertical;
+          color: var(--txt); background: var(--s1); border: 1px solid var(--accent); border-radius: 7px; padding: 7px 9px;
+        }
+        .rs-note-edit:focus { outline: none; }
+        .rs-note-actions { display: flex; flex-direction: column; gap: 4px; flex-shrink: 0; }
+        .rs-note-btn {
+          display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px;
+          background: var(--s1); border: 1px solid var(--line); border-radius: 6px; color: var(--txt2); cursor: pointer; padding: 0;
+        }
+        .rs-note-btn:hover:not(:disabled) { color: var(--txt); border-color: var(--line2); }
+        .rs-note-btn:disabled { opacity: 0.4; cursor: default; }
+        .rs-note-del:hover:not(:disabled) { color: #e79289; border-color: #B23A2F; }
+        .rs-note-add { display: flex; gap: 6px; align-items: center; border-top: 1px solid var(--line); padding-top: 8px; }
+        .rs-note-input {
+          flex: 1; min-width: 0; font-family: inherit; font-size: 12.5px; padding: 7px 9px;
+          color: var(--txt); background: var(--s1); border: 1px solid var(--line); border-radius: 7px;
+        }
+        .rs-note-input:focus { outline: none; border-color: var(--accent); }
+        .rs-note-input::placeholder { color: var(--muted); }
 
         /* ---- remaining light surfaces ---- */
         .fm-chip { background: rgba(74,122,155,0.16); border-color: rgba(74,122,155,0.5); }
@@ -3938,6 +4387,44 @@ export default function SchedulingHub({ session, onSignOut }) {
         .rs-card .nr-row, .rs-card .nr-log-row { border-color: #1a1a1a; }
         .rs-card .nr-empty { background: #141414; border-color: #1a1a1a; }
         .rs-clear-block { display: block; margin: 8px 0 0 auto; }
+        .rs-clear:disabled { opacity: 0.45; cursor: default; }
+
+        /* ---- Save / autosave indicator (brief item 3) ---- */
+        .save-status {
+          font-family: 'Space Mono', monospace; font-size: 9.5px; letter-spacing: 1px;
+          text-transform: uppercase; white-space: nowrap; color: var(--muted);
+        }
+        .save-status-saved { color: #5a8a6a; }
+        .save-status-saving { color: var(--accent); }
+        .save-status-dirty { color: #d9a441; }
+        .save-status-error { color: #e79289; }
+
+        /* ---- Send Tip Sheet confirmation (brief item 5) ---- */
+        .send-modal {
+          background: var(--s1); color: var(--txt); border: 1px solid var(--line2); border-radius: 12px;
+          padding: 18px 20px; width: min(660px, 94vw); max-height: 86vh; overflow-y: auto;
+          box-shadow: 0 18px 48px rgba(0,0,0,0.45); animation: zoomIn 0.18s ease;
+        }
+        .send-section-label {
+          display: flex; align-items: center; gap: 8px; margin: 14px 0 6px;
+          font-family: 'Space Mono', monospace; font-size: 10.5px; letter-spacing: 0.6px;
+          text-transform: uppercase; color: var(--muted);
+        }
+        .send-recipients { display: flex; flex-direction: column; gap: 4px; max-height: 260px; overflow-y: auto; }
+        .send-rcpt {
+          display: grid; grid-template-columns: 16px minmax(72px, auto) minmax(84px, auto) 1fr auto;
+          align-items: center; gap: 10px; padding: 7px 9px; border-radius: 7px;
+          background: var(--s2); border: 1px solid var(--line); cursor: pointer; font-size: 12.5px;
+        }
+        .send-rcpt:hover { border-color: var(--line2); }
+        .send-rcpt-name { font-weight: 700; color: var(--txt); }
+        .send-rcpt-pos, .send-rcpt-email { color: var(--txt2); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .send-rcpt-payout { font-family: 'Space Mono', monospace; font-size: 11.5px; color: var(--accent); }
+        /* Still listed, so the manager can see who won't get it. */
+        .send-rcpt-noemail { opacity: 0.55; cursor: default; }
+        .send-rcpt-noemail .send-rcpt-email { color: #e79289; font-style: italic; }
+        .send-error { margin-top: 12px; font-size: 12px; color: #e79289; }
+        .send-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
 
         /* ---- Manage Shifts (item 3) ---- */
         .shift-mgmt { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
@@ -4170,10 +4657,10 @@ export default function SchedulingHub({ session, onSignOut }) {
                   );
                 })}
 
-                {resolvedReqs.length > 0 && !resolvedCleared && (
+                {visibleResolved.length > 0 && (
                   <>
                     <div className="nr-label rs-label-resolved">Resolved</div>
-                    {resolvedReqs.slice(0, 12).map((r) => {
+                    {visibleResolved.slice(0, 12).map((r) => {
                       const style = TYPE_STYLES[r.type] || { badge: "#7B93A3", label: r.type };
                       return (
                         <div className="rs-q rs-q-done" key={r.id}>
@@ -4186,14 +4673,26 @@ export default function SchedulingHub({ session, onSignOut }) {
                         </div>
                       );
                     })}
-                    {/* Display-only (brief item 4) — nothing is deleted, the
-                        list comes back from the DB on the next load. */}
+                    {/* Hide-only and GLOBAL (brief item 1): the watermark is
+                        shared, so this clears the list for every manager and
+                        survives a refresh. rail_requests is never touched. */}
                     <button
                       className="rs-clear rs-clear-block"
-                      onClick={() => setResolvedCleared(true)}
-                      title="Hide these entries (nothing is deleted)"
+                      disabled={railClearBusy === RAIL_LISTS.resolved}
+                      onClick={() => setRailClearWatermark(RAIL_LISTS.resolved, new Date().toISOString())}
+                      title="Hide these entries for everyone (nothing is deleted)"
                     >Clear resolved</button>
                   </>
+                )}
+                {/* Undo for a mis-click — the rows are still in the DB, so
+                    dropping the watermark brings them all back. */}
+                {railCleared.resolved && visibleResolved.length === 0 && resolvedReqs.length > 0 && (
+                  <button
+                    className="rs-clear rs-clear-block"
+                    disabled={railClearBusy === RAIL_LISTS.resolved}
+                    onClick={() => setRailClearWatermark(RAIL_LISTS.resolved, null)}
+                    title={`${resolvedReqs.length} hidden — show them again`}
+                  >Show resolved ({resolvedReqs.length})</button>
                 )}
 
                 {/* Archived — collapsed by default, sits at the bottom so it
@@ -4345,15 +4844,27 @@ export default function SchedulingHub({ session, onSignOut }) {
               <div className="rs-col-right">
                 <div className="nr-label">
                   <Package size={13} /> Auto-Action Log
-                  {log.length > 0 && !logCleared && (
-                    <button className="rs-clear" onClick={() => setLogCleared(true)} title="Hide these entries (nothing is deleted)">Clear</button>
-                  )}
+                  {visibleLog.length > 0 ? (
+                    <button
+                      className="rs-clear"
+                      disabled={railClearBusy === RAIL_LISTS.log}
+                      onClick={() => setRailClearWatermark(RAIL_LISTS.log, new Date().toISOString())}
+                      title="Hide these entries for everyone (nothing is deleted)"
+                    >Clear</button>
+                  ) : railCleared.auto_log && log.length > 0 ? (
+                    <button
+                      className="rs-clear"
+                      disabled={railClearBusy === RAIL_LISTS.log}
+                      onClick={() => setRailClearWatermark(RAIL_LISTS.log, null)}
+                      title={`${log.length} hidden — show them again`}
+                    >Show all ({log.length})</button>
+                  ) : null}
                 </div>
                 <div className="nr-panel rs-log">
-                  {logCleared || log.length === 0 ? (
-                    <div className="rs-log-empty">{logCleared ? "Cleared" : "Nothing logged yet"}</div>
+                  {visibleLog.length === 0 ? (
+                    <div className="rs-log-empty">{railCleared.auto_log ? "Cleared" : "Nothing logged yet"}</div>
                   ) : (
-                    log.map((entry) => (
+                    visibleLog.map((entry) => (
                       <div className={`nr-log-row nr-log-${entry.tone}`} key={entry.id}>
                         {entry.text}<span className="nr-log-time">{entry.time}</span>
                       </div>
@@ -4361,23 +4872,76 @@ export default function SchedulingHub({ session, onSignOut }) {
                   )}
                 </div>
 
-                {notesTableAvailable() && (
+                {/* General notes (brief item 2): standing notes, no dates, edited
+                    in place. Taller and at full size so the box reads at a
+                    glance without opening anything. Per-week notes still live
+                    behind the Set Schedule Notes button. */}
+                {generalNotesAvailable() && (
                   <>
                     <div className="nr-label">
-                      Notes <span className="nr-count">{thisWeekNotes.length}</span>
+                      Notes <span className="nr-count">{genNotes.length}</span>
                     </div>
-                    <button className="nr-panel rs-notes" onClick={() => setNotesWeek(thisWeekStart)} title="Open this week's notes">
-                      {thisWeekNotes.length === 0 ? (
-                        <span className="rs-log-empty">No notes this week</span>
+                    <div className="nr-panel rs-notes">
+                      {genNotes.length === 0 ? (
+                        <div className="rs-log-empty">No notes yet</div>
                       ) : (
-                        thisWeekNotes.slice(0, 5).map((n) => (
-                          <span className="rs-note-line" key={n.id}>{n.note}</span>
-                        ))
+                        <div className="rs-note-list">
+                          {genNotes.map((n) => (
+                            <div className="rs-note-row" key={n.id}>
+                              {genNoteEditId === n.id ? (
+                                <>
+                                  <textarea
+                                    className="rs-note-edit"
+                                    /* Grow with the note so editing doesn't hide
+                                       the end of it. ~24 chars fit per line in
+                                       this column; the +1 covers word wrapping
+                                       landing short of a full line. */
+                                    rows={Math.min(9, Math.max(3,
+                                      Math.ceil(genNoteEditText.length / 24) + 1 + (genNoteEditText.match(/\n/g) || []).length))}
+                                    autoFocus
+                                    value={genNoteEditText}
+                                    onChange={(e) => setGenNoteEditText(e.target.value)}
+                                    onKeyDown={(e) => {
+                                      // Enter saves, Shift+Enter keeps a line break.
+                                      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); saveGeneralNoteEdit(n.id); }
+                                      if (e.key === "Escape") setGenNoteEditId(null);
+                                    }}
+                                  />
+                                  <div className="rs-note-actions">
+                                    <button className="rs-note-btn" title="Save" onClick={() => saveGeneralNoteEdit(n.id)}><Check size={13} /></button>
+                                    <button className="rs-note-btn" title="Cancel" onClick={() => setGenNoteEditId(null)}><X size={13} /></button>
+                                  </div>
+                                </>
+                              ) : (
+                                <>
+                                  <button
+                                    className="rs-note-text"
+                                    title="Click to edit"
+                                    onClick={() => { setGenNoteEditId(n.id); setGenNoteEditText(n.note); }}
+                                  >{n.note}</button>
+                                  <div className="rs-note-actions">
+                                    <button className="rs-note-btn rs-note-del" title="Delete note" onClick={() => removeGeneralNote(n.id)}><X size={13} /></button>
+                                  </div>
+                                </>
+                              )}
+                            </div>
+                          ))}
+                        </div>
                       )}
-                      {thisWeekNotes.length > 5 && (
-                        <span className="rs-note-more">+{thisWeekNotes.length - 5} more</span>
-                      )}
-                    </button>
+                      <div className="rs-note-add">
+                        <input
+                          className="rs-note-input"
+                          placeholder="Add a note…"
+                          value={genNoteDraft}
+                          disabled={genNoteBusy}
+                          onChange={(e) => setGenNoteDraft(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === "Enter") addGeneralNote(); }}
+                        />
+                        <button className="rs-note-btn" disabled={!genNoteDraft.trim() || genNoteBusy} onClick={addGeneralNote} title="Add note">
+                          <Check size={13} />
+                        </button>
+                      </div>
+                    </div>
                   </>
                 )}
               </div>
@@ -4713,7 +5277,16 @@ export default function SchedulingHub({ session, onSignOut }) {
         <div className="cal-wrap" key="template">
           <div className="cal-card" ref={scheduleCardRef}>
             <div className="print-header">
-              <div style={{ display: "flex", gap: 8 }}>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <SaveStatus state={schedSaveState} />
+                <button
+                  className="print-btn save-btn"
+                  disabled={schedSaveState === "saving"}
+                  onClick={saveScheduleNow}
+                  title={`Write the week of ${shortDate(activeWeekStart)} to Supabase now (cells also save as you click them)`}
+                >
+                  {schedSaveState === "saving" ? "Saving…" : "Save"}
+                </button>
                 <button className="print-btn" onClick={printSchedule}><Printer size={13} /> Print</button>
                 <button className="print-btn" disabled={pdfBusy === "schedule"} onClick={exportSchedulePdf}>
                   <FileDown size={13} /> {pdfBusy === "schedule" ? "Saving…" : "Save as PDF"}
@@ -5254,9 +5827,20 @@ export default function SchedulingHub({ session, onSignOut }) {
                   {tipSent ? (
                     <span className="published-badge"><Check size={12} /> Sent</span>
                   ) : (
-                    <button className="publish-btn" onClick={sendTipSheet}>Send Tip Sheet</button>
+                    /* Opens the confirmation screen (brief item 5) — nothing is
+                       emailed until Confirm & Send there. */
+                    <button className="publish-btn" onClick={openTipSendModal}>Send Tip Sheet</button>
                   )}
-                  <div style={{ marginLeft: "auto", display: "flex", gap: 10 }}>
+                  <div style={{ marginLeft: "auto", display: "flex", gap: 10, alignItems: "center" }}>
+                    <SaveStatus state={tipSaveState} />
+                    <button
+                      className="print-btn save-btn"
+                      disabled={tipSaveState === "saving"}
+                      onClick={saveTipSheetNow}
+                      title="Write this sheet to Supabase now (it also autosaves 2s after you stop typing)"
+                    >
+                      {tipSaveState === "saving" ? "Saving…" : "Save"}
+                    </button>
                     {/* Per-date lock — independent of Finalize, pressed again to
                         unlock. Only this date is affected. */}
                     <button
@@ -5810,6 +6394,79 @@ export default function SchedulingHub({ session, onSignOut }) {
 
       {/* Per-week notes. Scoped to activeWeekStart, so navigating weeks swaps the
           whole list. Rail-sourced notes are tagged but otherwise fully editable. */}
+      {/* Send Tip Sheet confirmation (brief item 5). Recipients, subject and an
+          optional note are all editable here; the email only goes out on
+          Confirm & Send. */}
+      {tipSendOpen && (
+        <div className="day-popup-backdrop" onClick={() => !tipSendBusy && setTipSendOpen(false)}>
+          <div className="send-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="day-popup-head">
+              <div className="day-popup-date">Send Tip Sheet — {tipSendDayLabel}</div>
+              <button className="day-popup-close" disabled={tipSendBusy} onClick={() => setTipSendOpen(false)}><X size={15} /></button>
+            </div>
+
+            <div className="send-section-label">
+              Recipients <span className="nr-count">{tipSendChosen.length}</span>
+            </div>
+            {tipSendRoster.length === 0 ? (
+              <div className="notes-empty">Nobody is on the sheet for this date yet.</div>
+            ) : (
+              <div className="send-recipients">
+                {tipSendRoster.map((r) => (
+                  <label className={`send-rcpt ${r.email ? "" : "send-rcpt-noemail"}`} key={r.name}>
+                    <input
+                      type="checkbox"
+                      disabled={!r.email || tipSendBusy}
+                      checked={!!r.email && !tipSendExcluded.includes(r.name)}
+                      onChange={() => toggleTipRecipient(r.name)}
+                    />
+                    <span className="send-rcpt-name">{r.name}</span>
+                    <span className="send-rcpt-pos">{r.position}</span>
+                    <span className="send-rcpt-email">{r.email || "no email — will be skipped"}</span>
+                    <span className="send-rcpt-payout">${r.payout}</span>
+                  </label>
+                ))}
+              </div>
+            )}
+
+            <label className="manual-field-label" htmlFor="send-subject">Subject line</label>
+            <input
+              id="send-subject"
+              className="manual-field"
+              type="text"
+              disabled={tipSendBusy}
+              value={tipSendSubject}
+              onChange={(e) => setTipSendSubject(e.target.value)}
+            />
+
+            <label className="manual-field-label" htmlFor="send-notes">Message notes (optional)</label>
+            <textarea
+              id="send-notes"
+              className="manual-field"
+              rows={3}
+              disabled={tipSendBusy}
+              placeholder="Anything to say above the tip breakdown…"
+              value={tipSendNotes}
+              onChange={(e) => setTipSendNotes(e.target.value)}
+            />
+
+            {tipSendResult && <div className="send-error">Couldn't send: {tipSendResult}</div>}
+
+            <div className="send-actions">
+              <button className="nr-btn" disabled={tipSendBusy} onClick={() => setTipSendOpen(false)}>Cancel</button>
+              <button
+                className="publish-btn"
+                disabled={tipSendBusy || tipSendChosen.length === 0}
+                onClick={confirmSendTipSheet}
+                title={tipSendChosen.length === 0 ? "Nobody selected has an email on file" : `Email ${tipSendChosen.length} staff`}
+              >
+                {tipSendBusy ? "Sending…" : `Confirm & Send (${tipSendChosen.length})`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {notesWeek && (
         <div className="day-popup-backdrop" onClick={() => { setNotesWeek(null); setNoteEditId(null); }}>
           <div className="notes-modal" onClick={(e) => e.stopPropagation()}>

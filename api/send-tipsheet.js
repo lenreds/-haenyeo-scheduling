@@ -1,8 +1,10 @@
 // POST /api/send-tipsheet — emails the finalized tip sheet to each worker who
 // has a registered email, personalizing the "YOUR PAYOUT" line. Manager-JWT auth.
 // Body: { dayDateLabel, floorPool, rows:[{name,position,points,hours,final}],
-// barTipOut, barRecipients, floorCheckText, recipients:[{name,email,payout}] }.
-// The client decides recipients (it holds the tip math); tagged Sent/Tip Sheets.
+// barTipOut, barRecipients, floorCheckText, recipients:[{name,email,payout}],
+// subject?, notes? }. The client decides recipients (it holds the tip math) and
+// passes the subject line and optional message notes the manager confirmed on
+// the send screen; tagged Sent/Tip Sheets.
 
 import { GMAIL_REFRESH_TOKEN } from "./_lib/config.js";
 import { getAccessToken, sendMessage, modifyMessage } from "./_lib/google.js";
@@ -49,6 +51,8 @@ export default async function handler(req, res) {
           floorCheckText: b.floorCheckText || "",
           recipientName: r.name,
           recipientPayout: r.payout,
+          subject: b.subject,
+          notes: b.notes,
         });
         const raw = buildRawEmail({ to: r.email, subject, body });
         const msg = await sendMessage(accessToken, { raw });

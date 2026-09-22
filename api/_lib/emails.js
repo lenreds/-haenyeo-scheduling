@@ -328,18 +328,23 @@ ${note ? `${note}\n\n` : ""}${SIG}`;
 
 // dayDateLabel: "Thursday, Jul 24"; rows: [{ name, position, points, hours, final }];
 // recipientName/recipientPayout personalize the highlighted line per email.
-export function buildTipSheetEmail({ dayDateLabel, floorPool, rows, barTipOut, barRecipients, floorCheckText, recipientName, recipientPayout }) {
-  const subject = `Haenyeo Tip Sheet — ${dayDateLabel}`;
+// `subject` and `notes` come from the manager's send-confirmation screen: the
+// subject line is editable (blank falls back to the default) and the notes are
+// dropped in above the tip breakdown, so the same tip math can carry a different
+// message each night.
+export function buildTipSheetEmail({ dayDateLabel, floorPool, rows, barTipOut, barRecipients, floorCheckText, recipientName, recipientPayout, subject: subjectOverride, notes }) {
+  const subject = String(subjectOverride || "").trim() || `Haenyeo Tip Sheet — ${dayDateLabel}`;
   const workerLines = (rows || [])
     .map((r) => `  ${r.name} — ${r.position}: ${r.points} pts, ${r.hours} hrs → $${r.final}`)
     .join("\n");
+  const noteBlock = String(notes || "").trim() ? `${String(notes).trim()}\n\n` : "";
   const body =
 `Haenyeo Tip Sheet — ${dayDateLabel}
 
 YOUR PAYOUT: $${recipientPayout}
 (${recipientName})
 
-Floor pool (cash + CC): $${floorPool}
+${noteBlock}Floor pool (cash + CC): $${floorPool}
 
 Breakdown:
 ${workerLines}

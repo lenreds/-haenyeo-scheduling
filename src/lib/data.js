@@ -341,8 +341,13 @@ export async function fetchWeeklyPlaceholders(weekStartIso) {
   return groups;
 }
 
+// The four writers below all return TRUE only when rows actually reached the
+// database, and FALSE when the write was skipped — pre-migration tables, an
+// unknown staff member, nothing to write. Set Schedule's save indicator reads
+// that return value, so a skipped write shows "Not saved" instead of silently
+// reporting success.
 export async function upsertWeeklyShift(weekStartIso, staffId, weekday, shiftType) {
-  if (!staffId || weeklyTablesPresent === false) return;
+  if (!staffId || weeklyTablesPresent === false) return false;
   const { error } = await supabase
     .from("weekly_schedules")
     .upsert(
@@ -350,13 +355,14 @@ export async function upsertWeeklyShift(weekStartIso, staffId, weekday, shiftTyp
       { onConflict: "week_start,staff_id,weekday" }
     );
   if (error) {
-    if (isMissingTable(error)) { weeklyTablesPresent = false; return; }
+    if (isMissingTable(error)) { weeklyTablesPresent = false; return false; }
     throw error;
   }
+  return true;
 }
 
 export async function upsertWeeklyPlaceholder(weekStartIso, groupKey, slotIndex, slotName, weekday, shiftType) {
-  if (weeklyTablesPresent === false) return;
+  if (weeklyTablesPresent === false) return false;
   const { error } = await supabase
     .from("weekly_placeholder_schedules")
     .upsert(
@@ -368,16 +374,17 @@ export async function upsertWeeklyPlaceholder(weekStartIso, groupKey, slotIndex,
       { onConflict: "week_start,group_key,slot_index,weekday" }
     );
   if (error) {
-    if (isMissingTable(error)) { weeklyTablesPresent = false; return; }
+    if (isMissingTable(error)) { weeklyTablesPresent = false; return false; }
     throw error;
   }
+  return true;
 }
 
 // Snapshot a whole week into weekly_schedules the first time it's touched, so
 // the week is a complete independent record and later template edits can't leak
 // into it. `patterns` is the grid currently on screen (template-derived).
 export async function seedWeeklySchedule(weekStartIso, patterns, nameToId) {
-  if (weeklyTablesPresent === false) return;
+  if (weeklyTablesPresent === false) return false;
   const rows = [];
   Object.entries(patterns || {}).forEach(([name, week]) => {
     const staffId = nameToId[name];
@@ -386,18 +393,19 @@ export async function seedWeeklySchedule(weekStartIso, patterns, nameToId) {
       rows.push({ week_start: weekStartIso, staff_id: staffId, weekday, shift_type: shiftType || "OFF" });
     });
   });
-  if (!rows.length) return;
+  if (!rows.length) return false;
   const { error } = await supabase
     .from("weekly_schedules")
     .upsert(rows, { onConflict: "week_start,staff_id,weekday" });
   if (error) {
-    if (isMissingTable(error)) { weeklyTablesPresent = false; return; }
+    if (isMissingTable(error)) { weeklyTablesPresent = false; return false; }
     throw error;
   }
+  return true;
 }
 
 export async function seedWeeklyPlaceholders(weekStartIso, placeholders, slotNamesByGroup = {}) {
-  if (weeklyTablesPresent === false) return;
+  if (weeklyTablesPresent === false) return false;
   const rows = [];
   Object.entries(placeholders || {}).forEach(([groupKey, slots]) => {
     (slots || []).forEach((week, slotIndex) => {
@@ -410,14 +418,15 @@ export async function seedWeeklyPlaceholders(weekStartIso, placeholders, slotNam
       });
     });
   });
-  if (!rows.length) return;
+  if (!rows.length) return false;
   const { error } = await supabase
     .from("weekly_placeholder_schedules")
     .upsert(rows, { onConflict: "week_start,group_key,slot_index,weekday" });
   if (error) {
-    if (isMissingTable(error)) { weeklyTablesPresent = false; return; }
+    if (isMissingTable(error)) { weeklyTablesPresent = false; return false; }
     throw error;
   }
+  return true;
 }
 
 /* ------------------------------------------------------- schedule_notes ---- */
@@ -520,6 +529,105 @@ export async function deleteCalendarNote(id) {
   if (calendarNotesPresent === false) return;
   const { error } = await supabase.from("calendar_notes").delete().eq("id", id);
   if (error && !isMissingTable(error)) throw error;
+}
+
+/* --------------------------------------------------------- general_notes -- */
+// Standing, undated notes for the Rail's Notes box (migration 0014). Gated the
+// same way as schedule_notes: pre-migration every read returns [] and the box
+// renders empty rather than erroring.
+
+let generalNotesPresent = null;
+export function generalNotesAvailable() {
+  return generalNotesPresent !== false;
+}
+
+export async function fetchGeneralNotes() {
+  const { data, error } = await supabase
+    .from("general_notes")
+    .select("id, note, sort_order, created_at, updated_at")
+    .order("sort_order", { ascending: true })
+    .order("created_at", { ascending: true });
+  if (error) {
+    if (isMissingTable(error)) { generalNotesPresent = false; return []; }
+    throw error;
+  }
+  generalNotesPresent = true;
+  return data || [];
+}
+
+export async function insertGeneralNote(note) {
+  if (generalNotesPresent === false) return null;
+  const { data, error } = await supabase
+    .from("general_notes")
+    .insert({ note })
+    .select()
+    .single();
+  if (error) {
+    if (isMissingTable(error)) { generalNotesPresent = false; return null; }
+    throw error;
+  }
+  return data;
+}
+
+export async function updateGeneralNote(id, note) {
+  if (generalNotesPresent === false) return;
+  const { error } = await supabase
+    .from("general_notes")
+    .update({ note, updated_at: new Date().toISOString() })
+    .eq("id", id);
+  if (error && !isMissingTable(error)) throw error;
+}
+
+export async function deleteGeneralNote(id) {
+  if (generalNotesPresent === false) return;
+  const { error } = await supabase.from("general_notes").delete().eq("id", id);
+  if (error && !isMissingTable(error)) throw error;
+}
+
+/* -------------------------------------------------------- rail_view_state -- */
+// Shared hide-only watermarks for the Rail's Auto-Action Log and Resolved list
+// (migration 0014). One row per list and GLOBAL, not per user — when any manager
+// presses Clear it is cleared for everyone. Nothing is deleted; the UI filters
+// out entries created at or before cleared_at.
+
+export const RAIL_LISTS = { log: "auto_log", resolved: "resolved" };
+
+let railViewStatePresent = null;
+export function railViewStateAvailable() {
+  return railViewStatePresent !== false;
+}
+
+// -> { auto_log: iso|null, resolved: iso|null }
+export async function fetchRailViewState() {
+  const empty = { auto_log: null, resolved: null };
+  const { data, error } = await supabase
+    .from("rail_view_state")
+    .select("list, cleared_at");
+  if (error) {
+    if (isMissingTable(error)) { railViewStatePresent = false; return empty; }
+    throw error;
+  }
+  railViewStatePresent = true;
+  const out = { ...empty };
+  (data || []).forEach((r) => { if (r.list in out) out[r.list] = r.cleared_at; });
+  return out;
+}
+
+// clearedAt null unhides the list again. Returns true if the write landed, so
+// the caller can tell a persisted clear from a session-only one.
+export async function setRailCleared(list, clearedAt, clearedBy = null) {
+  if (railViewStatePresent === false) return false;
+  const { error } = await supabase
+    .from("rail_view_state")
+    .upsert(
+      { list, cleared_at: clearedAt, cleared_by: clearedBy, updated_at: new Date().toISOString() },
+      { onConflict: "list" }
+    );
+  if (error) {
+    if (isMissingTable(error)) { railViewStatePresent = false; return false; }
+    throw error;
+  }
+  return true;
 }
 
 /* -------------------------------------------------------- schedule_weeks -- */
