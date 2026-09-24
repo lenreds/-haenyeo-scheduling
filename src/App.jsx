@@ -1258,8 +1258,15 @@ export default function SchedulingHub({ session, onSignOut }) {
   // the 7-day strip; today until someone picks another day.
   const [glanceIso, setGlanceIso] = useState(TODAY_ISO);
   const [swapModal, setSwapModal] = useState(null); // { name, role, code, dateIso } | null
-  const [swapForm, setSwapForm] = useState({ withName: "", shift: "", note: "" });
+  // removeOnly: take the person off with no replacement (brief item 3).
+  const [swapForm, setSwapForm] = useState({ withName: "", shift: "", note: "", removeOnly: false });
   const [swapBusy, setSwapBusy] = useState(false);
+  // Tip Sheet day-of add / remove (see applyDayOfChange). The modal IS the
+  // confirmation: it names the person and the date before anything is written.
+  const [dayOfModal, setDayOfModal] = useState(null); // { mode: "add" | "remove", dateIso, name? } | null
+  const [dayOfForm, setDayOfForm] = useState({ name: "", role: "", shift: "", reason: "" });
+  const [dayOfBusy, setDayOfBusy] = useState(false);
+  const [dayOfError, setDayOfError] = useState(null);
   const [deleting, setDeleting] = useState(false);
   const [qrPrintUrls, setQrPrintUrls] = useState({}); // all 7 QR images for the print sheet
   const [qrPrinting, setQrPrinting] = useState(false);
@@ -1536,6 +1543,18 @@ export default function SchedulingHub({ session, onSignOut }) {
       if (!roleFromCode(ov?.type || code)) return;
       place(name, "Management", code);
     });
+    // Anyone else whose dated override carries an FOH shift — e.g. a BOH or
+    // Kitchen person added on the day as a busser from the Tip Sheet, or picked
+    // as a swap replacement. They have no FOH pattern, so only the override
+    // puts them on the floor.
+    const activeNames = new Set(staffList.filter((s) => s.active !== false).map((s) => s.name));
+    Object.entries(overrides).forEach(([key, ov]) => {
+      const cut = key.lastIndexOf("|");
+      if (key.slice(cut + 1) !== dateIso) return;
+      const name = key.slice(0, cut);
+      if (seen.has(name) || !activeNames.has(name) || !roleFromCode(ov?.type)) return;
+      place(name, roleFromCode(ov.type), ov.type);
+    });
     return { working, off, gaps };
   }
 
@@ -1546,7 +1565,7 @@ export default function SchedulingHub({ session, onSignOut }) {
   const glanceRoster = useMemo(() => {
     const { working, gaps } = staffWorkingOn(glanceIso);
     return [...working, ...gaps];
-  }, [fohRoster, patterns, weeklyPatterns, placeholderPatterns, weeklyPlaceholders, groupRosters, overrides, railOffByDate, glanceIso]);
+  }, [fohRoster, patterns, weeklyPatterns, placeholderPatterns, weeklyPlaceholders, groupRosters, overrides, railOffByDate, staffList, glanceIso]);
   const glanceIsToday = glanceIso === TODAY_ISO;
   // "THURSDAY, SEP 24" for any other day; today stays the familiar label.
   const glanceHeading = glanceIsToday
@@ -1564,80 +1583,136 @@ export default function SchedulingHub({ session, onSignOut }) {
   // carries that date rather than assuming today (brief item 7).
   function openSwap(entry) {
     setSwapModal({ ...entry, dateIso: glanceIso });
-    setSwapForm({ withName: "", shift: "", note: "" });
+    setSwapForm({ withName: "", shift: "", note: "", removeOnly: false });
   }
 
-  // Replace one person's shift on that date with someone else's. Writes an OFF
-  // override for the person coming off and the chosen shift for the person
-  // going on. Supabase-js can't wrap two client-side writes in a transaction,
-  // so the second failure rolls the first back rather than leaving the day with
-  // nobody assigned.
+  // ---- Day-of changes -----------------------------------------------------
+  // Someone leaves early, comes in unscheduled, or no-shows. Tip Sheet add /
+  // remove and the Today at a Glance swap / remove-only all come through
+  // applyDayOfChange, which only ever writes DATED schedule_overrides (no
+  // railId). staffWorkingOn reads those, so the Tip Sheet, Today at a Glance
+  // and the Calendar all move together — nothing freezes names the way Custom
+  // Schedule does. The Set Schedule grid never reads overrides, so the planned
+  // week stays exactly as built; a marker on the cell (dayOfChangeFor) plus a
+  // note on the week and on the date say what changed instead.
+  //
+  // Supabase-js can't wrap two client writes in a transaction, so if the
+  // second write fails the first is put back rather than leaving the day half
+  // changed.
+  async function applyDayOfChange({ dateIso, removeName = null, addName = null, addCode = null, reason = "" }) {
+    const removeId = removeName ? nameToId[removeName] : null;
+    const addId = addName ? nameToId[addName] : null;
+    if ((removeName && !removeId) || (addName && !addId)) {
+      throw new Error("live staff records haven't loaded for one of these people");
+    }
+    const prevOverrides = overrides;
+    const isTipDate = dateIso === tipDateIso;
+    // Tip times are stored per slot, and a removal shifts people between
+    // slots — carry each person's typed times to wherever they land.
+    if (isTipDate) tipTimesRemapRef.current = tipTimesByName();
+    const written = [];
+    try {
+      if (removeName) {
+        await upsertScheduleOverride({ staffId: removeId, dateIso, overrideType: "OFF", isSwap: false, railRequestId: null });
+        written.push([removeName, removeId]);
+      }
+      if (addName) {
+        await upsertScheduleOverride({ staffId: addId, dateIso, overrideType: addCode, isSwap: !!removeName, railRequestId: null });
+        written.push([addName, addId]);
+      }
+    } catch (e) {
+      // A null type falls through to the planned pattern, so this restores
+      // "no override" as well as a previous one.
+      for (const [n, id] of written) {
+        const prev = prevOverrides[`${n}|${dateIso}`];
+        await upsertScheduleOverride({
+          staffId: id, dateIso, overrideType: prev?.type ?? null, isSwap: !!prev?.swap, railRequestId: prev?.railId ?? null,
+        }).catch(() => {});
+      }
+      if (isTipDate) tipTimesRemapRef.current = null;
+      throw e;
+    }
+    setOverrides((o) => ({
+      ...o,
+      ...(removeName ? { [`${removeName}|${dateIso}`]: { type: "OFF", swap: false, railId: null } } : {}),
+      ...(addName ? { [`${addName}|${dateIso}`]: { type: addCode, swap: !!removeName, railId: null } } : {}),
+    }));
+    const note = dayOfNoteText({ dateIso, removeName, addName, addCode, reason });
+    await writeDayOfNotes(dateIso, note, addId || removeId);
+    addLog(note, "good");
+    return note;
+  }
+
+  // "Sep 24 — Ivy removed from shift (left early)" /
+  // "Sep 24 — Miguel added, Busser/Runner 5pm-CL" /
+  // "Sep 24 — Ivy off, Miguel on Busser/Runner 5pm-CL"
+  function dayOfNoteText({ dateIso, removeName, addName, addCode, reason }) {
+    const shift = addCode ? roleShiftText(roleFromCode(addCode), addCode) : "";
+    const body = removeName && addName ? `${removeName} off, ${addName} on ${shift}`
+      : removeName ? `${removeName} removed from shift`
+      : `${addName} added, ${shift}`;
+    const why = String(reason || "").trim();
+    return `${shortDate(dateIso)} — ${body}${why ? ` (${why})` : ""}`;
+  }
+
+  // "Busser/Runner 5pm-CL", "Server 4pm-FC" — but plain "Expo 5pm" / "Host
+  // 4pm", whose shift labels already name the role.
+  function roleShiftText(role, code) {
+    const label = shiftLabelForType(code);
+    const r = role === "Servers" ? "Server" : role;
+    if (!r || label.toLowerCase().startsWith(r.toLowerCase())) return label;
+    return `${r} ${label}`;
+  }
+
+  // The same text on the week's Notes panel and on the date's Calendar page —
+  // ordinary rows, so both stay editable and deletable. A failed note never
+  // undoes the schedule change that already landed.
+  async function writeDayOfNotes(dateIso, text, staffId) {
+    const ws = iso(mondayOf(new Date(`${dateIso}T00:00:00`)));
+    try {
+      const row = await insertScheduleNote({ weekStartIso: ws, note: text, staffId: staffId || null, source: "dayof" });
+      if (row) setNotesByWeek((prev) => ({ ...prev, [ws]: [row, ...(prev[ws] || [])] }));
+    } catch (e) {
+      console.error("Day-of week note failed:", e);
+      addLog("Schedule changed, but the week note didn't save", "warn");
+    }
+    try {
+      const row = await insertCalendarNote(dateIso, text);
+      if (row) setCalNotes((m) => ({ ...m, [dateIso]: [...(m[dateIso] || []), row] }));
+    } catch (e) {
+      console.error("Day-of calendar note failed:", e);
+      addLog("Schedule changed, but the Calendar date note didn't save", "warn");
+    }
+  }
+
+  // Today at a Glance: replace the person, or with "Remove only" take them off
+  // with no replacement (brief item 3). Same override + note path as the Tip
+  // Sheet.
   async function confirmSwap() {
     if (!swapModal || swapBusy) return;
     const outName = swapModal.name;
-    const inName = swapForm.withName;
-    const code = swapForm.shift;
-    if (!inName || !code) return;
+    const removeOnly = !!swapForm.removeOnly;
+    const inName = removeOnly ? null : swapForm.withName;
+    const code = removeOnly ? null : swapForm.shift;
+    if (!removeOnly && (!inName || !code)) return;
 
     // Older modals (opened before this field existed) fall back to today.
     const dateIso = swapModal.dateIso || TODAY_ISO;
     const dateLabel = new Date(`${dateIso}T00:00:00`).toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
-    const ok = window.confirm(
-      `This will update ${outName}'s shift on ${dateLabel} on the finalized schedule and tip sheet. ` +
-      `This change cannot be automatically undone. Are you sure?`
-    );
+    const ok = window.confirm(removeOnly
+      ? `Remove ${outName} from ${dateLabel}? They come off the Tip Sheet, Today at a Glance and the Calendar for that date. The planned schedule is unchanged.`
+      : `Replace ${outName} with ${inName} (${shiftLabelForType(code)}) on ${dateLabel}? This updates the Tip Sheet, Today at a Glance and the Calendar for that date. The planned schedule is unchanged.`);
     if (!ok) return;
 
-    const outId = nameToId[outName];
-    const inId = nameToId[inName];
-    if (!outId || !inId) {
-      window.alert("Can't save — live staff records haven't loaded for one of these people.");
-      return;
-    }
     setSwapBusy(true);
-    const prevOverrides = overrides;
     try {
-      await upsertScheduleOverride({ staffId: outId, dateIso, overrideType: "OFF", isSwap: false, railRequestId: null });
-      try {
-        await upsertScheduleOverride({ staffId: inId, dateIso, overrideType: code, isSwap: true, railRequestId: null });
-      } catch (e) {
-        // Put the first person back rather than leaving the shift uncovered.
-        await upsertScheduleOverride({
-          staffId: outId, dateIso,
-          overrideType: prevOverrides[`${outName}|${dateIso}`]?.type ?? swapModal.code,
-          isSwap: false, railRequestId: null,
-        }).catch(() => {});
-        throw e;
-      }
-      setOverrides((o) => ({
-        ...o,
-        [`${outName}|${dateIso}`]: { type: "OFF", swap: false, railId: null },
-        [`${inName}|${dateIso}`]: { type: code, swap: true, railId: null },
-      }));
-
-      // Leave a trail on the week — this is not automatically reversible.
-      const label = shiftLabelForType(code);
-      const extra = swapForm.note.trim() ? ` — ${swapForm.note.trim()}` : "";
-      await addSwapNote(`${outName} off, ${inName} on ${label} (${dateLabel})${extra}`, dateIso);
-      addLog(`Swapped ${outName} → ${inName} (${label}) for ${dateLabel}`, "good");
+      await applyDayOfChange({ dateIso, removeName: outName, addName: inName, addCode: code, reason: swapForm.note });
       setSwapModal(null);
     } catch (e) {
       console.error("Swap failed:", e);
-      setOverrides(prevOverrides);
       window.alert(`Couldn't save the change: ${e.message || e}`);
     }
     setSwapBusy(false);
-  }
-
-  // The note belongs to the week the swapped day falls in, not to this week.
-  async function addSwapNote(text, dateIso = TODAY_ISO) {
-    const ws = iso(mondayOf(new Date(`${dateIso}T00:00:00`)));
-    try {
-      const row = await insertScheduleNote({ weekStartIso: ws, note: text });
-      if (row) setNotesByWeek((prev) => ({ ...prev, [ws]: [row, ...(prev[ws] || [])] }));
-    } catch (e) {
-      console.error("Swap note failed:", e);
-    }
   }
 
   // ---- Manage Shifts (brief item 3) ---------------------------------------
@@ -1721,7 +1796,7 @@ export default function SchedulingHub({ session, onSignOut }) {
 
   const tipWorking = useMemo(
     () => staffWorkingOn(tipDateIso),
-    [tipDateIso, fohRoster, patterns, weeklyPatterns, placeholderPatterns, weeklyPlaceholders, groupRosters, overrides, railOffByDate]
+    [tipDateIso, fohRoster, patterns, weeklyPatterns, placeholderPatterns, weeklyPlaceholders, groupRosters, overrides, railOffByDate, staffList]
   );
   const autoSlots = useMemo(() => autoAssignSlots(tipWorking.working), [tipWorking]);
 
@@ -1784,6 +1859,74 @@ export default function SchedulingHub({ session, onSignOut }) {
     const hours = hoursBetween(t.in, t.out);
     return { ...slot, name, pts, hours };
   });
+
+  // ---- Tip Sheet day-of add / remove --------------------------------------
+  // Clock times are keyed by slot, but removing Server 1 slides everyone up a
+  // slot. applyDayOfChange snapshots name -> times first; once the slots
+  // re-resolve, each person's times follow them (a removed person's go too).
+  const tipTimesRemapRef = useRef(null);
+  function tipTimesByName() {
+    const m = {};
+    displaySlots.forEach((s) => { if (s.name && tipTimes[s.id]) m[s.name] = tipTimes[s.id]; });
+    return m;
+  }
+  useEffect(() => {
+    const byName = tipTimesRemapRef.current;
+    if (!byName) return;
+    tipTimesRemapRef.current = null;
+    const next = {};
+    autoSlots.forEach((s) => { if (s.autoName && byName[s.autoName]) next[s.id] = byName[s.autoName]; });
+    setTipTimes(next);
+  }, [autoSlots]);
+
+  // Custom Schedule types names by hand, and a locked / sent sheet is
+  // read-only, so neither offers add / remove.
+  const tipDayOfAllowed = !customMode && !tipFinalized && !tipLocked;
+  // Roles with a tip slot (Training isn't tipped).
+  const TIP_ADD_ROLES = ["Servers", "Busser/Runner", "Expo", "Host", "Bar"];
+  const slotRoleFor = (role) => (role === "Expo" ? "Expo (Fri–Sun)" : role);
+
+  function openDayOfRemove(name) {
+    setDayOfError(null);
+    setDayOfForm({ name, role: "", shift: "", reason: "" });
+    setDayOfModal({ mode: "remove", dateIso: tipDateIso, name });
+  }
+  function openDayOfAdd() {
+    setDayOfError(null);
+    setDayOfForm({ name: "", role: "", shift: "", reason: "" });
+    setDayOfModal({ mode: "add", dateIso: tipDateIso });
+  }
+  // Default the role to the first tipped role the person already works.
+  function pickDayOfStaff(name) {
+    const role = (staffRolesMap[name] || []).find((r) => TIP_ADD_ROLES.includes(r)) || "Servers";
+    setDayOfForm((f) => ({ ...f, name, role, shift: "" }));
+  }
+  // Adding into a role whose slots are all taken would leave the person off
+  // the sheet (slot order is by start time), so say so instead.
+  function dayOfSlotsFull(role) {
+    const slotRole = slotRoleFor(role);
+    const capacity = SLOTS.filter((s) => s.role === slotRole).length;
+    const filled = autoSlots.filter((s) => s.role === slotRole && s.autoName).length;
+    return filled >= capacity;
+  }
+  async function confirmDayOf() {
+    if (!dayOfModal || dayOfBusy) return;
+    const { mode, dateIso, name } = dayOfModal;
+    setDayOfBusy(true);
+    setDayOfError(null);
+    try {
+      if (mode === "remove") {
+        await applyDayOfChange({ dateIso, removeName: name, reason: dayOfForm.reason });
+      } else {
+        await applyDayOfChange({ dateIso, addName: dayOfForm.name, addCode: dayOfForm.shift, reason: dayOfForm.reason });
+      }
+      setDayOfModal(null);
+    } catch (e) {
+      console.error("Day-of change failed:", e);
+      setDayOfError(`Couldn't save the change: ${e.message || e}`);
+    }
+    setDayOfBusy(false);
+  }
 
   const floorPool = (parseFloat(floorCash) || 0) + (parseFloat(floorCredit) || 0);
   const barPool = (parseFloat(barCash) || 0) + (parseFloat(barCredit) || 0);
@@ -3039,6 +3182,7 @@ export default function SchedulingHub({ session, onSignOut }) {
           return (
             <td key={w} className="shift-cell">
               {timeOff && <span className="cell-timeoff-flag" title="Approved time off" />}
+              {dayOfFlag(personName, realWeekday)}
               <select
                 className="cell-select shift-select"
                 value={value}
@@ -3089,6 +3233,26 @@ export default function SchedulingHub({ session, onSignOut }) {
     }
     return null;
   }
+  // Day-of change marker for a grid cell: a dated override with NO Rail request
+  // behind it is one made on the day (Tip Sheet add/remove, Today at a Glance
+  // swap / remove-only). The cell keeps showing the planned shift; this only
+  // explains what happened. Rail approvals carry railId and keep their own flag.
+  function dayOfChangeFor(name, weekday) {
+    if (!activeWeek) return null;
+    const day = activeWeek.find((d) => d.weekday === weekday);
+    if (!day) return null;
+    const ov = overrides[`${name}|${day.iso}`];
+    if (!ov?.type || ov.railId) return null;
+    const what = ov.type === "OFF" ? "Removed on the day"
+      : ov.type === "GAP" ? "Marked as a coverage gap on the day"
+      : `Added on the day — ${shiftLabelForType(ov.type)}`;
+    return `${what} (${shortDate(day.iso)}). Planned shift shown — see this week's Notes.`;
+  }
+  function dayOfFlag(name, weekday) {
+    const text = dayOfChangeFor(name, weekday);
+    return text ? <span className="cell-dayof-flag screen-only" title={text} aria-label={text} /> : null;
+  }
+
   // On "Override": replace the Off override with the chosen shift, keeping the
   // rail_request_id link (the request stays approved; no email is sent).
   async function overwriteApprovedOverride(name, isoStr, code, railId) {
@@ -3983,6 +4147,14 @@ export default function SchedulingHub({ session, onSignOut }) {
         .check-value { font-family: 'Space Mono', monospace; font-weight: 700; font-size: 16px; color: #2B2A25; }
         .check-sub { font-size: 10.5px; color: #4a473d; }
         .custom-toggle { font-family: 'Space Mono', monospace; font-size: 10.5px; letter-spacing: 1px; text-transform: uppercase; padding: 7px 12px; border-radius: 4px; border: 1px solid rgba(43,42,37,0.2); background: #FBF8EF; color: #6b6355; cursor: pointer; white-space: nowrap; }
+        .tip-staff-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+        .add-staff-btn { font-family: 'Space Mono', monospace; font-size: 10.5px; letter-spacing: 1px; text-transform: uppercase; padding: 7px 12px; border-radius: 4px; border: 1px solid rgba(43,42,37,0.2); background: #FBF8EF; color: #6b6355; cursor: pointer; white-space: nowrap; }
+        .add-staff-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+        .tip-name-display { display: inline-flex; align-items: center; gap: 6px; }
+        .slot-remove-btn { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: #a39a88; cursor: pointer; opacity: 0.55; }
+        tr:hover .slot-remove-btn, .slot-remove-btn:focus-visible { opacity: 1; }
+        .slot-remove-btn:hover { color: #B23A2F; background: #F6E7E5; }
+        .dayof-mode { display: flex; gap: 6px; margin-bottom: 10px; }
         .custom-toggle.on { background: #4C6B4F; border-color: #4C6B4F; color: #F5F0E3; }
 
         .print-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
@@ -4172,6 +4344,10 @@ export default function SchedulingHub({ session, onSignOut }) {
         /* approved time-off passive indicator (item 2) */
         .week-table td.shift-cell { position: relative; }
         .cell-timeoff-flag { position: absolute; top: 2px; right: 2px; width: 8px; height: 8px; border-radius: 50%; background: #7B93A3; box-shadow: 0 0 0 2px rgba(123,147,163,0.25); pointer-events: none; z-index: 1; }
+        /* Day-of change (Tip Sheet add/remove, glance swap): top-LEFT so it never
+           collides with the time-off dot. Hoverable, unlike that dot, because the
+           tooltip is the whole explanation. */
+        .cell-dayof-flag { position: absolute; top: 2px; left: 2px; width: 8px; height: 8px; border-radius: 50%; background: #C98A3E; box-shadow: 0 0 0 2px rgba(201,138,62,0.3); cursor: help; z-index: 1; }
 
         /* ---- manager-on-shift banner (FOH) ---- */
         .fm-banner { display: flex; gap: 6px; align-items: stretch; margin: 2px 0 16px; flex-wrap: wrap; }
@@ -4400,6 +4576,10 @@ export default function SchedulingHub({ session, onSignOut }) {
         .today-btn { background: var(--accent); border-color: var(--accent); color: #0c0c0c; }
         .today-btn:disabled { background: transparent; color: var(--muted); border-color: var(--line2); }
         .custom-toggle { background: var(--s2); border-color: var(--line2); color: var(--txt2); }
+        .add-staff-btn { background: var(--s2); border-color: var(--line2); color: var(--txt2); }
+        .add-staff-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+        .slot-remove-btn { color: var(--muted); }
+        .slot-remove-btn:hover { color: #e79289; background: rgba(178,58,47,0.16); }
         .custom-toggle.on { background: var(--accent); border-color: var(--accent); color: #0c0c0c; }
         .add-payout-btn { color: var(--accent); border-color: var(--line2); }
         .week-range-current { background: rgba(200,149,108,0.18); color: var(--accent); }
@@ -5956,6 +6136,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                                 return (
                                   <td key={w} className="shift-cell">
                                     {timeOff && <span className="cell-timeoff-flag" title="Approved time off" />}
+                                    {dayOfFlag(p.name, weekday)}
                                     <div className="cell-stack">
                                       {personRoles.length > 1 && (
                                         <select
@@ -6088,6 +6269,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                               return (
                                 <td key={w} className="shift-cell">
                                   {mgmtTimeOff && <span className="cell-timeoff-flag" title="Approved time off" />}
+                                  {dayOfFlag(personName, realWeekday)}
                                   <div className="cell-stack">
                                     <select
                                       className="cell-select shift-select"
@@ -6115,6 +6297,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                             return (
                               <td key={w} className="shift-cell">
                                 {mgmtTimeOff && <span className="cell-timeoff-flag" title="Approved time off" />}
+                                {dayOfFlag(personName, realWeekday)}
                                 <button
                                   className="shift-chip chip-btn"
                                   style={type === "OFF" ? OFF_CHIP_DARK : roleCellStyle(cellRole)}
@@ -6348,7 +6531,17 @@ export default function SchedulingHub({ session, onSignOut }) {
                                   onChange={(e) => setSlotName(p.id, e.target.value)}
                                 />
                               ) : (
-                                <span className="tip-name-display">{p.name || <span className="slot-empty">—</span>}</span>
+                                <span className="tip-name-display">
+                                  {p.name || <span className="slot-empty">—</span>}
+                                  {p.name && tipDayOfAllowed && (
+                                    <button
+                                      className="slot-remove-btn screen-only"
+                                      title={`Remove ${p.name} from ${shortDate(tipDateIso)}`}
+                                      aria-label={`Remove ${p.name} from ${shortDate(tipDateIso)}`}
+                                      onClick={() => openDayOfRemove(p.name)}
+                                    ><X size={11} /></button>
+                                  )}
+                                </span>
                               )}
                             </td>
                             <td className="shift-cell"><input type="text" className="tip-time-input" placeholder="4:00 PM" value={t.in} onChange={(e) => setSlotTime(p.id, "in", e.target.value)} disabled={!p.name} /></td>
@@ -6379,9 +6572,21 @@ export default function SchedulingHub({ session, onSignOut }) {
                     <div className="check-value">${money(floorCheckTotal)}</div>
                     <div className="check-sub">{floorCheckMatches ? "✓ Matches floor cash + CC" : `Off by $${money(Math.abs(floorCheckTotal - floorPool))} vs floor cash + CC`}</div>
                   </div>
-                  <button className={`custom-toggle ${customMode ? "on" : ""}`} onClick={toggleCustomMode}>
-                    {customMode ? "✓ Custom Schedule" : "Custom Schedule"}
-                  </button>
+                  <div className="tip-staff-actions">
+                    {/* Day-of add: writes a dated override like the × above, so
+                        the sheet re-resolves live rather than freezing names. */}
+                    <button
+                      className="add-staff-btn screen-only"
+                      disabled={!tipDayOfAllowed}
+                      onClick={openDayOfAdd}
+                      title={customMode ? "Turn off Custom Schedule to add staff for this date"
+                        : !tipDayOfAllowed ? "This date is locked — unlock it to add staff"
+                        : `Add someone to ${shortDate(tipDateIso)}`}
+                    >+ Add staff</button>
+                    <button className={`custom-toggle ${customMode ? "on" : ""}`} onClick={toggleCustomMode}>
+                      {customMode ? "✓ Custom Schedule" : "Custom Schedule"}
+                    </button>
+                  </div>
                 </div>
 
                 {/* Never drop someone from the sheet silently — payroll needs to
@@ -6899,7 +7104,22 @@ export default function SchedulingHub({ session, onSignOut }) {
         return (
           <div className="day-popup-backdrop" onClick={() => !swapBusy && setSwapModal(null)}>
             <div className="delete-modal" onClick={(e) => e.stopPropagation()}>
-              <div className="delete-modal-title">Swap shift</div>
+              <div className="delete-modal-title">{swapForm.removeOnly ? "Remove from shift" : "Swap shift"}</div>
+
+              {/* Replace with someone, or take them off with no replacement
+                  (brief item 3). Both write dated overrides + a note. */}
+              <div className="dayof-mode" role="group" aria-label="Change type">
+                <button
+                  className={`subtab-btn ${!swapForm.removeOnly ? "active" : ""}`}
+                  disabled={swapBusy}
+                  onClick={() => setSwapForm((f) => ({ ...f, removeOnly: false }))}
+                >Replace</button>
+                <button
+                  className={`subtab-btn ${swapForm.removeOnly ? "active" : ""}`}
+                  disabled={swapBusy}
+                  onClick={() => setSwapForm((f) => ({ ...f, removeOnly: true, withName: "", shift: "" }))}
+                >Remove only</button>
+              </div>
 
               <label className="manual-field-label">Date</label>
               <input className="manual-field" type="text" value={dateLabel} readOnly disabled />
@@ -6913,55 +7133,163 @@ export default function SchedulingHub({ session, onSignOut }) {
                 value={`${swapModal.name} — ${swapModal.code === "GAP" ? "Coverage gap" : shiftLabelForType(swapModal.code)}`}
               />
 
-              <label className="manual-field-label" htmlFor="swap-with">Replacing with</label>
-              <select
-                id="swap-with"
-                className="manual-field"
-                value={swapForm.withName}
-                disabled={swapBusy}
-                onChange={(e) => setSwapForm((f) => ({ ...f, withName: e.target.value, shift: "" }))}
-              >
-                <option value="">Select staff…</option>
-                {staffList
-                  .filter((s) => s.active !== false && s.name !== swapModal.name)
-                  .map((s) => <option key={s.id || s.name} value={s.name}>{s.name}</option>)}
-              </select>
+              {!swapForm.removeOnly && (
+                <>
+                  <label className="manual-field-label" htmlFor="swap-with">Replacing with</label>
+                  <select
+                    id="swap-with"
+                    className="manual-field"
+                    value={swapForm.withName}
+                    disabled={swapBusy}
+                    onChange={(e) => setSwapForm((f) => ({ ...f, withName: e.target.value, shift: "" }))}
+                  >
+                    <option value="">Select staff…</option>
+                    {staffList
+                      .filter((s) => s.active !== false && s.name !== swapModal.name)
+                      .map((s) => <option key={s.id || s.name} value={s.name}>{s.name}</option>)}
+                  </select>
 
-              <label className="manual-field-label" htmlFor="swap-shift">New shift</label>
-              <select
-                id="swap-shift"
-                className="manual-field"
-                value={swapForm.shift}
-                disabled={swapBusy || !swapForm.withName}
-                onChange={(e) => setSwapForm((f) => ({ ...f, shift: e.target.value }))}
-              >
-                <option value="">{swapForm.withName ? `Select shift (${replRole})…` : "Pick a replacement first…"}</option>
-                {shiftOpts.map((o) => <option key={o.code} value={o.code}>{o.label}</option>)}
-              </select>
+                  <label className="manual-field-label" htmlFor="swap-shift">New shift</label>
+                  <select
+                    id="swap-shift"
+                    className="manual-field"
+                    value={swapForm.shift}
+                    disabled={swapBusy || !swapForm.withName}
+                    onChange={(e) => setSwapForm((f) => ({ ...f, shift: e.target.value }))}
+                  >
+                    <option value="">{swapForm.withName ? `Select shift (${replRole})…` : "Pick a replacement first…"}</option>
+                    {shiftOpts.map((o) => <option key={o.code} value={o.code}>{o.label}</option>)}
+                  </select>
+                </>
+              )}
 
-              <label className="manual-field-label" htmlFor="swap-note">Note</label>
+              <label className="manual-field-label" htmlFor="swap-note">Reason (optional)</label>
               <textarea
                 id="swap-note"
                 className="manual-field"
                 rows={2}
                 disabled={swapBusy}
-                placeholder="Why the change (optional) — saved to this week's notes"
+                placeholder="e.g. left early — added to the note on this week and on the date"
                 value={swapForm.note}
                 onChange={(e) => setSwapForm((f) => ({ ...f, note: e.target.value }))}
               />
 
               <div className="delete-modal-warn">
-                This updates the finalized schedule and tip sheet for {dateLabel}. It can't be automatically undone.
+                {swapForm.removeOnly
+                  ? `${swapModal.name} comes off the Tip Sheet, Today at a Glance and the Calendar for ${dateLabel}, with no replacement.`
+                  : `This updates the Tip Sheet, Today at a Glance and the Calendar for ${dateLabel}.`}
+                {" "}The planned schedule on Set Schedule is left as built, with a marker on the day. It can't be automatically undone.
               </div>
 
               <div className="delete-modal-actions">
                 <button className="nr-btn nr-btn-deny" disabled={swapBusy} onClick={() => setSwapModal(null)}>Cancel</button>
                 <button
                   className="delete-confirm-btn"
-                  disabled={swapBusy || !swapForm.withName || !swapForm.shift}
+                  disabled={swapBusy || (!swapForm.removeOnly && (!swapForm.withName || !swapForm.shift))}
                   onClick={confirmSwap}
                 >
-                  {swapBusy ? "Saving…" : "Confirm Change"}
+                  {swapBusy ? "Saving…" : swapForm.removeOnly ? `Remove ${swapModal.name}` : "Confirm Change"}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Tip Sheet day-of add / remove. This dialog is the confirmation: it
+          names the person and the date before anything is written. */}
+      {dayOfModal && (() => {
+        const { mode, dateIso, name } = dayOfModal;
+        const dateLabel = new Date(`${dateIso}T00:00:00`)
+          .toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
+        const isAdd = mode === "add";
+        const candidates = staffList
+          .filter((s) => s.active !== false && s.name && !tipWorkingNames.has(s.name))
+          .sort((a, b) => a.name.localeCompare(b.name));
+        const role = dayOfForm.role;
+        const shiftOpts = role ? (roleOptions[role] || []).filter((o) => o.code !== "OFF") : [];
+        const full = isAdd && role ? dayOfSlotsFull(role) : false;
+        const roleLabel = role === "Servers" ? "Server" : role;
+        const shiftLabel = dayOfForm.shift ? roleShiftText(role, dayOfForm.shift) : "";
+        const ready = isAdd ? !!(dayOfForm.name && role && dayOfForm.shift && !full) : true;
+        return (
+          <div className="day-popup-backdrop" onClick={() => !dayOfBusy && setDayOfModal(null)}>
+            <div className="delete-modal" onClick={(e) => e.stopPropagation()}>
+              <div className="delete-modal-title">{isAdd ? "Add staff" : "Remove from shift"}</div>
+
+              <label className="manual-field-label">Date</label>
+              <input className="manual-field" type="text" value={dateLabel} readOnly disabled />
+
+              {isAdd && (
+                <>
+                  <label className="manual-field-label" htmlFor="dayof-staff">Staff member</label>
+                  <select
+                    id="dayof-staff"
+                    className="manual-field"
+                    value={dayOfForm.name}
+                    disabled={dayOfBusy}
+                    onChange={(e) => pickDayOfStaff(e.target.value)}
+                  >
+                    <option value="">Select staff…</option>
+                    {candidates.map((s) => <option key={s.id || s.name} value={s.name}>{s.name}</option>)}
+                  </select>
+
+                  <label className="manual-field-label" htmlFor="dayof-role">Role</label>
+                  <select
+                    id="dayof-role"
+                    className="manual-field"
+                    value={role}
+                    disabled={dayOfBusy || !dayOfForm.name}
+                    onChange={(e) => setDayOfForm((f) => ({ ...f, role: e.target.value, shift: "" }))}
+                  >
+                    {!dayOfForm.name && <option value="">Pick a staff member first…</option>}
+                    {TIP_ADD_ROLES.map((r) => <option key={r} value={r}>{r === "Servers" ? "Server" : r}</option>)}
+                  </select>
+
+                  <label className="manual-field-label" htmlFor="dayof-shift">Shift</label>
+                  <select
+                    id="dayof-shift"
+                    className="manual-field"
+                    value={dayOfForm.shift}
+                    disabled={dayOfBusy || !role}
+                    onChange={(e) => setDayOfForm((f) => ({ ...f, shift: e.target.value }))}
+                  >
+                    <option value="">{role ? "Select shift…" : "Pick a role first…"}</option>
+                    {shiftOpts.map((o) => <option key={o.code} value={o.code}>{o.label}</option>)}
+                  </select>
+                  {full && (
+                    <div className="send-error">
+                      Every {roleLabel} slot on this sheet is already filled — remove someone first, or pick another role.
+                    </div>
+                  )}
+                </>
+              )}
+
+              <label className="manual-field-label" htmlFor="dayof-reason">Reason (optional)</label>
+              <input
+                id="dayof-reason"
+                className="manual-field"
+                type="text"
+                disabled={dayOfBusy}
+                placeholder={isAdd ? "e.g. called in to cover" : "e.g. left early"}
+                value={dayOfForm.reason}
+                onChange={(e) => setDayOfForm((f) => ({ ...f, reason: e.target.value }))}
+              />
+
+              <div className="delete-modal-warn">
+                {isAdd
+                  ? (dayOfForm.name && shiftLabel
+                    ? `Add ${dayOfForm.name} as ${shiftLabel} on ${dateLabel}?`
+                    : `Pick who's coming in on ${dateLabel}.`)
+                  : `Remove ${name} from ${dateLabel}?`}
+                {" "}This changes {dateLabel} only: the Tip Sheet, Today at a Glance and the Calendar update, and a note goes on this week and on the date. The planned schedule on Set Schedule is unchanged.
+              </div>
+              {dayOfError && <div className="send-error">{dayOfError}</div>}
+
+              <div className="delete-modal-actions">
+                <button className="nr-btn nr-btn-deny" disabled={dayOfBusy} onClick={() => setDayOfModal(null)}>Cancel</button>
+                <button className="delete-confirm-btn" disabled={dayOfBusy || !ready} onClick={confirmDayOf}>
+                  {dayOfBusy ? "Saving…" : isAdd ? (dayOfForm.name ? `Add ${dayOfForm.name}` : "Add") : `Remove ${name}`}
                 </button>
               </div>
             </div>
@@ -7110,6 +7438,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                           <div className="notes-row-text">{n.note}</div>
                           <div className="notes-row-meta">
                             {n.source === "rail" && <span className="notes-tag">from Rail</span>}
+                            {n.source === "dayof" && <span className="notes-tag">day-of change</span>}
                             {n.staff_id && staffNameById[n.staff_id] && <span>{staffNameById[n.staff_id]}</span>}
                             <span>{new Date(n.created_at).toLocaleDateString(undefined, MONTH_FMT)}</span>
                           </div>
