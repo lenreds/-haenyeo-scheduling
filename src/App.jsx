@@ -68,7 +68,10 @@ function numOrNull(v) {
 // the offscreen clone: interactive chrome is stripped, <select>/<input> become
 // plain text (html2canvas doesn't paint a select's chosen option), and an
 // optional logo header is prepended. Tall captures paginate onto extra pages.
-const PDF_STRIP_ALWAYS = [".subject-preview", ".published-badge", ".publish-btn", ".print-btn", ".today-btn", ".back-btn", ".save-status", ".save-btn"];
+// .screen-only marks app state that isn't part of the document (FINALIZED /
+// LOCKED banners, the action row, advisory notes). It's stripped here and hidden
+// by @media print, so tagging an element is all it takes to keep it off both.
+const PDF_STRIP_ALWAYS = [".screen-only", ".subject-preview", ".published-badge", ".publish-btn", ".print-btn", ".today-btn", ".back-btn", ".save-status", ".save-btn"];
 // Snapshot a node into a cropped canvas. Split out of exportNodeAsPdf so the Tip
 // Sheet can capture, measure how much of the page the result would fill, and
 // re-capture at a different width before committing to a page (see
@@ -2664,7 +2667,9 @@ export default function SchedulingHub({ session, onSignOut }) {
     // Outline-only boxes for the PDF (html2canvas can't read @media print).
     card.classList.add("tip-pdf-mode");
     // Drop helper/hint text and the Custom Schedule toggle from the PDF.
-    const strip = [".footer-note", ".recon-note", ".custom-toggle", ".fm-banner", ".add-payout-btn", ".remove-payout-btn", ".today-pill"];
+    // (Status banners, the action row and the TODAY pill are .screen-only,
+    // which PDF_STRIP_ALWAYS already covers.)
+    const strip = [".footer-note", ".recon-note", ".custom-toggle", ".fm-banner", ".add-payout-btn", ".remove-payout-btn"];
 
     // Pin the width so the layout never depends on the browser window size.
     async function captureAt(widthPx) {
@@ -4018,7 +4023,12 @@ export default function SchedulingHub({ session, onSignOut }) {
           .save-status, .day-popup-backdrop { display: none !important; }
           .cal-card { box-shadow: none !important; }
           /* Tip Sheet print: hide helper text, buttons, navigation, finalized banner; outline-only boxes; fit one page */
-          .footer-note, .recon-note, .fm-banner, .week-header, .tip-finalized-banner, .tip-locked-banner { display: none !important; }
+          .footer-note, .recon-note, .fm-banner, .week-header, .screen-only { display: none !important; }
+          /* A locked sheet dims + greys its inputs on screen; on paper it must
+             read like any other sheet. */
+          /* Extra class: the dark skin's own .tip-locked input rule is also
+             !important and comes later in this sheet, so it would win a tie. */
+          .tip-page-split.tip-locked input { opacity: 1 !important; background: #fff !important; }
           .check-box { background: transparent !important; }
           .check-box.match { border-color: #7BA37E; }
           .check-box.mismatch { border-color: #C98A3E; }
@@ -6128,7 +6138,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         <div className="cal-wrap" key="tips">
           <div className="cal-card" ref={tipCardRef}>
             {tipFinalized && (
-              <div className="tip-finalized-banner">
+              <div className="tip-finalized-banner screen-only">
                 <Lock size={14} /> FINALIZED{tipFinalizedAt ? ` — ${new Date(tipFinalizedAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}` : ""}
                 <span className="tip-finalized-sub">Inputs are locked. Unlock to edit and re-finalize.</span>
               </div>
@@ -6136,7 +6146,7 @@ export default function SchedulingHub({ session, onSignOut }) {
             {/* A date can be locked without being finalized, so this banner is
                 its own thing rather than a branch of the finalized one. */}
             {tipLocked && (
-              <div className="tip-locked-banner">
+              <div className="tip-locked-banner screen-only">
                 <Lock size={14} /> LOCKED — {shortDate(tipDateIso).toUpperCase()}
                 {tipLockedAt ? <span className="tip-finalized-sub">Locked {new Date(tipLockedAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</span> : null}
                 <span className="tip-finalized-sub">This date's inputs are read-only. Press "Locked ✓" below to unlock.</span>
@@ -6222,7 +6232,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                         paging to another day drops the link. */}
                     {tipFromDayIso === tipDateIso && (
                       <button
-                        className="day-page-icon"
+                        className="day-page-icon screen-only"
                         title={`Back to ${shortDate(tipFromDayIso)}'s notes`}
                         onClick={() => { setCalDayIso(tipFromDayIso); setCalView("day"); setTab("calendar"); }}
                       ><StickyNote size={15} /></button>
@@ -6240,7 +6250,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                   </div>
                   <div className="week-range" style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     {tipDateInfo.dateObj.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" })}
-                    {tipDateIso === TODAY_ISO && <span className="today-pill">Today</span>}
+                    {tipDateIso === TODAY_ISO && <span className="today-pill screen-only">Today</span>}
                   </div>
                   <button className="back-btn" onClick={() => shiftTipDate(1)}>Next day <ChevronRight size={14} /></button>
                 </div>
@@ -6378,7 +6388,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                   const names = [...new Set(slotsExcludedOff)];
                   const one = names.length === 1;
                   return (
-                    <div className="tip-off-note">
+                    <div className="tip-off-note screen-only">
                       <AlertTriangle size={12} />
                       {names.join(", ")} {one ? "is" : "are"} scheduled off on {shortDate(tipDateIso)}, so {one ? "that slot was" : "those slots were"} left empty.
                       Give them a shift on the Set Schedule for this date to include them.
@@ -6395,7 +6405,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                     two buttons that used to mean almost the same thing became
                     one. The subject preview went with it — the subject is
                     editable on the send screen. */}
-                <div className="tip-actions">
+                <div className="tip-actions screen-only">
                   <SaveStatus state={tipSaveState} />
                   <button
                     className="print-btn save-btn"
