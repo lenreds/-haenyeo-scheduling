@@ -1279,7 +1279,9 @@ export default function SchedulingHub({ session, onSignOut }) {
   const [tipLocked, setTipLocked] = useState(false);
   const [tipLockedAt, setTipLockedAt] = useState(null);
   const [tipLockBusy, setTipLockBusy] = useState(false);
-  const [tipDateIso, setTipDateIso] = useState("2026-07-02");
+  // Opens on today, like the Calendar — it used to be pinned to the Jul 2 2026
+  // sample date. TODAY_ISO is the same value the Today button jumps to.
+  const [tipDateIso, setTipDateIso] = useState(TODAY_ISO);
   const [floorCash, setFloorCash] = useState("");
   const [floorCredit, setFloorCredit] = useState("");
   const [barCash, setBarCash] = useState("");
