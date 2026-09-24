@@ -176,7 +176,9 @@ async function paginateCanvasToPdf(canvas, filename, orientation) {
   const pages = Math.max(1, Math.ceil(imgH / availH));
   for (let p = 0; p < pages; p++) {
     if (p > 0) pdf.addPage();
-    pdf.addImage(data, "PNG", margin, margin - p * availH, imgW, imgH);
+    // Same lossless compression as the other PDF paths. The alias makes jsPDF
+    // embed the image once and reuse it on every page instead of per page.
+    pdf.addImage(data, "PNG", margin, margin - p * availH, imgW, imgH, "sheet", "FAST");
     // Mask the margins so page n's overflow doesn't bleed into page n±1's edges.
     pdf.setFillColor(255, 255, 255);
     pdf.rect(0, 0, pageW, margin, "F");
@@ -194,15 +196,20 @@ function canvasPageFill(canvas, orientation) {
   const scale = Math.min(availW / canvas.width, availH / canvas.height);
   return { scale, widthFill: (canvas.width * scale) / availW, heightFill: (canvas.height * scale) / availH };
 }
-async function onePageCanvasToPdf(canvas, filename, orientation) {
+// Returns the jsPDF instance so the caller can download it (Save as PDF) or
+// base64 it for an email attachment (Send Tip Sheet) — one render, two outputs.
+async function onePageCanvasToPdf(canvas, orientation) {
   const { jsPDF } = await import("jspdf");
   const pdf = new jsPDF({ orientation, unit: "pt", format: "letter" });
   const { pageW, pageH } = pdfPageBox(orientation);
   const { scale } = canvasPageFill(canvas, orientation);
   const w = canvas.width * scale;
   const h = canvas.height * scale;
-  pdf.addImage(canvas.toDataURL("image/png"), "PNG", (pageW - w) / 2, (pageH - h) / 2, w, h);
-  pdf.save(filename);
+  // "FAST" = lossless Flate on the embedded pixels. Without it jsPDF stores the
+  // 2x capture nearly raw (~8.5 MB), over Vercel's 4.5 MB request limit once
+  // it's attached to the tip sheet email. Same pixels either way.
+  pdf.addImage(canvas.toDataURL("image/png"), "PNG", (pageW - w) / 2, (pageH - h) / 2, w, h, undefined, "FAST");
+  return pdf;
 }
 
 async function exportNodeAsPdf(node, filename, { header, orientation = "portrait", strip = [] } = {}) {
@@ -447,7 +454,10 @@ async function renderSheetNodeToPdf(node) {
   const scale = Math.min((pageW - margin * 2) / canvas.width, (pageH - margin * 2) / canvas.height);
   const w = canvas.width * scale;
   const h = canvas.height * scale;
-  pdf.addImage(canvas.toDataURL("image/png"), "PNG", (pageW - w) / 2, (pageH - h) / 2, w, h);
+  // Lossless "FAST" Flate, as in onePageCanvasToPdf: these PDFs ride along on
+  // the publish email, and uncompressed captures across several weeks would
+  // blow past Vercel's 4.5 MB request limit.
+  pdf.addImage(canvas.toDataURL("image/png"), "PNG", (pageW - w) / 2, (pageH - h) / 2, w, h, undefined, "FAST");
   return pdf;
 }
 async function exportSheetNodeAsPdf(node, filename) {
@@ -457,7 +467,9 @@ async function exportSheetNodeAsPdf(node, filename) {
 // Same render, but return the PDF as raw base64 (for email attachments). No
 // data: prefix — the server base64-encodes it straight into the MIME part.
 async function sheetNodePdfBase64(node) {
-  const pdf = await renderSheetNodeToPdf(node);
+  return pdfToBase64(await renderSheetNodeToPdf(node));
+}
+function pdfToBase64(pdf) {
   const bytes = new Uint8Array(pdf.output("arraybuffer"));
   let bin = "";
   const CHUNK = 0x8000;
@@ -2000,6 +2012,8 @@ export default function SchedulingHub({ session, onSignOut }) {
     ? new Date(tipSentAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
     : "";
   const tipSendChosen = tipSendRoster.filter((r) => r.email && !tipSendExcluded.includes(r.name));
+  // "09/24/26" — the default subject is "Tip sheet 09/24/26".
+  const tipSendShortDate = `${tipDateIso.slice(5, 7)}/${tipDateIso.slice(8, 10)}/${tipDateIso.slice(2, 4)}`;
 
   // A sheet that already went out asks before opening the screen again, so a
   // stray click on "Sent ✓" can't start a second round of emails (brief item 1).
@@ -2007,7 +2021,7 @@ export default function SchedulingHub({ session, onSignOut }) {
     if (tipSent && !window.confirm(
       `This tip sheet was already sent${tipSentAtLabel ? ` at ${tipSentAtLabel}` : ""}. Send it again?`
     )) return;
-    setTipSendSubject(`Haenyeo Tip Sheet — ${tipSendDayLabel}`);
+    setTipSendSubject(`Tip sheet ${tipSendShortDate}`);
     setTipSendNotes("");
     setTipSendExcluded([]);
     setTipSendResult(null);
@@ -2022,26 +2036,29 @@ export default function SchedulingHub({ session, onSignOut }) {
   // successful send is also what finalizes and locks the sheet — one action, one
   // write. The tip math is untouched; the subject, the notes block and the
   // recipient list are what the manager confirmed on the send screen.
+  //
+  // The email is the Save as PDF page attached, with only the manager's notes
+  // (then the sign-off) as the body. The PDF is built first: if that fails
+  // nothing is emailed, and the error stays in the modal so they can retry.
   async function confirmSendTipSheet() {
     if (tipSendBusy || !tipSendChosen.length) return;
     setTipSendBusy(true);
     setTipSendResult(null);
-    const rows = finalSlots.filter((p) => p.name).map((p) => ({
-      name: p.name, position: p.label, points: (p.pts || 0).toFixed(2), hours: (p.hours || 0).toFixed(2), final: money(p.final || 0),
-    }));
-    const floorCheckText = floorCheckMatches
-      ? `Floor check: $${money(floorCheckTotal)} — matches floor cash + CC.`
-      : `Floor check: $${money(floorCheckTotal)} — off by $${money(Math.abs(floorCheckTotal - floorPool))}.`;
+    let pdfB64;
+    try {
+      pdfB64 = pdfToBase64(await renderTipSheetPdf());
+    } catch (e) {
+      console.error("Tip sheet PDF for email failed:", e);
+      setTipSendBusy(false);
+      setTipSendResult(`the PDF couldn't be generated (${e.message || e}) — nothing was sent. Try again.`);
+      return;
+    }
     const res = await triggerTipSheetSend({
       dayDateLabel: tipSendDayLabel,
-      floorPool: money(floorPool),
-      rows,
-      barTipOut: money(barTipOutTotal),
-      barRecipients: barTipOutRecipients,
-      floorCheckText,
       subject: tipSendSubject.trim(),
       notes: tipSendNotes.trim(),
-      recipients: tipSendChosen.map((r) => ({ name: r.name, email: r.email, payout: r.payout })),
+      attachment: { filename: tipSheetPdfFilename, b64: pdfB64 },
+      recipients: tipSendChosen.map((r) => ({ name: r.name, email: r.email })),
     }, session?.access_token);
     setTipSendBusy(false);
     if (res?.error) {
@@ -2634,16 +2651,20 @@ export default function SchedulingHub({ session, onSignOut }) {
   // page. Now the capture is measured and, if it would cover less than
   // PDF_PAGE_FILL_TARGET of the page height, re-taken at a narrower CSS width so
   // the layout reflows taller. Placement then scales from both axes and centres.
-  async function exportTipSheetPdf() {
-    if (pdfBusy || !tipCardRef.current) return;
-    setPdfBusy("tips");
+  //
+  // renderTipSheetPdf is the ONE Tip Sheet renderer: Save as PDF downloads its
+  // result and Send Tip Sheet attaches it, so the emailed page is exactly the
+  // saved page. It throws on failure — the send path must not email without it.
+  const tipSheetPdfFilename = `Haenyeo-TipSheet-${tipDateIso}.pdf`;
+  async function renderTipSheetPdf() {
     const card = tipCardRef.current;
+    if (!card) throw new Error("the Tip Sheet isn't on screen");
     const origW = card.style.width;
     const origMax = card.style.maxWidth;
     // Outline-only boxes for the PDF (html2canvas can't read @media print).
     card.classList.add("tip-pdf-mode");
     // Drop helper/hint text and the Custom Schedule toggle from the PDF.
-    const strip = [".footer-note", ".recon-note", ".custom-toggle", ".fm-banner", ".add-payout-btn", ".remove-payout-btn"];
+    const strip = [".footer-note", ".recon-note", ".custom-toggle", ".fm-banner", ".add-payout-btn", ".remove-payout-btn", ".today-pill"];
 
     // Pin the width so the layout never depends on the browser window size.
     async function captureAt(widthPx) {
@@ -2675,13 +2696,20 @@ export default function SchedulingHub({ session, onSignOut }) {
           `${(best.fill.heightFill * 100).toFixed(1)}% of the page height`
         );
       }
-      await onePageCanvasToPdf(best.canvas, `Haenyeo-TipSheet-${tipDateIso}.pdf`, "landscape");
-    } catch (e) {
-      console.error("Tip sheet PDF export failed:", e);
+      return await onePageCanvasToPdf(best.canvas, "landscape");
     } finally {
       card.classList.remove("tip-pdf-mode");
       card.style.width = origW;
       card.style.maxWidth = origMax;
+    }
+  }
+  async function exportTipSheetPdf() {
+    if (pdfBusy || !tipCardRef.current) return;
+    setPdfBusy("tips");
+    try {
+      (await renderTipSheetPdf()).save(tipSheetPdfFilename);
+    } catch (e) {
+      console.error("Tip sheet PDF export failed:", e);
     }
     setPdfBusy(null);
   }

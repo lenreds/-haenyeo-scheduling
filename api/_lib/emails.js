@@ -326,32 +326,14 @@ ${note ? `${note}\n\n` : ""}${SIG}`;
   return { subject, body };
 }
 
-// dayDateLabel: "Thursday, Jul 24"; rows: [{ name, position, points, hours, final }];
-// recipientName/recipientPayout personalize the highlighted line per email.
-// `subject` and `notes` come from the manager's send-confirmation screen: the
-// subject line is editable (blank falls back to the default) and the notes are
-// dropped in above the tip breakdown, so the same tip math can carry a different
-// message each night.
-export function buildTipSheetEmail({ dayDateLabel, floorPool, rows, barTipOut, barRecipients, floorCheckText, recipientName, recipientPayout, subject: subjectOverride, notes }) {
-  const subject = String(subjectOverride || "").trim() || `Haenyeo Tip Sheet — ${dayDateLabel}`;
-  const workerLines = (rows || [])
-    .map((r) => `  ${r.name} — ${r.position}: ${r.points} pts, ${r.hours} hrs → $${r.final}`)
-    .join("\n");
-  const noteBlock = String(notes || "").trim() ? `${String(notes).trim()}\n\n` : "";
-  const body =
-`Haenyeo Tip Sheet — ${dayDateLabel}
-
-YOUR PAYOUT: $${recipientPayout}
-(${recipientName})
-
-${noteBlock}Floor pool (cash + CC): $${floorPool}
-
-Breakdown:
-${workerLines}
-
-Bar tip-out: $${barTipOut}${barRecipients ? ` (split among ${barRecipients})` : ""}
-${floorCheckText}
-
-${SIG}`;
+// The Tip Sheet itself travels as the attached PDF (the Save as PDF page), so
+// the body is only what the manager typed on the send-confirmation screen,
+// then the sign-off — no payout lines or breakdown. No notes → just the
+// sign-off. The subject is editable there too (default "Tip sheet MM/DD/YY");
+// a blank one falls back to the day label.
+export function buildTipSheetEmail({ dayDateLabel, subject: subjectOverride, notes }) {
+  const subject = String(subjectOverride || "").trim() || `Tip sheet ${dayDateLabel}`;
+  const note = String(notes || "").trim();
+  const body = note ? `${note}\n\n${SIG}` : SIG;
   return { subject, body };
 }

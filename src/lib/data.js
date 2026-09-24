@@ -100,7 +100,12 @@ export async function triggerTipSheetSend(payload, accessToken) {
       headers: { "Content-Type": "application/json", ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}) },
       body: JSON.stringify(payload),
     });
-    if (!res.ok) return { sent: 0, error: `HTTP ${res.status}` };
+    if (!res.ok) {
+      // Keep the server's reason (e.g. "tip sheet PDF missing…"); 413 means
+      // the attached PDF was over Vercel's request-body limit.
+      const data = await res.json().catch(() => ({}));
+      return { sent: 0, error: data.error || (res.status === 413 ? "the PDF is too large to send" : `HTTP ${res.status}`) };
+    }
     return await res.json();
   } catch (e) {
     return { sent: 0, error: e.message };

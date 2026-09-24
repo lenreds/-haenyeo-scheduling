@@ -57,20 +57,35 @@ function toBase64Url(buf) {
 // Assemble a base64url-encoded RFC 822 message for Gmail's send API. Body is
 // base64 with an explicit charset so em-dashes render correctly. `From` is
 // implicit (the authenticated account).
-export function buildRawEmail({ to, subject, inReplyTo, body }) {
-  const headers = [
-    `To: ${to}`,
-    `Subject: ${encodeSubject(subject)}`,
-    "MIME-Version: 1.0",
-    'Content-Type: text/plain; charset="UTF-8"',
-    "Content-Transfer-Encoding: base64",
-  ];
+// With `attachments` ([{ filename, b64, mime? }]) the text becomes the first
+// part of a multipart/mixed message and each file follows it — the same
+// attachment parts the schedule email uses (see attachmentParts).
+export function buildRawEmail({ to, subject, inReplyTo, body, attachments = [] }) {
+  const headers = [`To: ${to}`, `Subject: ${encodeSubject(subject)}`, "MIME-Version: 1.0"];
   if (inReplyTo) {
     headers.push(`In-Reply-To: ${inReplyTo}`);
     headers.push(`References: ${inReplyTo}`);
   }
-  const encodedBody = Buffer.from(body, "utf8").toString("base64").replace(/(.{76})/g, "$1\r\n");
-  const raw = `${headers.join("\r\n")}\r\n\r\n${encodedBody}`;
+  const textPart = [
+    'Content-Type: text/plain; charset="UTF-8"',
+    "Content-Transfer-Encoding: base64",
+    "",
+    wrap76(Buffer.from(body, "utf8").toString("base64")),
+  ];
+  const atts = (attachments || []).filter((a) => a && a.b64);
+  const mixed = "haenyeo-mix-8f3a1c";
+  const raw = atts.length
+    ? [
+        ...headers,
+        `Content-Type: multipart/mixed; boundary="${mixed}"`,
+        "",
+        `--${mixed}`,
+        ...textPart,
+        ...attachmentParts(atts, mixed),
+        `--${mixed}--`,
+        "",
+      ].join("\r\n")
+    : [...headers, ...textPart].join("\r\n");
   return toBase64Url(Buffer.from(raw, "utf8"));
 }
 
@@ -78,6 +93,22 @@ const wrap76 = (b64) => b64.replace(/(.{76})/g, "$1\r\n");
 
 // Strip anything that could break out of a MIME header (CR/LF/quotes).
 const sanitizeFilename = (name) => String(name || "file").replace(/[\r\n"\\]/g, "").slice(0, 200);
+
+// One multipart/mixed part per file, each opening with `--boundary`. Shared by
+// buildRawEmail (Tip Sheet PDF) and buildHtmlRawEmail (schedule PDFs).
+function attachmentParts(atts, boundary) {
+  return atts.map((a) => {
+    const name = sanitizeFilename(a.filename);
+    return [
+      `--${boundary}`,
+      `Content-Type: ${a.mime || "application/pdf"}; name="${name}"`,
+      "Content-Transfer-Encoding: base64",
+      `Content-Disposition: attachment; filename="${name}"`,
+      "",
+      wrap76(a.b64),
+    ].join("\r\n");
+  });
+}
 
 // HTML email with a plain-text alternative and inline CID images (Gmail blocks
 // data: URIs in HTML bodies, so the logo travels as a multipart/related part
@@ -134,17 +165,7 @@ export function buildHtmlRawEmail({ to, subject, text, html, images = [], attach
   if (!atts.length) {
     raw = [...headers, ...relatedLines, ""].join("\r\n");
   } else {
-    const attachParts = atts.map((a) => {
-      const name = sanitizeFilename(a.filename);
-      return [
-        `--${mixed}`,
-        `Content-Type: ${a.mime || "application/pdf"}; name="${name}"`,
-        "Content-Transfer-Encoding: base64",
-        `Content-Disposition: attachment; filename="${name}"`,
-        "",
-        wrap76(a.b64),
-      ].join("\r\n");
-    });
+    const attachParts = attachmentParts(atts, mixed);
     raw = [
       ...headers,
       `Content-Type: multipart/mixed; boundary="${mixed}"`,

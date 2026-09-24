@@ -1,10 +1,10 @@
-// POST /api/send-tipsheet — emails the finalized tip sheet to each worker who
-// has a registered email, personalizing the "YOUR PAYOUT" line. Manager-JWT auth.
-// Body: { dayDateLabel, floorPool, rows:[{name,position,points,hours,final}],
-// barTipOut, barRecipients, floorCheckText, recipients:[{name,email,payout}],
-// subject?, notes? }. The client decides recipients (it holds the tip math) and
-// passes the subject line and optional message notes the manager confirmed on
-// the send screen; tagged Sent/Tip Sheets.
+// POST /api/send-tipsheet — emails the Tip Sheet PDF (the same page Save as PDF
+// produces, rendered client-side) to each worker who has a registered email.
+// Manager-JWT auth. Body: { dayDateLabel, attachment: { filename, b64 },
+// recipients: [{ name, email }], subject?, notes? }. The client decides
+// recipients (it holds the tip math) and passes the subject line and optional
+// notes the manager confirmed on the send screen. The body is just those notes
+// plus the sign-off; each sent copy is tagged Sent/Tip Sheets.
 
 import { sendMessage, modifyMessage } from "./_lib/google.js";
 import { gmailAccessToken, gmailErrorFields } from "./_lib/gmail-auth.js";
@@ -26,6 +26,13 @@ export default async function handler(req, res) {
   const b = readBody(req);
   const recipients = Array.isArray(b.recipients) ? b.recipients : [];
   if (!b.dayDateLabel) return res.status(400).json({ error: "dayDateLabel required" });
+  // The PDF IS the tip sheet — never email without it. "JVBERi0" is "%PDF-"
+  // in base64, so a truncated or wrong payload is refused, not sent.
+  const pdf = b.attachment;
+  if (!pdf?.b64 || !String(pdf.b64).startsWith("JVBERi0")) {
+    return res.status(400).json({ sent: 0, error: "tip sheet PDF missing or invalid — nothing was sent" });
+  }
+  const attachments = [{ filename: pdf.filename || "Haenyeo-TipSheet.pdf", b64: pdf.b64, mime: "application/pdf" }];
 
   try {
     const { accessToken } = await gmailAccessToken("send-tipsheet");
@@ -38,19 +45,8 @@ export default async function handler(req, res) {
     for (const r of recipients) {
       if (!r.email) continue;
       try {
-        const { subject, body } = buildTipSheetEmail({
-          dayDateLabel: b.dayDateLabel,
-          floorPool: b.floorPool,
-          rows: b.rows || [],
-          barTipOut: b.barTipOut,
-          barRecipients: b.barRecipients,
-          floorCheckText: b.floorCheckText || "",
-          recipientName: r.name,
-          recipientPayout: r.payout,
-          subject: b.subject,
-          notes: b.notes,
-        });
-        const raw = buildRawEmail({ to: r.email, subject, body });
+        const { subject, body } = buildTipSheetEmail({ dayDateLabel: b.dayDateLabel, subject: b.subject, notes: b.notes });
+        const raw = buildRawEmail({ to: r.email, subject, body, attachments });
         const msg = await sendMessage(accessToken, { raw });
         if (labelId && msg?.id) await modifyMessage(accessToken, msg.id, { addLabelIds: [labelId] }).catch(() => {});
         sent++;
