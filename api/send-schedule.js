@@ -9,13 +9,13 @@
 // all registered. Sends the branded HTML sheet (plain-text alternative + the
 // real icon as an inline CID image). Same email to each; tagged Sent/Schedules.
 
-import { GMAIL_REFRESH_TOKEN } from "./_lib/config.js";
-import { getAccessToken, sendMessage, modifyMessage } from "./_lib/google.js";
+import { sendMessage, modifyMessage } from "./_lib/google.js";
+import { gmailAccessToken, gmailErrorFields } from "./_lib/gmail-auth.js";
 import { buildHtmlRawEmail } from "./_lib/reply.js";
 import { buildScheduleEmailHtml, buildMultiWeekScheduleHtml } from "./_lib/emails.js";
 import { HAENYEO_ICON_B64 } from "./_lib/brand.js";
 import { makeLabeler, LABELS } from "./_lib/labels.js";
-import { getGmailToken, isManager, fetchRegisteredStaff } from "./_lib/store.js";
+import { isManager, fetchRegisteredStaff } from "./_lib/store.js";
 
 function readBody(req) {
   if (req.body && typeof req.body === "object") return req.body;
@@ -41,11 +41,7 @@ export default async function handler(req, res) {
   const sectionLabel = w0.sectionLabel;
 
   try {
-    const tokenRow = await getGmailToken();
-    const refreshToken = tokenRow?.refresh_token || GMAIL_REFRESH_TOKEN;
-    if (!refreshToken) return res.status(200).json({ sent: 0, error: "gmail_not_connected" });
-
-    const accessToken = await getAccessToken(refreshToken);
+    const { accessToken } = await gmailAccessToken("send-schedule");
     let recipients = await fetchRegisteredStaff();
     if (Array.isArray(sections) && sections.length) {
       const want = sections.map((s) => String(s).toLowerCase());
@@ -80,6 +76,6 @@ export default async function handler(req, res) {
     return res.status(200).json({ sent, recipients: recipients.length, failures });
   } catch (e) {
     console.error(`[send-schedule] ${e.message}`);
-    return res.status(200).json({ sent: 0, error: e.message });
+    return res.status(200).json({ sent: 0, ...gmailErrorFields(e) });
   }
 }

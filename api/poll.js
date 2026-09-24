@@ -6,9 +6,10 @@
 // Cron (Bearer CRON_SECRET) or a signed-in manager's "Check now" (Supabase JWT).
 // Never auto-approves anything.
 
-import { CRON_SECRET, GMAIL_REFRESH_TOKEN, STAFF_REGISTER_CODE } from "./_lib/config.js";
+import { CRON_SECRET, STAFF_REGISTER_CODE } from "./_lib/config.js";
+import { gmailAccessToken, gmailErrorFields } from "./_lib/gmail-auth.js";
 import {
-  getAccessToken, listActionableUnread, getMessage, modifyMessage, sendMessage,
+  listActionableUnread, getMessage, modifyMessage, sendMessage,
 } from "./_lib/google.js";
 import {
   parseSchedulingSubject, parseRegisterSubject, parseUpdateInfoSubject, codeMatches,
@@ -19,7 +20,7 @@ import { makeLabeler, LABELS, incomingLabelForType } from "./_lib/labels.js";
 import { buildRawEmail } from "./_lib/reply.js";
 import { buildWelcomeEmail, buildNameNotMatchedReply } from "./_lib/emails.js";
 import {
-  admin, getGmailToken, recordPoll, fetchStaffMinimal, insertGmailRail, gmailMessageExists,
+  admin, recordPoll, fetchStaffMinimal, insertGmailRail, gmailMessageExists,
   registerStaffContact, insertInfoUpdate,
 } from "./_lib/store.js";
 
@@ -50,14 +51,23 @@ export default async function handler(req, res) {
 
   const s = { connected: false, processed: 0, railCreated: 0, registered: 0, infoUpdates: 0, duplicates: 0, skipped: 0, unmatched: 0 };
   try {
-    const tokenRow = await getGmailToken();
-    const refreshToken = tokenRow?.refresh_token || GMAIL_REFRESH_TOKEN;
-    if (!refreshToken) {
-      await recordPoll({ ok: false, error: "Gmail not connected (no refresh token)" });
-      return res.status(200).json({ ...s, connected: false, reason: "not_connected" });
+    let accessToken;
+    try {
+      ({ accessToken } = await gmailAccessToken("poll"));
+    } catch (e) {
+      if (e.code === "gmail_not_connected") {
+        await recordPoll({ ok: false, error: "Gmail not connected (no refresh token)" }).catch(() => {});
+        return res.status(200).json({ ...s, connected: false, reason: "not_connected" });
+      }
+      // A rejected grant is already recorded (AUTH: last_error) by
+      // gmailAccessToken — writing recordPoll here would overwrite that marker
+      // and turn the Rail dot green-ish again. Only stamp the poll time.
+      if (e.needsReconnect) {
+        await recordPoll({ ok: false }).catch(() => {});
+        return res.status(200).json({ ...s, connected: false, ...gmailErrorFields(e) });
+      }
+      throw e;
     }
-
-    const accessToken = await getAccessToken(refreshToken);
     const staff = await fetchStaffMinimal();
     const labeler = makeLabeler(accessToken);
     const messages = await listActionableUnread(accessToken);

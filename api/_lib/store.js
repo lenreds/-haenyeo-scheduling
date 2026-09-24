@@ -28,6 +28,9 @@ export async function getGmailToken() {
   return data || null;
 }
 
+// updated_at is written ONLY here, so it reads as "when the current refresh
+// token was saved" — the timestamp that matters when diagnosing a dead grant.
+// Poll bookkeeping and auth-failure records deliberately leave it alone.
 export async function saveGmailRefreshToken(refreshToken, email) {
   const patch = { provider: "gmail", email, updated_at: new Date().toISOString(), last_error: null };
   if (refreshToken) patch.refresh_token = refreshToken; // Google omits it on re-consent sometimes
@@ -37,11 +40,30 @@ export async function saveGmailRefreshToken(refreshToken, email) {
 
 export async function recordPoll({ ok, error }) {
   const now = new Date().toISOString();
-  const patch = { provider: "gmail", last_poll_at: now, updated_at: now };
+  const patch = { provider: "gmail", last_poll_at: now };
   if (ok) { patch.last_ok_at = now; patch.last_error = null; }
   else if (error) { patch.last_error = String(error).slice(0, 500); }
   const { error: e } = await admin().from("integration_tokens").upsert(patch, { onConflict: "provider" });
   if (e) throw e;
+}
+
+// A refresh that Google rejected (see gmail-auth.js). The "AUTH:" prefix on
+// last_error is what /api/gmail/status reads as needsReconnect.
+export async function recordGmailAuthFailure(summary) {
+  const { error } = await admin()
+    .from("integration_tokens")
+    .upsert({ provider: "gmail", last_error: String(summary).slice(0, 500) }, { onConflict: "provider" });
+  if (error) throw error;
+}
+
+// A later refresh worked (e.g. Google had a blip, or someone reconnected).
+export async function clearGmailAuthFailure() {
+  const now = new Date().toISOString();
+  const { error } = await admin()
+    .from("integration_tokens")
+    .update({ last_error: null, last_ok_at: now })
+    .eq("provider", "gmail");
+  if (error) throw error;
 }
 
 /* ---- staff + rail_requests ---- */

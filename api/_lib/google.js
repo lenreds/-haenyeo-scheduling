@@ -45,7 +45,10 @@ export async function exchangeCodeForTokens(code) {
   return data; // { access_token, refresh_token, expires_in, scope, token_type }
 }
 
-// Trade a stored refresh token for a short-lived access token.
+// Trade a stored refresh token for a short-lived access token. A failure
+// carries Google's OAuth error code (invalid_grant, invalid_client, …) and its
+// description on the thrown error, so callers can tell a dead grant apart from
+// a network blip — see gmail-auth.js.
 export async function getAccessToken(refreshToken) {
   const res = await fetch(TOKEN_URL, {
     method: "POST",
@@ -57,9 +60,25 @@ export async function getAccessToken(refreshToken) {
       grant_type: "refresh_token",
     }),
   });
-  const data = await res.json();
-  if (!res.ok) throw new Error(`Access-token refresh failed: ${data.error || res.status}`);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(`Access-token refresh failed: ${data.error || res.status}${data.error_description ? ` (${data.error_description})` : ""}`);
+    err.oauthError = data.error || null;
+    err.oauthDescription = data.error_description || null;
+    err.httpStatus = res.status;
+    throw err;
+  }
   return data.access_token;
+}
+
+// The address the access token actually belongs to — used at connect time to
+// make sure the grant came from the scheduling inbox and not whoever happened
+// to be signed into Google in that browser.
+export async function getProfileEmail(accessToken) {
+  const res = await fetch(`${GMAIL_BASE}/profile`, { headers: { Authorization: `Bearer ${accessToken}` } });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`Gmail profile failed: ${data.error?.message || res.status}`);
+  return data.emailAddress || null;
 }
 
 // List unread message ids whose subject mentions SCHEDULING. Brackets are

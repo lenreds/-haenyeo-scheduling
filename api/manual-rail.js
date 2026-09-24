@@ -9,12 +9,12 @@
 // SCHEDULING / REGISTER / "UPDATE INFO"), so the self-sent copy is never
 // re-ingested as a duplicate rail entry.
 
-import { GMAIL_REFRESH_TOKEN } from "./_lib/config.js";
-import { getAccessToken, sendMessage, modifyMessage } from "./_lib/google.js";
+import { sendMessage, modifyMessage } from "./_lib/google.js";
+import { gmailAccessToken, gmailErrorFields } from "./_lib/gmail-auth.js";
 import { buildRawEmail } from "./_lib/reply.js";
 import { buildManualEntryInboxEmail, buildManualEntryStaffEmail } from "./_lib/emails.js";
 import { makeLabeler, incomingLabelForType } from "./_lib/labels.js";
-import { getGmailToken, isManager, insertManualRail, getStaffById } from "./_lib/store.js";
+import { isManager, insertManualRail, getStaffById } from "./_lib/store.js";
 
 const TYPES = ["REQUEST OFF", "SHIFT SWAP", "COVERAGE REQUEST", "TIME OFF"];
 const INBOX_FALLBACK = "haenyeo.schedule@gmail.com";
@@ -50,10 +50,7 @@ export default async function handler(req, res) {
     let staffSent = false;
     let emailError = null;
     try {
-      const tokenRow = await getGmailToken();
-      const refreshToken = tokenRow?.refresh_token || GMAIL_REFRESH_TOKEN;
-      if (!refreshToken) throw new Error("gmail_not_connected");
-      const accessToken = await getAccessToken(refreshToken);
+      const { accessToken, tokenRow } = await gmailAccessToken("manual-rail");
 
       const inbox = buildManualEntryInboxEmail({
         managerName: loggedBy, staffName: staff.name, type, dates, note,
@@ -80,7 +77,7 @@ export default async function handler(req, res) {
         staffSent = true;
       }
     } catch (e) {
-      emailError = e.message;
+      emailError = gmailErrorFields(e).error;
     }
 
     return res.status(200).json({ ok: true, railId: inserted?.id || null, inboxSent, staffSent, emailError });

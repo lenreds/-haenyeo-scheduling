@@ -4,12 +4,12 @@
 // request has no thread id (manually created entry) it skips silently; other
 // failures return { sent:false, error } with HTTP 200.
 
-import { GMAIL_REFRESH_TOKEN } from "./_lib/config.js";
-import { getAccessToken, getMessage, sendMessage, modifyMessage } from "./_lib/google.js";
+import { getMessage, sendMessage, modifyMessage } from "./_lib/google.js";
+import { gmailAccessToken, gmailErrorFields } from "./_lib/gmail-auth.js";
 import { headerValue } from "./_lib/parse.js";
 import { buildReplyBody, buildRawEmail } from "./_lib/reply.js";
 import { makeLabeler, LABELS } from "./_lib/labels.js";
-import { getGmailToken, getRailRequestById, isManager } from "./_lib/store.js";
+import { getRailRequestById, isManager } from "./_lib/store.js";
 
 function readBody(req) {
   if (req.body && typeof req.body === "object") return req.body;
@@ -37,11 +37,7 @@ export default async function handler(req, res) {
       return res.status(200).json({ sent: false, skipped: "no_thread" });
     }
 
-    const tokenRow = await getGmailToken();
-    const refreshToken = tokenRow?.refresh_token || GMAIL_REFRESH_TOKEN;
-    if (!refreshToken) return res.status(200).json({ sent: false, error: "gmail_not_connected" });
-
-    const accessToken = await getAccessToken(refreshToken);
+    const { accessToken } = await gmailAccessToken("reply");
 
     // Pull the original message for the recipient + threading headers.
     const original = await getMessage(accessToken, reqRow.gmail_message_id);
@@ -74,6 +70,6 @@ export default async function handler(req, res) {
   } catch (e) {
     console.error(`[reply] failed for ${railRequestId}: ${e.message}`);
     // Don't fail the manager's action — report and move on.
-    return res.status(200).json({ sent: false, error: e.message });
+    return res.status(200).json({ sent: false, ...gmailErrorFields(e) });
   }
 }

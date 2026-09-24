@@ -662,8 +662,7 @@ const DEFAULT_STAFF_ROLES = {
   David: ["Servers", "Busser/Runner", "Expo", "Host"],
   Daniel: ["Servers", "Busser/Runner", "Expo"],
   Akira: ["Busser/Runner", "Bar", "Expo"],
-  Emilio: ["Busser/Runner"], Miguel: ["Busser/Runner"], Kevin: ["Busser/Runner"], Dennis: ["Busser/Runner"],
-};
+  Emilio: ["Busser/Runner"], Miguel: ["Busser/Runner"], Kevin: ["Busser/Runner"], Dennis: ["Busser/Runner"],};
 
 // dropdown options per role (FC = first cut, CL = close, SC = second cut)
 const DEFAULT_ROLE_OPTIONS = {
@@ -723,7 +722,9 @@ const SECTION_ROLES = {
   FOH: ["Bar", "Host", "Servers", "Busser/Runner", "Expo", "Training"],
   BOH: ["BOH", "Kitchen"],
   Kitchen: ["Kitchen", "BOH"],
-  Management: ["Management", "Kitchen"],
+  // Expo: a manager can be scheduled as Expo on the Management grid, which
+  // routes them into the Expo tip slot like any other cross-role shift.
+  Management: ["Management", "Kitchen", "Expo"],
 };
 const SECTIONS = ["FOH", "BOH", "Kitchen", "Management"];
 
@@ -973,10 +974,9 @@ function personShiftFor(name, dateObj, patterns, overrides) {
 // code carries (SV_/BR_/HOST/EXPO/BAR_ prefix) — so the role picked in the
 // schedule determines the slot they fill, whatever their usual section.
 //
-// Fill the Tip Sheet's fixed slots from whoever is working that date. `patterns`
-// is already resolved per-week by the caller, so this reads the week's own saved
-// schedule with schedule_overrides applied on top, falling back to the template
-// for weeks nobody has edited.
+// Fill the Tip Sheet's fixed slots from whoever is working that date.
+// `working` comes from staffWorkingOn, so anyone off / RO / GAP that day is
+// already gone and this only has to route and order.
 //
 // Slot order is payroll-critical: within a role, slots fill purely by start
 // time, earliest first. The three Server slots map to cut order — 1st cut, 2nd
@@ -984,12 +984,10 @@ function personShiftFor(name, dateObj, patterns, overrides) {
 // time, with no shift-code restriction. Fewer servers than slots leaves the
 // trailing slots empty (two servers fill 1 and 2; Swing stays empty). Same rule
 // for Bartender before Bartender (Swing).
-function autoAssignSlots(dateInfo, patterns, overrides, roster) {
+function autoAssignSlots(working) {
   const byRole = {};
-  roster.forEach((p) => {
-    const shift = personShiftFor(p.name, dateInfo, patterns, overrides);
-    if (shift.type === "OFF" || shift.type === "GAP") return;
-    const code = normalizeShiftCode(shift.type, p.role);
+  working.forEach((p) => {
+    const code = normalizeShiftCode(p.code, p.role);
     const role = roleFromCode(code);
     if (!role) return;
     // Trainees aren't tipped, so they never fill a tip-out slot.
@@ -1195,6 +1193,15 @@ export default function SchedulingHub({ session, onSignOut }) {
   const [staffMsg, setStaffMsg] = useState("");
   const [gmailStatus, setGmailStatus] = useState(null); // { configured, connected, lastPollAt, lastError, ... }
   const [gmailChecking, setGmailChecking] = useState(false);
+  // Google rejected the stored token (invalid_grant etc.) or there isn't one —
+  // /api/gmail/status works this out server-side. Drives the Rail's red dot +
+  // Reconnect link and the banner in the send dialogs.
+  const gmailDisconnected = !!gmailStatus?.needsReconnect;
+  const gmailReconnectUrl = gmailStatus?.reconnectUrl || "/api/auth/start";
+  async function refreshGmailStatus() {
+    try { setGmailStatus(await fetchGmailStatus()); }
+    catch (e) { console.error("Gmail status refresh failed:", e); }
+  }
   const [railNotes, setRailNotes] = useState({}); // rail request id -> manager note draft
   const [railBusy, setRailBusy] = useState(null); // id being resolved (disables its buttons)
   const [partialOpen, setPartialOpen] = useState({}); // TIME OFF id -> partial-approve field open
@@ -1456,20 +1463,73 @@ export default function SchedulingHub({ session, onSignOut }) {
     }
   }
 
+  // ---- Who is working on a date --------------------------------------------
+  // The ONE place that decides whether someone is working a date. Today at a
+  // Glance, the 7-day strip and the Tip Sheet (auto-fill, saved Custom
+  // Schedules, send recipients, emailed rows, PDF) all read it, so they can't
+  // drift apart again.
+  //
+  // Per person:
+  //   1. a schedule_overrides row for the date wins — Rail approvals, swaps, and
+  //      an approved day off a manager deliberately replaced with a shift;
+  //   2. otherwise an APPROVED Request Off covering the date means off. The
+  //      approval's override write can be skipped (the overwrite prompt) or fail,
+  //      and the day off is still real. TIME OFF isn't read here: it can be
+  //      partially approved, and its row keeps the full requested range, so only
+  //      the overrides it wrote are trustworthy;
+  //   3. otherwise the week's own saved schedule, else the template.
+  // OFF / RO never count as working, and neither does GAP. Gaps come back on
+  // their own so the glance can still flag the hole.
+  //
+  // Management rows count only on a day their cell holds an FOH shift (Expo) —
+  // that's how a manager scheduled as Expo reaches the Expo tip slot.
+  const railOffByDate = useMemo(() => {
+    const m = {};
+    resolvedReqs.forEach((it) => {
+      if (it.status !== "approved" || it.type !== "REQUEST OFF" || !it.name) return;
+      parseRailDates(it.dates).forEach((d) => { (m[d] = m[d] || new Set()).add(it.name); });
+    });
+    return m;
+  }, [resolvedReqs]);
+
+  function staffWorkingOn(dateIso) {
+    const di = dateInfoFromIso(dateIso);
+    const pats = patternsForDate(di);
+    const ph = placeholdersForWeekStart(iso(mondayOf(di.dateObj)));
+    const railOff = railOffByDate[dateIso];
+    const working = [];
+    const off = [];
+    const gaps = [];
+    const seen = new Set();
+    function place(name, role, baseType) {
+      if (seen.has(name)) return;
+      seen.add(name);
+      const ov = overrides[`${name}|${dateIso}`];
+      let type = ov?.type || baseType;
+      if (!ov?.type && railOff?.has(name)) type = "OFF";
+      if (!type || type === "OFF" || type === "RO") off.push(name);
+      else if (type === "GAP") gaps.push({ name, role, code: "GAP" });
+      else working.push({ name, role, code: type, swapped: !!ov?.swap });
+    }
+    fohRoster.forEach((p) => place(p.name, p.role, (pats[p.name] || ALL_OFF_WEEK)[di.weekday]));
+    (groupRosters.management || []).forEach((name, idx) => {
+      const code = ph.management?.[idx]?.[di.weekday] || "OFF";
+      const ov = overrides[`${name}|${dateIso}`];
+      // FM (and any other management-only day) isn't a floor shift.
+      if (!roleFromCode(ov?.type || code)) return;
+      place(name, "Management", code);
+    });
+    return { working, off, gaps };
+  }
+
   // ---- Today at a Glance --------------------------------------------------
   // Who is on the floor on the day picked in the 7-day strip (brief item 7),
-  // defaulting to today. Read through the same per-week resolution the Calendar
-  // and Tip Sheet use, so all three agree about a day.
+  // defaulting to today. Coverage gaps stay listed (in red) — they're a hole
+  // to fill, not a person working.
   const glanceRoster = useMemo(() => {
-    const di = dateInfoFromIso(glanceIso);
-    const pats = patternsForDate(di);
-    return fohRoster
-      .map((p) => {
-        const shift = personShiftFor(p.name, di, pats, overrides);
-        return { name: p.name, role: p.role, code: shift.type, swapped: !!shift.swap };
-      })
-      .filter((r) => r.code && r.code !== "OFF");
-  }, [fohRoster, patterns, weeklyPatterns, overrides, glanceIso]);
+    const { working, gaps } = staffWorkingOn(glanceIso);
+    return [...working, ...gaps];
+  }, [fohRoster, patterns, weeklyPatterns, placeholderPatterns, weeklyPlaceholders, groupRosters, overrides, railOffByDate, glanceIso]);
   const glanceIsToday = glanceIso === TODAY_ISO;
   // "THURSDAY, SEP 24" for any other day; today stays the familiar label.
   const glanceHeading = glanceIsToday
@@ -1642,10 +1702,11 @@ export default function SchedulingHub({ session, onSignOut }) {
     catch (e) { console.error("Delete note failed:", e); reloadNotes(ws); }
   }
 
-  const autoSlots = useMemo(
-    () => autoAssignSlots(tipDateInfo, patternsForDate(tipDateInfo), overrides, fohRoster),
-    [tipDateIso, patterns, weeklyPatterns, overrides, fohRoster]
+  const tipWorking = useMemo(
+    () => staffWorkingOn(tipDateIso),
+    [tipDateIso, fohRoster, patterns, weeklyPatterns, placeholderPatterns, weeklyPlaceholders, groupRosters, overrides, railOffByDate]
   );
+  const autoSlots = useMemo(() => autoAssignSlots(tipWorking.working), [tipWorking]);
 
   function toggleCustomMode() {
     if (!customMode) {
@@ -1681,12 +1742,12 @@ export default function SchedulingHub({ session, onSignOut }) {
   //
   // Only names that belong to a real staff member are checked — a slot typed
   // with someone not on the roster has no schedule to read, so it stands.
-  const tipPatterns = patternsForDate(tipDateInfo);
+  // Everyone else has to be working the date per staffWorkingOn.
   const tipRosterNames = new Set(staffList.map((s) => s.name));
+  const tipWorkingNames = new Set(tipWorking.working.map((w) => w.name));
   function offForTipDate(name) {
     if (!name || !tipRosterNames.has(name)) return false;
-    const { type } = personShiftFor(name, tipDateInfo, tipPatterns, overrides);
-    return type === "OFF" || type === "GAP";
+    return !tipWorkingNames.has(name);
   }
 
   const slotsExcludedOff = [];
@@ -1951,6 +2012,7 @@ export default function SchedulingHub({ session, onSignOut }) {
     setTipSendExcluded([]);
     setTipSendResult(null);
     setTipSendOpen(true);
+    refreshGmailStatus(); // so a dead token shows before Confirm, not after
   }
   function toggleTipRecipient(name) {
     setTipSendExcluded((prev) => (prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name]));
@@ -1983,8 +2045,9 @@ export default function SchedulingHub({ session, onSignOut }) {
     }, session?.access_token);
     setTipSendBusy(false);
     if (res?.error) {
-      setTipSendResult(res.error);
-      addLog(`Tip sheet send failed (${res.error})`, "warn");
+      setTipSendResult(res.needsReconnect ? null : res.error);
+      addLog(`Tip sheet send failed (${res.needsReconnect ? "Gmail disconnected — reconnect" : res.error})`, "warn");
+      if (res.needsReconnect) refreshGmailStatus();
       return;
     }
     const now = new Date().toISOString();
@@ -2127,9 +2190,10 @@ export default function SchedulingHub({ session, onSignOut }) {
         }
         if (Object.keys(d.placeholders).length) {
           const ph = { ...d.placeholders };
-          // Management simplified to Off <-> FM: any legacy scheduled value = FM
+          // Management simplified to Off <-> FM: any legacy scheduled value = FM.
+          // Expo codes are real (a manager scheduled as Expo) and stay as-is.
           if (ph.management) {
-            ph.management = ph.management.map((row) => row.map((c) => (c === "OFF" ? "OFF" : "FM")));
+            ph.management = ph.management.map((row) => row.map((c) => (c === "OFF" || roleFromCode(c) === "Expo" ? c : "FM")));
           }
           setPlaceholderPatterns((prev) => ({ ...prev, ...ph }));
         }
@@ -2160,6 +2224,16 @@ export default function SchedulingHub({ session, onSignOut }) {
     fetchGmailStatus().then((s) => { if (!cancelled) setGmailStatus(s); });
     return () => { cancelled = true; };
   }, []);
+
+  // Reconnecting happens in another tab (/api/auth/start), so while the
+  // mailbox reads as disconnected, re-check whenever this tab regains focus —
+  // the red state clears on its own once the new grant is saved.
+  useEffect(() => {
+    if (!gmailDisconnected) return;
+    const onFocus = () => { refreshGmailStatus(); };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [gmailDisconnected]);
 
   // Calendar date notes — one fetch drives both the popup and the month dots.
   useEffect(() => {
@@ -2351,6 +2425,17 @@ export default function SchedulingHub({ session, onSignOut }) {
     if (!Object.keys(idToName).length || !tipDateIso) return;
     ensureWeekLoaded(iso(mondayOf(new Date(`${tipDateIso}T00:00:00`))));
   }, [tipDateIso, idToName]);
+
+  // Today at a Glance reads whichever day the 7-day strip has selected, and the
+  // strip runs into next week. An unloaded week renders from the template, so
+  // someone the saved week has off (RO) would show as working — load every week
+  // the strip touches.
+  useEffect(() => {
+    if (!Object.keys(idToName).length) return;
+    const starts = new Set(weekStrip.map((d) => iso(mondayOf(d.date))));
+    starts.add(iso(mondayOf(new Date(`${glanceIso}T00:00:00`))));
+    starts.forEach((s) => ensureWeekLoaded(s));
+  }, [weekStrip, glanceIso, idToName]);
 
   // Notes for the week on screen (drives the "Notes (N)" count, so it loads
   // whether or not the panel is open).
@@ -2719,7 +2804,10 @@ export default function SchedulingHub({ session, onSignOut }) {
         ),
       ]);
       const err = fohRes?.error || bkRes?.error;
-      if (err) {
+      if (fohRes?.needsReconnect || bkRes?.needsReconnect) {
+        addLog("Publish failed — Gmail disconnected. Use Reconnect by the Gmail dot, then publish again.", "warn");
+        refreshGmailStatus();
+      } else if (err) {
         addLog(`Publish email issue (${err})`, "warn");
       } else {
         // Only mark published once the sends actually came back clean.
@@ -3082,6 +3170,7 @@ export default function SchedulingHub({ session, onSignOut }) {
     // Auto-reply to the original email thread (best-effort; skipped for manual entries).
     const reply = await sendRailReply(item.id, approved, managerNote, session?.access_token);
     if (reply?.sent) addLog(`Email reply sent to ${item.name}`, "good");
+    else if (reply?.needsReconnect && reply.error !== "gmail_not_connected") { addLog(`Email reply to ${item.name} not sent — Gmail disconnected, reconnect`, "warn"); refreshGmailStatus(); }
     else if (reply?.error && reply.error !== "gmail_not_connected") addLog(`Email reply not sent (${reply.error})`, "warn");
 
     setRailNotes((n) => { const next = { ...n }; delete next[item.id]; return next; });
@@ -3173,6 +3262,7 @@ export default function SchedulingHub({ session, onSignOut }) {
 
     const reply = await sendRailReply(item.id, true, managerNote, session?.access_token, { partial: true, approvedDatesText: approvedText });
     if (reply?.sent) addLog(`Email reply sent to ${item.name}`, "good");
+    else if (reply?.needsReconnect && reply.error !== "gmail_not_connected") { addLog(`Email reply to ${item.name} not sent — Gmail disconnected, reconnect`, "warn"); refreshGmailStatus(); }
     else if (reply?.error && reply.error !== "gmail_not_connected") addLog(`Email reply not sent (${reply.error})`, "warn");
 
     setRailNotes((n) => { const x = { ...n }; delete x[item.id]; return x; });
@@ -3494,6 +3584,8 @@ export default function SchedulingHub({ session, onSignOut }) {
     if (foh) return foh.role;
     if ((groupRosters.boh || []).includes(name)) return "BOH";
     if ((groupRosters.kitchen || []).includes(name)) return "Kitchen";
+    // Managers — so an Expo day on the Management grid gets its cross-role label.
+    if ((groupRosters.management || []).includes(name)) return "Management";
     return null;
   }
   // No label when the person has no known primary or is working it.
@@ -4338,6 +4430,14 @@ export default function SchedulingHub({ session, onSignOut }) {
         .rs-gmail-body { display: flex; flex-direction: column; align-items: flex-start; line-height: 1.2; }
         .rs-gmail-label { font-family: 'Space Mono', monospace; font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: var(--txt2); }
         .rs-gmail-sub { font-size: 9.5px; color: var(--muted); }
+        .rs-gmail-bad .rs-gmail-sub { color: #e79289; }
+        /* Shown only when Google rejected the stored token (or there is none). */
+        .rs-gmail-reconnect { font-family: 'Space Mono', monospace; font-size: 10px; letter-spacing: 1px; text-transform: uppercase; color: #e79289; border: 1px solid #B23A2F; border-radius: 5px; padding: 3px 7px; text-decoration: none; white-space: nowrap; }
+        .rs-gmail-reconnect:hover { background: rgba(178,58,47,0.16); }
+        /* Lets the Reconnect link drop below on a phone instead of overflowing. */
+        .rs-head { flex-wrap: wrap; row-gap: 6px; }
+        .send-reconnect { display: flex; align-items: flex-start; gap: 7px; margin: 0 0 12px; padding: 9px 12px; border: 1px solid #B23A2F; background: rgba(178,58,47,0.16); color: #e79289; border-radius: 7px; font-size: 12px; line-height: 1.45; }
+        .send-reconnect a { color: inherit; font-weight: 700; }
 
         /* Date Note quick-add strip (brief item 3), where the Gmail bar was. */
         .rs-quicknote {
@@ -4769,6 +4869,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                   ? `Disconnected${st.lastError ? ` — ${st.lastError}` : ""}`
                   : "Not set up";
                 return (
+                  <>
                   <button
                     type="button"
                     className={`rs-gmail ${ok ? "rs-gmail-ok" : "rs-gmail-bad"}`}
@@ -4781,9 +4882,21 @@ export default function SchedulingHub({ session, onSignOut }) {
                       <span className="rs-gmail-label">Gmail</span>
                       {gmailChecking
                         ? <span className="rs-gmail-sub">checking…</span>
+                        : gmailDisconnected
+                        ? <span className="rs-gmail-sub">disconnected — reconnect</span>
                         : last && <span className="rs-gmail-sub">last checked {last.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</span>}
                     </span>
                   </button>
+                  {gmailDisconnected && (
+                    <a
+                      className="rs-gmail-reconnect"
+                      href={gmailReconnectUrl}
+                      target="_blank"
+                      rel="noopener"
+                      title="Sign into the scheduling Gmail account and grant access again"
+                    >Reconnect</a>
+                  )}
+                  </>
                 );
               })()}
             </div>
@@ -5885,7 +5998,7 @@ export default function SchedulingHub({ session, onSignOut }) {
               <>
                 <div className="cal-legend">
                   <span className="legend-item">Management</span>
-                  <span className="legend-item" style={{ marginLeft: "auto" }}>Click a cell to toggle: Off ↔ FM (Floor Manager)</span>
+                  <span className="legend-item" style={{ marginLeft: "auto" }}>Click a cell to toggle: Off ↔ FM (Floor Manager) · managers with the Expo role pick from a dropdown</span>
                 </div>
                 <table className={`week-table ${scheduleFrozen ? "schedule-locked" : ""}`}>
                   <thead>
@@ -5904,6 +6017,15 @@ export default function SchedulingHub({ session, onSignOut }) {
                   <tbody>
                     {(groupRosters.management || []).map((personName, idx) => {
                       const row = activePlaceholders.management?.[idx] || ALL_OFF_WEEK;
+                      // Managers given the Expo role on the Staff tab get a
+                      // dropdown (Off / FM / Expo shifts) instead of the toggle.
+                      const canExpo = (staffRolesMap[personName] || []).includes("Expo");
+                      const mgmtOpts = canExpo
+                        ? [
+                            ...(roleOptions.Management || [{ code: "OFF", label: "Off" }, { code: "FM", label: "FM" }]),
+                            ...(roleOptions.Expo || []).filter((o) => o.code !== "OFF"),
+                          ]
+                        : null;
                       return (
                         <tr key={personName + idx}>
                           <td className="emp-name">{personName}</td>
@@ -5920,15 +6042,45 @@ export default function SchedulingHub({ session, onSignOut }) {
                               );
                             }
                             const mgmtTimeOff = approvedOffFor(personName, realWeekday);
+                            if (mgmtOpts) {
+                              const value = mgmtOpts.some((o) => o.code === type) ? type : "OFF";
+                              const workedRole = value === "OFF" ? null : roleForCell(value, "Management");
+                              return (
+                                <td key={w} className="shift-cell">
+                                  {mgmtTimeOff && <span className="cell-timeoff-flag" title="Approved time off" />}
+                                  <div className="cell-stack">
+                                    <select
+                                      className="cell-select shift-select"
+                                      value={value}
+                                      disabled={scheduleFrozen}
+                                      style={value === "OFF" ? undefined : roleCellStyle(workedRole)}
+                                      onChange={(e) => setPlaceholderShift("management", idx, realWeekday, e.target.value)}
+                                    >
+                                      {mgmtOpts.map((o) => (
+                                        <option key={o.code} value={o.code}>{o.label}</option>
+                                      ))}
+                                    </select>
+                                    {workedRole && workedRole !== "Management" && (
+                                      <div className="cross-role-label" style={{ color: ROLE_COLOR_MUTED[workedRole] }}>
+                                        {crossRoleLabelText(workedRole)}
+                                      </div>
+                                    )}
+                                  </div>
+                                </td>
+                              );
+                            }
+                            // An Expo day left over after the Expo role was
+                            // removed still reads as Expo (and toggles to Off).
+                            const cellRole = type === "OFF" ? null : roleForCell(type, "Management");
                             return (
                               <td key={w} className="shift-cell">
                                 {mgmtTimeOff && <span className="cell-timeoff-flag" title="Approved time off" />}
                                 <button
                                   className="shift-chip chip-btn"
-                                  style={type === "OFF" ? OFF_CHIP_DARK : roleCellStyle("Management")}
+                                  style={type === "OFF" ? OFF_CHIP_DARK : roleCellStyle(cellRole)}
                                   onClick={() => toggleManagementCell(idx, realWeekday)}
                                 >
-                                  {meta.label}
+                                  {SHIFT_META[type] ? meta.label : shiftLabelForType(type)}
                                 </button>
                               </td>
                             );
@@ -6793,6 +6945,12 @@ export default function SchedulingHub({ session, onSignOut }) {
             <div className="send-section-label">
               Recipients <span className="nr-count">{tipSendChosen.length}</span>
             </div>
+            {slotsExcludedOff.length > 0 && (
+              <div className="tip-off-note" style={{ marginTop: 0, marginBottom: 8 }}>
+                <AlertTriangle size={12} />
+                {[...new Set(slotsExcludedOff)].join(", ")} — scheduled off on {shortDate(tipDateIso)}, so not on this sheet and won't be emailed.
+              </div>
+            )}
             {tipSendRoster.length === 0 ? (
               <div className="notes-empty">Nobody is on the sheet for this date yet.</div>
             ) : (
@@ -6836,6 +6994,16 @@ export default function SchedulingHub({ session, onSignOut }) {
             />
 
             {tipSendResult && <div className="send-error">Couldn't send: {tipSendResult}</div>}
+            {gmailDisconnected && (
+              <div className="send-reconnect">
+                <AlertTriangle size={13} />
+                <span>
+                  Gmail disconnected — nothing can be emailed until it's reconnected.{" "}
+                  <a href={gmailReconnectUrl} target="_blank" rel="noopener">Reconnect Gmail</a>
+                  {" "}(sign in as the scheduling inbox), then come back and Confirm &amp; Send.
+                </span>
+              </div>
+            )}
 
             <div className="send-actions">
               <button className="nr-btn" disabled={tipSendBusy} onClick={() => setTipSendOpen(false)}>Cancel</button>

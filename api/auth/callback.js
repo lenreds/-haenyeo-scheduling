@@ -3,7 +3,8 @@
 // Then renders a tiny confirmation page. This is the redirect URI registered in
 // Google Cloud Console.
 
-import { exchangeCodeForTokens } from "../_lib/google.js";
+import { exchangeCodeForTokens, getProfileEmail } from "../_lib/google.js";
+import { tokenFingerprint } from "../_lib/gmail-auth.js";
 import { assertGoogleConfigured, GMAIL_INBOX } from "../_lib/config.js";
 import { saveGmailRefreshToken } from "../_lib/store.js";
 
@@ -31,9 +32,27 @@ export default async function handler(req, res) {
         `<h1>No refresh token returned</h1><p>Google didn't return a refresh token. Remove the app's access at
         <code>myaccount.google.com/permissions</code> and open <code>/api/auth/start</code> again so it re-prompts for consent.</p>`));
     }
-    await saveGmailRefreshToken(tokens.refresh_token, GMAIL_INBOX || null);
+    // Only the scheduling inbox may replace the stored token. /api/auth/start
+    // is a public URL, so without this check a consent from whichever Google
+    // account was signed in would silently overwrite the working grant — one
+    // way the stored token "dies" with nothing in the app changing.
+    let account = null;
+    try { account = await getProfileEmail(tokens.access_token); }
+    catch (e) { console.warn(`[auth/callback] profile lookup failed: ${e.message}`); }
+    if (GMAIL_INBOX && account && account.toLowerCase() !== GMAIL_INBOX.toLowerCase()) {
+      console.error(`[auth/callback] refused token for ${account} (expected ${GMAIL_INBOX})`);
+      return res.status(400).send(page("Gmail — wrong account",
+        `<h1>Wrong Google account</h1><p>You granted access as <code>${account}</code>, but this app reads
+        <code>${GMAIL_INBOX}</code>. The existing connection was left untouched. Sign into
+        <code>${GMAIL_INBOX}</code> and open <code>/api/auth/start</code> again.</p>`));
+    }
+
+    await saveGmailRefreshToken(tokens.refresh_token, account || GMAIL_INBOX || null);
+    // Logged so a later invalid_grant can be matched to (or ruled out from)
+    // this connect by fingerprint and time — see gmail-auth.js.
+    console.log(`[auth/callback] saved refresh token ${tokenFingerprint(tokens.refresh_token)} for ${account || GMAIL_INBOX || "unknown account"} (scope: ${tokens.scope || "?"})`);
     return res.status(200).send(page("Gmail connected",
-      `<h1>✓ Gmail connected</h1><p>The scheduling inbox ${GMAIL_INBOX ? `(<code>${GMAIL_INBOX}</code>) ` : ""}is now
+      `<h1>✓ Gmail connected</h1><p>The scheduling inbox ${account || GMAIL_INBOX ? `(<code>${account || GMAIL_INBOX}</code>) ` : ""}is now
       linked. Scheduling emails will turn into pending Rail requests on the next poll. You can close this tab.</p>`));
   } catch (e) {
     return res.status(500).send(page("Gmail — error", `<h1>Something went wrong</h1><p><code>${e.message}</code></p>`));

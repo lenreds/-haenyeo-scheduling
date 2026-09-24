@@ -6,12 +6,12 @@
 // passes the subject line and optional message notes the manager confirmed on
 // the send screen; tagged Sent/Tip Sheets.
 
-import { GMAIL_REFRESH_TOKEN } from "./_lib/config.js";
-import { getAccessToken, sendMessage, modifyMessage } from "./_lib/google.js";
+import { sendMessage, modifyMessage } from "./_lib/google.js";
+import { gmailAccessToken, gmailErrorFields } from "./_lib/gmail-auth.js";
 import { buildRawEmail } from "./_lib/reply.js";
 import { buildTipSheetEmail } from "./_lib/emails.js";
 import { makeLabeler, LABELS } from "./_lib/labels.js";
-import { getGmailToken, isManager } from "./_lib/store.js";
+import { isManager } from "./_lib/store.js";
 
 function readBody(req) {
   if (req.body && typeof req.body === "object") return req.body;
@@ -28,11 +28,7 @@ export default async function handler(req, res) {
   if (!b.dayDateLabel) return res.status(400).json({ error: "dayDateLabel required" });
 
   try {
-    const tokenRow = await getGmailToken();
-    const refreshToken = tokenRow?.refresh_token || GMAIL_REFRESH_TOKEN;
-    if (!refreshToken) return res.status(200).json({ sent: 0, error: "gmail_not_connected" });
-
-    const accessToken = await getAccessToken(refreshToken);
+    const { accessToken } = await gmailAccessToken("send-tipsheet");
     const labeler = makeLabeler(accessToken);
     let labelId = null;
     try { labelId = await labeler.ensure(LABELS.sentTipSheets); } catch { /* non-fatal */ }
@@ -65,6 +61,6 @@ export default async function handler(req, res) {
     return res.status(200).json({ sent, recipients: recipients.length, failures });
   } catch (e) {
     console.error(`[send-tipsheet] ${e.message}`);
-    return res.status(200).json({ sent: 0, error: e.message });
+    return res.status(200).json({ sent: 0, ...gmailErrorFields(e) });
   }
 }
