@@ -344,6 +344,9 @@ const escHtml = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;
 // payload: { sectionTitle, weekLabel, days:[{dow,date}×7], todayIdx (-1 when
 // the week doesn't contain today), groups:[{label, rows:[{name, shifts[7]}]}],
 // managerOn:[names[]×7] }
+// Longest run of rows one group prints before it is split under a repeated
+// "(CONT.)" heading — comfortably less than a landscape page holds.
+const SHEET_MAX_GROUP_ROWS = 18;
 function buildScheduleSheetNode({ sectionTitle, weekLabel, days, todayIdx, groups, managerOn }) {
   const mono = "'Space Mono', monospace";
   const sans = "'Manrope', sans-serif";
@@ -351,8 +354,8 @@ function buildScheduleSheetNode({ sectionTitle, weekLabel, days, todayIdx, group
   const dayHead = days
     .map((d, i) =>
       i === todayIdx
-        ? `<th style="padding:11px 6px;background:${SHEET.orange};color:#fff;font-family:${mono};font-weight:700;font-size:11px;letter-spacing:1.5px;text-align:center;">★ ${d.dow} ${d.date}</th>`
-        : `<th style="padding:11px 6px;color:#8c8c8c;font-family:${mono};font-weight:700;font-size:11px;letter-spacing:1.5px;text-align:center;border-bottom:1.5px solid #e4e4e4;">${d.dow} ${d.date}</th>`
+        ? `<th class="sh-th" style="padding:11px 6px;background:${SHEET.orange};color:#fff;font-family:${mono};font-weight:700;font-size:11px;letter-spacing:1.5px;text-align:center;">★ ${d.dow} ${d.date}</th>`
+        : `<th class="sh-th" style="padding:11px 6px;color:#8c8c8c;font-family:${mono};font-weight:700;font-size:11px;letter-spacing:1.5px;text-align:center;border-bottom:1.5px solid #e4e4e4;">${d.dow} ${d.date}</th>`
     )
     .join("");
   // Cell text takes the color of the role worked that day (r.roles), not the
@@ -364,43 +367,47 @@ function buildScheduleSheetNode({ sectionTitle, weekLabel, days, todayIdx, group
     const crossLine = cross
       ? `<div style="font-size:9px;line-height:1.1;margin-top:1px;font-weight:700;color:${ROLE_COLOR_MUTED[role] || "#a6a6a6"};">${escHtml(crossRoleLabelText(role))}</div>`
       : "";
-    return `<td style="padding:8px 6px;text-align:center;border-bottom:1px solid #efefef;${dayTint(i)}${
+    return `<td class="sh-cell" style="padding:8px 6px;text-align:center;border-bottom:1px solid #efefef;${dayTint(i)}${
       off ? `font-style:italic;color:#cccccc;` : `color:${ROLE_COLOR[role] || "#3a3a3a"};`
     }font-family:${sans};font-size:12px;${off ? "" : "font-weight:700;"}">${off ? "—" : escHtml(label)}${crossLine}</td>`;
   };
+  // Each group is its own <tbody class="sh-group">, which print CSS keeps on
+  // one page (break-inside: avoid) — a group never splits across pages. A group
+  // too long to fit one page anyway is pre-split into chunks, each with its own
+  // heading ("… (CONT.)"), so any unavoidable break still lands under a heading.
+  // The date row is the table's <thead>, which the browser repeats per page.
   const groupBlock = (g) => {
     const color = SHEET_GROUP_COLOR[g.label] || SHEET.grey;
-    const head = `<tr><td colspan="8" style="border-top:2.5px solid ${color};background:#fafafa;padding:7px 12px;">
+    const head = (cont) => `<tr><td class="sh-grp" colspan="8" style="border-top:2.5px solid ${color};background:#fafafa;padding:7px 12px;">
       <span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${color};margin-right:8px;"></span>
-      <span style="font-family:${mono};font-weight:700;font-size:11px;letter-spacing:2px;color:#333;">${escHtml(g.label).toUpperCase()}</span>
+      <span style="font-family:${mono};font-weight:700;font-size:11px;letter-spacing:2px;color:#333;">${escHtml(g.label).toUpperCase()}${cont ? " (CONT.)" : ""}</span>
     </td></tr>`;
-    const rows = g.rows
-      .map(
-        (r) => `<tr>
-        <td style="padding:8px 12px;border-bottom:1px solid #efefef;font-family:${sans};font-weight:600;font-size:12.5px;color:#2b2b2b;white-space:nowrap;">${escHtml(r.name)}</td>
+    const row = (r) => `<tr>
+        <td class="sh-name" style="padding:8px 12px;border-bottom:1px solid #efefef;font-family:${sans};font-weight:600;font-size:12.5px;color:#2b2b2b;white-space:nowrap;">${escHtml(r.name)}</td>
         ${r.shifts.map((label, i) => shiftCell(label, r.roles?.[i], r.primaryRole, i)).join("")}
-      </tr>`
-      )
-      .join("");
-    return head + rows;
+      </tr>`;
+    const chunks = [];
+    for (let i = 0; i < g.rows.length; i += SHEET_MAX_GROUP_ROWS) chunks.push(g.rows.slice(i, i + SHEET_MAX_GROUP_ROWS));
+    if (!chunks.length) chunks.push([]);
+    return chunks.map((c, ci) => `<tbody class="sh-group">${head(ci > 0)}${c.map(row).join("")}</tbody>`).join("");
   };
   const pill = (n) =>
     `<span style="display:inline-block;background:${SHEET.dark};color:#fff;border-radius:999px;padding:2.5px 9px;font-family:${sans};font-weight:600;font-size:10px;margin:1px;white-space:nowrap;">${escHtml(n)}</span>`;
   const managerRow = managerOn
-    ? `<tr><td colspan="8" style="border-top:2.5px solid ${SHEET.grey};background:#fafafa;padding:7px 12px;">
+    ? `<tbody class="sh-group"><tr><td class="sh-grp" colspan="8" style="border-top:2.5px solid ${SHEET.grey};background:#fafafa;padding:7px 12px;">
         <span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${SHEET.grey};margin-right:8px;"></span>
         <span style="font-family:${mono};font-weight:700;font-size:11px;letter-spacing:2px;color:#333;">MANAGER ON</span>
       </td></tr>
       <tr>
-        <td style="padding:8px 12px;border-bottom:1px solid #efefef;font-family:${sans};font-weight:600;font-size:11px;color:#8c8c8c;">Manager on</td>
+        <td class="sh-name" style="padding:8px 12px;border-bottom:1px solid #efefef;font-family:${sans};font-weight:600;font-size:11px;color:#8c8c8c;">Manager on</td>
         ${managerOn
           .map((names, i) =>
             names.length
-              ? `<td style="padding:6px 4px;text-align:center;border-bottom:1px solid #efefef;${dayTint(i)}">${names.map(pill).join(" ")}</td>`
-              : `<td style="padding:8px 6px;text-align:center;border-bottom:1px solid #efefef;${dayTint(i)}font-style:italic;color:#cccccc;font-family:${sans};font-size:12px;">—</td>`
+              ? `<td class="sh-cell" style="padding:6px 4px;text-align:center;border-bottom:1px solid #efefef;${dayTint(i)}">${names.map(pill).join(" ")}</td>`
+              : `<td class="sh-cell" style="padding:8px 6px;text-align:center;border-bottom:1px solid #efefef;${dayTint(i)}font-style:italic;color:#cccccc;font-family:${sans};font-size:12px;">—</td>`
           )
           .join("")}
-      </tr>`
+      </tr></tbody>`
     : "";
   const legendDots = groups
     .map((g) => {
@@ -417,7 +424,7 @@ function buildScheduleSheetNode({ sectionTitle, weekLabel, days, todayIdx, group
   const node = document.createElement("div");
   node.style.cssText = "position:absolute;left:-10000px;top:0;width:1560px;background:#ffffff;padding:0 0 6px;";
   node.innerHTML = `
-    <div style="background:#ffffff;border-bottom:2px solid #2b2a25;padding:16px 26px;display:flex;align-items:center;justify-content:space-between;">
+    <div class="sh-head" style="background:#ffffff;border-bottom:2px solid #2b2a25;padding:16px 26px;display:flex;align-items:center;justify-content:space-between;">
       <div style="display:flex;align-items:center;gap:14px;">
         <img src="${HAENYEO_ICON}" alt="" style="width:36px;height:36px;object-fit:contain;" />
         <div>
@@ -433,9 +440,9 @@ function buildScheduleSheetNode({ sectionTitle, weekLabel, days, todayIdx, group
     <table style="width:100%;border-collapse:collapse;table-layout:fixed;">
       <colgroup><col style="width:172px;" />${days.map(() => "<col />").join("")}</colgroup>
       <thead><tr><th style="border-bottom:1.5px solid #e4e4e4;"></th>${dayHead}</tr></thead>
-      <tbody>${groups.map(groupBlock).join("")}${managerRow}</tbody>
+      ${groups.map(groupBlock).join("")}${managerRow}
     </table>
-    <div style="display:flex;align-items:center;margin-top:12px;padding:0 4px;font-family:${sans};font-size:10.5px;color:#7a7a7a;">
+    <div class="sh-legend" style="display:flex;align-items:center;margin-top:12px;padding:0 4px;font-family:${sans};font-size:10.5px;color:#7a7a7a;">
       <div>${todaySwatch}<span style="white-space:nowrap;"><span style="font-style:italic;color:#cccccc;">—</span>&nbsp; Day off</span></div>
       <div style="margin-left:auto;">${legendDots}</div>
     </div>`;
@@ -1017,9 +1024,35 @@ function personShiftFor(name, dateObj, patterns, overrides) {
 // time, with no shift-code restriction. Fewer servers than slots leaves the
 // trailing slots empty (two servers fill 1 and 2; Swing stays empty). Same rule
 // for Bartender before Bartender (Swing).
+// ---- One order for "who is working" (Tip Sheet + Today at a Glance) ----
+// Group by the role of the SHIFT worked (Juliette on a server shift is a Server
+// that night; a manager on Expo is Expo), then start time, then first name so
+// ties never reshuffle between renders. The Tip Sheet fills its slots straight
+// from this order and Glance lists it — change the slot order here and Glance
+// follows. People with no tip-pool shift sort after Bar: MANAGEMENT (managers
+// off the floor, e.g. FM), then OTHER (e.g. Training).
+const WORK_GROUP_ORDER = ["Servers", "Busser/Runner", "Expo", "Host", "Bar", "Management", "Other"];
+function workGroupOf(p) {
+  const role = roleFromCode(normalizeShiftCode(p.code, p.role));
+  if (role && role !== "Training") return role;
+  return p.role === "Management" ? "Management" : "Other";
+}
+function orderWorking(list) {
+  const group = (p) => WORK_GROUP_ORDER.indexOf(workGroupOf(p));
+  const start = (p) => shiftStartHour(normalizeShiftCode(p.code, p.role));
+  return [...list].sort((a, b) => group(a) - group(b) || start(a) - start(b) || a.name.localeCompare(b.name));
+}
+// The Tip Sheet's own step on top of staffWorkingOn: a manager is only a Tip
+// Sheet candidate on a floor shift (Expo), not on FM. Everyone on the FOH roster
+// who is working stays — slot filling (autoAssignSlots) then decides who is
+// tipped. Glance never applies this.
+function onTipSheet(w) {
+  return w.role !== "Management" || !!roleFromCode(normalizeShiftCode(w.code, w.role));
+}
+
 function autoAssignSlots(working) {
   const byRole = {};
-  working.forEach((p) => {
+  orderWorking(working).forEach((p) => {
     const code = normalizeShiftCode(p.code, p.role);
     const role = roleFromCode(code);
     if (!role) return;
@@ -1028,9 +1061,9 @@ function autoAssignSlots(working) {
     const slotRole = role === "Expo" ? "Expo (Fri–Sun)" : role;
     (byRole[slotRole] = byRole[slotRole] || []).push({ name: p.name, code, start: shiftStartHour(code) });
   });
-  // Earliest start first: Servers slot 1, then 2, then Swing (3rd cut);
-  // Busser/Runner 1 then 2; Bartender before Bartender (Swing).
-  Object.keys(byRole).forEach((r) => byRole[r].sort((a, b) => a.start - b.start));
+  // Already in orderWorking order — earliest start first (ties by name):
+  // Servers slot 1, then 2, then Swing (3rd cut); Busser/Runner 1 then 2;
+  // Bartender before Bartender (Swing).
 
   const used = {};
   return SLOTS.map((slot) => {
@@ -1747,9 +1780,23 @@ export default function SchedulingHub({ session, onSignOut }) {
   // Who is on the floor on the day picked in the 7-day strip (brief item 7),
   // defaulting to today. Coverage gaps stay listed (in red) — they're a hole
   // to fill, not a person working.
-  const glanceRoster = useMemo(() => {
+  // Grouped in the Tip Sheet's order (orderWorking). "(swing)" marks whoever
+  // lands in the Server (Swing) / Bartender (Swing) slot for this date.
+  const glanceView = useMemo(() => {
     const { working, gaps } = staffWorkingOn(glanceIso);
-    return [...working, ...gaps];
+    const swing = new Set(
+      autoAssignSlots(working.filter(onTipSheet))
+        .filter((s) => /Swing/.test(s.label) && s.autoName)
+        .map((s) => s.autoName)
+    );
+    const groups = [];
+    orderWorking(working).forEach((p) => {
+      const key = workGroupOf(p);
+      let g = groups[groups.length - 1];
+      if (!g || g.key !== key) groups.push((g = { key, people: [] }));
+      g.people.push({ ...p, swing: swing.has(p.name) });
+    });
+    return { groups, gaps, count: working.length + gaps.length };
   }, [fohRoster, patterns, weeklyPatterns, placeholderPatterns, weeklyPlaceholders, groupRosters, overrides, railOffByDate, staffList, offCodes, glanceIso]);
   const glanceIsToday = glanceIso === TODAY_ISO;
   // "THURSDAY, SEP 24" for any other day; today stays the familiar label.
@@ -1997,11 +2044,6 @@ export default function SchedulingHub({ session, onSignOut }) {
     catch (e) { console.error("Delete note failed:", e); reloadNotes(ws); }
   }
 
-  // The Tip Sheet's own step on top of staffWorkingOn: a manager is only a
-  // Tip Sheet candidate on a floor shift (Expo), not on FM. Everyone on the FOH
-  // roster who's working stays, exactly as before — slot filling
-  // (autoAssignSlots) then decides who is tipped. Glance never applies this.
-  const onTipSheet = (w) => w.role !== "Management" || !!roleFromCode(normalizeShiftCode(w.code, w.role));
   const tipWorking = useMemo(() => {
     const all = staffWorkingOn(tipDateIso);
     return { ...all, working: all.working.filter(onTipSheet) };
@@ -2933,7 +2975,7 @@ export default function SchedulingHub({ session, onSignOut }) {
   // Save-as-PDF and the multi-week publish attachments).
   function scheduleSheetNodeFor(section, week) {
     const isFoh = section === "FOH";
-    return buildScheduleSheetNode({
+    const node = buildScheduleSheetNode({
       sectionTitle: isFoh ? "FRONT OF HOUSE SCHEDULE" : "BOH & KITCHEN SCHEDULE",
       weekLabel: weekRangeLabel(week),
       days: sheetDays(week),
@@ -2946,6 +2988,10 @@ export default function SchedulingHub({ session, onSignOut }) {
           ],
       managerOn: buildManagerOn(week),
     });
+    // Print CSS keys off this: only the FOH sheet gets the tightened print
+    // density; BOH/Kitchen prints exactly as before.
+    node.dataset.sheet = isFoh ? "foh" : "bohkitchen";
+    return node;
   }
   // Save-as-PDF: FOH and BOH+Kitchen get the branded colored sheet; the
   // Management sub-tab keeps the generic grid capture.
@@ -4008,9 +4054,13 @@ export default function SchedulingHub({ session, onSignOut }) {
   // PDF sheet + HTML email). `roles` carries the role actually worked per day
   // (from the shift code, e.g. Akira's BAR_6CL day is "Bar") so cells color by
   // role worked, not by the section row.
+  // FOH sheet group order matches the Tip Sheet and Glance (orderWorking):
+  // Servers, Busser/Runner, Host, Bar — no Expo group, Expo is a cross-role
+  // assignment, not anyone's home role. Anything else (Training) follows.
   function buildFohSheetGroups(week) {
     const wp = patternsForWeekStart(week?.[0]?.iso);
-    return fohRoleGroups.map((role) => ({
+    const rank = (r) => { const i = WORK_GROUP_ORDER.indexOf(r); return i < 0 ? WORK_GROUP_ORDER.length : i; };
+    return [...fohRoleGroups].sort((a, b) => rank(a) - rank(b)).map((role) => ({
       label: role,
       rows: fohRoster
         .filter((p) => p.role === role)
@@ -4159,6 +4209,11 @@ export default function SchedulingHub({ session, onSignOut }) {
         .nr-row:last-child { border-bottom: none; }
         .nr-dot { width: 7px; height: 7px; border-radius: 50%; background: #8FA396; display: inline-block; margin-right: 9px; }
         .nr-row-status { color: #85897F; font-size: 12px; }
+        /* Today at a Glance group labels — same small-caps label treatment as
+           the Tip Sheet's section labels; no rule line. */
+        .rs-glance-group { font-family: 'Space Mono', monospace; font-size: 9px; letter-spacing: 1.5px; text-transform: uppercase; color: #666; padding: 10px 0 2px; }
+        .rs-glance-group:first-child { padding-top: 0; }
+        .rs-glance-swing { margin-left: 5px; font-size: 10.5px; color: #666; }
 
         .nr-log-row { padding: 7px 0; border-bottom: 1px solid #E8E9E4; font-size: 12px; }
         .nr-log-row:last-child { border-bottom: none; }
@@ -4485,6 +4540,17 @@ export default function SchedulingHub({ session, onSignOut }) {
              sheet node (same renderer as the PDF). Only the portal shows. */
           body.printing-schedule .hub > *:not(.schedule-print-portal) { display: none !important; }
           body.printing-schedule .schedule-print-portal { display: block !important; page: scheduleLandscape; }
+          /* FOH schedule print: one landscape page at full type size. Only the
+             padding tightens (the PDF, the email attachment and the BOH/Kitchen
+             print keep the builder's inline spacing). A group never splits
+             across pages; the date row (thead) repeats if a page break happens. */
+          .schedule-print-portal [data-sheet="foh"] .sh-group { break-inside: avoid; page-break-inside: avoid; }
+          .schedule-print-portal [data-sheet="foh"] .sh-head { padding: 6px 22px !important; }
+          .schedule-print-portal [data-sheet="foh"] .sh-th { padding: 5px 6px !important; }
+          .schedule-print-portal [data-sheet="foh"] .sh-grp { padding: 3px 12px !important; }
+          .schedule-print-portal [data-sheet="foh"] .sh-name,
+          .schedule-print-portal [data-sheet="foh"] .sh-cell { padding-top: 3px !important; padding-bottom: 3px !important; }
+          .schedule-print-portal [data-sheet="foh"] .sh-legend { margin-top: 6px !important; }
           body.printing-qr .hub > *:not(.qr-print-sheet) { display: none !important; }
           body.printing-qr .qr-print-sheet { display: block !important; }
         }
@@ -5509,12 +5575,17 @@ export default function SchedulingHub({ session, onSignOut }) {
                   )}
                 </div>
                 <div className="nr-panel">
-                  {glanceRoster.length === 0 && (
+                  {glanceView.count === 0 && (
                     <div className="rs-log-empty">
                       Nobody is scheduled {glanceIsToday ? "today" : `on ${shortDate(glanceIso)}`}.
                     </div>
                   )}
-                  {glanceRoster.map((r) => (
+                  {/* Grouped in Tip Sheet order; a group with nobody in it gets no
+                      label. Coverage gaps are holes, not people — they stay at
+                      the end, outside any group. */}
+                  {[...glanceView.groups.flatMap((g) => [{ label: g.key }, ...g.people]), ...glanceView.gaps].map((r) => r.label ? (
+                    <div className="rs-glance-group" key={`grp-${r.label}`}>{r.label}</div>
+                  ) : (
                     <div className="nr-row" key={r.name}>
                       <span>
                         <span className="nr-dot" style={r.code === "GAP" ? { background: "#B23A2F" } : undefined} />
@@ -5522,6 +5593,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                       </span>
                       <span className="nr-row-status">
                         {r.code === "GAP" ? "Coverage gap" : shiftLabelForType(r.code)}
+                        {r.swing && <span className="rs-glance-swing">(swing)</span>}
                         <button
                           className="swap-icon-btn"
                           title={`Swap ${r.name} out for ${glanceIsToday ? "today" : shortDate(glanceIso)}`}
