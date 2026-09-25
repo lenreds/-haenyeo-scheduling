@@ -4267,7 +4267,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         .tip-page-split { display: flex; gap: 22px; align-items: stretch; }
         .tip-left-col { width: 300px; flex-shrink: 0; display: flex; flex-direction: column; }
         .tip-right-col { flex: 1; min-width: 0; }
-        @media screen and (max-width: 860px) { .tip-page-split { flex-direction: column; } .tip-left-col { width: 100%; } } /* screen only: Chrome prints at a width that matches 860px, which stacked the sheet onto 3 pages */
+        @media screen and (max-width: 860px) { .tip-page-split { flex-direction: column; } .tip-left-col { width: 100%; } } /* screen only — printing must never stack the sheet */
 
         .tip-logo-space { min-height: 170px; display: flex; align-items: center; justify-content: center; }
         .tip-logo-img { max-width: 300px; max-height: 165px; object-fit: contain; }
@@ -4422,13 +4422,6 @@ export default function SchedulingHub({ session, onSignOut }) {
           /* Logo breathing room for landscape */
           .tip-logo-space { min-height: 95px !important; margin-bottom: 14px !important; }
           .tip-logo-img { max-height: 91px !important; }
-          /* One landscape page. Chrome lays print out 988px wide (Letter, 0.35in
-             margins) — too narrow for the cash column + staff table, and the
-             sheet runs ~900px tall against ~749px of page. Zoom lays it out at
-             roughly its on-screen width and scales it onto the page, the same
-             thing the PDF does by scaling its capture. */
-          .tip-wrap { max-width: none !important; padding: 0 !important; }
-          .tip-card { zoom: var(--tip-print-zoom, 0.8); }
           /* Set Schedule print: swap the live interactive grid for the branded
              sheet node (same renderer as the PDF). Only the portal shows. */
           body.printing-schedule .hub > *:not(.schedule-print-portal) { display: none !important; }
@@ -6634,8 +6627,8 @@ export default function SchedulingHub({ session, onSignOut }) {
       )}
 
       {tab === "tips" && (
-        <div className="cal-wrap tip-wrap" key="tips">
-          <div className="cal-card tip-card" ref={tipCardRef}>
+        <div className="cal-wrap" key="tips">
+          <div className="cal-card" ref={tipCardRef}>
             {tipFinalized && (
               <div className="tip-finalized-banner screen-only">
                 <Lock size={14} /> FINALIZED{tipFinalizedAt ? ` — ${new Date(tipFinalizedAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}` : ""}
