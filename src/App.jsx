@@ -4401,6 +4401,12 @@ export default function SchedulingHub({ session, onSignOut }) {
           .point-reference { font-size: 9.5px !important; }
           .tip-top-row { gap: 16px !important; flex-wrap: nowrap !important; }
           .tip-inputs { gap: 13px !important; margin-bottom: 8px !important; }
+          /* Top row (floor/bar cash + CC, covers) stays on one line: at 110px
+             inputs COVERS wrapped to its own line, which also cost a row of
+             height. 92px still holds a value like 1234.56. */
+          .tip-top-row .tip-inputs { flex-wrap: nowrap !important; }
+          .tip-top-row .tip-field input { width: 92px !important; }
+          .tip-top-row .tip-field:last-child input { width: 58px !important; }
           .tip-field label { font-size: 10px !important; }
           .tip-stat { font-size: 14px !important; }
           .denom-table { font-size: 10.5px !important; }
@@ -4422,6 +4428,13 @@ export default function SchedulingHub({ session, onSignOut }) {
           /* Logo breathing room for landscape */
           .tip-logo-space { min-height: 95px !important; margin-bottom: 14px !important; }
           .tip-logo-img { max-height: 91px !important; }
+          /* One landscape page: at 100% the sheet overflows Letter landscape
+             (Chrome prints 988px wide; the sheet needs ~900px of height against
+             ~749px). 86% is what the manager had set in Chrome's print dialog;
+             zooming the whole Tip Sheet wrapper reproduces that exactly, so
+             print dialogs can stay at Default. Tip Sheet only — the Set
+             Schedule print and the PDF (not @media print) are unaffected. */
+          .tip-wrap { zoom: 0.86; }
           /* Set Schedule print: swap the live interactive grid for the branded
              sheet node (same renderer as the PDF). Only the portal shows. */
           body.printing-schedule .hub > *:not(.schedule-print-portal) { display: none !important; }
@@ -6627,7 +6640,7 @@ export default function SchedulingHub({ session, onSignOut }) {
       )}
 
       {tab === "tips" && (
-        <div className="cal-wrap" key="tips">
+        <div className="cal-wrap tip-wrap" key="tips">
           <div className="cal-card" ref={tipCardRef}>
             {tipFinalized && (
               <div className="tip-finalized-banner screen-only">
