@@ -4299,8 +4299,8 @@ export default function SchedulingHub({ session, onSignOut }) {
         .tip-out-toggle { margin-left: 6px; font-family: 'Space Mono', monospace; font-size: 9px; letter-spacing: 0.5px; background: none; border: 1px solid rgba(178,58,47,0.5); color: #B23A2F; border-radius: 4px; padding: 1px 6px; cursor: pointer; vertical-align: middle; }
         .tip-out-toggle.on { border-color: rgba(201,138,63,0.5); color: #8a5a20; }
         .tip-out-toggle:disabled { cursor: not-allowed; opacity: 0.5; }
-        .tip-out-off label { color: #B23A2F; font-weight: 700; }
-        .tip-out-off-note { font-size: 11px; color: #B23A2F; text-transform: uppercase; letter-spacing: 0.5px; }
+        /* Same red as a coverage gap on Today at a Glance; bold because it is small text on the dark card. */
+        .tip-out-na { color: #B23A2F; font-weight: 700; }
         .payout-empty { font-size: 10.5px; color: #c7bfa9; font-style: italic; padding: 2px 0 4px; }
         .payout-row { display: flex; gap: 5px; margin-bottom: 5px; align-items: center; }
         .payout-row input[type="text"] { flex: 1; min-width: 0; font-size: 11px; padding: 4px 6px; border: 1px solid rgba(43,42,37,0.15); border-radius: 3px; background: #FFFDF7; color: #2B2A25; }
@@ -4355,7 +4355,7 @@ export default function SchedulingHub({ session, onSignOut }) {
           .week-table th, .tip-field label, .recon-title, .denom-header,
           .check-label, .cal-weekday { color: #8c8574 !important; }
           .recon-row label, .denom-label, .check-sub, .legend-item { color: #4a473d !important; }
-          .tip-out-off label, .tip-out-off-note { color: #B23A2F !important; }
+          .tip-out-na { color: #B23A2F !important; }
           .cal-day { background: #fff !important; border-color: rgba(43,42,37,0.12) !important; }
           .tip-field input, .tip-table-input, .recon-row input, .denom-row input,
           .payout-row input[type="text"], .payout-row input[type="number"],
@@ -4435,7 +4435,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         .tip-pdf-mode .check-label { color: #8c8574 !important; }
         .tip-pdf-mode .recon-row label, .tip-pdf-mode .denom-label,
         .tip-pdf-mode .check-sub { color: #4a473d !important; }
-        .tip-pdf-mode .tip-out-off label, .tip-pdf-mode .tip-out-off-note { color: #B23A2F !important; }
+        .tip-pdf-mode .tip-out-na { color: #B23A2F !important; }
         .tip-pdf-mode input { background: #fff !important; color: #2B2A25 !important; border-color: rgba(43,42,37,0.2) !important; }
         .tip-pdf-mode .recon-row.final span { color: #8a5a20 !important; }
         /* Cash box writing rules (brief item 2): each denomination row gets a
@@ -4753,7 +4753,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         .custom-toggle.on { background: var(--accent); border-color: var(--accent); color: #0c0c0c; }
         .add-payout-btn { color: var(--accent); border-color: var(--line2); }
         .tip-out-toggle.on { color: var(--accent); border-color: var(--line2); }
-        .tip-out-toggle:not(.on), .tip-out-off label, .tip-out-off-note { color: #e79289; }
+        .tip-out-toggle:not(.on) { color: #e79289; }
         .week-range-current { background: rgba(200,149,108,0.18); color: var(--accent); }
 
         /* ---- calendar ---- */
@@ -6766,10 +6766,10 @@ export default function SchedulingHub({ session, onSignOut }) {
                   <div className="tip-field"><label>Floor Pool</label><div className="tip-stat">${money(floorPool)}</div></div>
                   <div className="tip-field"><label>Total Points</label><div className="tip-stat">{totalPoints.toFixed(2)}</div></div>
                   <div className="tip-field"><label>$ / Point</label><div className="tip-stat"><b>${money(perPoint)}</b></div></div>
-                  <div className={`tip-field ${barTipOutOn ? "" : "tip-out-off"}`}>
+                  <div className="tip-field">
                     <label>
-                      {barTipOutOn ? "Bar Tip-Out (10%)" : "Bar Tip-Out — OFF"}
-                      {/* Control is screen-only; the $0.00 / "not charged" outcome prints. */}
+                      {barTipOutOn ? "Bar Tip-Out (10%)" : <>Bar Tip-Out <span className="tip-out-na">— N/A</span></>}
+                      {/* Control is screen-only; the N/A outcome prints. */}
                       <button
                         className={`tip-out-toggle screen-only ${barTipOutOn ? "on" : ""}`}
                         disabled={tipFinalized || tipLocked}
@@ -6780,10 +6780,8 @@ export default function SchedulingHub({ session, onSignOut }) {
                         aria-pressed={barTipOutOn}
                       >{barTipOutOn ? "On" : "Off"}</button>
                     </label>
-                    <div className="tip-stat">
-                      ${money(barTipOutTotal)}
-                      {!barTipOutOn && <span className="tip-out-off-note"> not charged</span>}
-                    </div>
+                    {/* An em dash, not $0.00 — "doesn't apply", not "charged zero". */}
+                    <div className="tip-stat">{barTipOutOn ? `$${money(barTipOutTotal)}` : "—"}</div>
                   </div>
                   <div className="tip-field"><label>Each Recipient Gets</label><div className="tip-stat"><b>${money(barShareEach)}</b></div></div>
                 </div>
