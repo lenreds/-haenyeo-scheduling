@@ -820,15 +820,45 @@ export async function setWeekFinalized(weekStartIso, finalized) {
   const fields = { finalized, finalized_at: finalized ? new Date().toISOString() : null };
   if (!finalized) { fields.published = false; fields.published_at = null; }
   await upsertWeekRow(weekStartIso, WEEK_SECTION_ALL, fields, { legacy: true });
+  // Publish state is per section now, so reopening a week has to clear each
+  // section's mark too — both schedules become sendable again.
+  if (!finalized) {
+    await Promise.all(Object.values(PUBLISH_SECTION_DB).map((section) =>
+      upsertWeekRow(weekStartIso, section, { published: false, published_at: null })));
+  }
 }
 
-export async function setWeekPublished(weekStartIso) {
-  await upsertWeekRow(
-    weekStartIso,
-    WEEK_SECTION_ALL,
-    { published: true, published_at: new Date().toISOString() },
-    { legacy: true }
-  );
+// Publish state is PER SECTION: Front of House and BOH & Kitchen are separate
+// emails, sent (or held back) separately, so each has its own mark on its own
+// schedule_weeks row (the same FOH / BOHKITCHEN rows the section locks use —
+// the published columns were already there). Sending one never touches the
+// other. The week-level 'ALL' row keeps finalize only; a week published there
+// before this split counts as sent to both sections (the old Publish always
+// sent both) — see publishedBySectionFromRows.
+export const PUBLISH_SECTION_DB = { foh: "FOH", bk: "BOHKITCHEN" };
+export async function setWeekPublished(weekStartIso, sectionKey) {
+  const section = PUBLISH_SECTION_DB[sectionKey];
+  if (!section) throw new Error(`unknown publish section "${sectionKey}"`);
+  await upsertWeekRow(weekStartIso, section, { published: true, published_at: new Date().toISOString() });
+}
+
+// rows (from fetchScheduleWeeks) -> { foh: { weekStart: publishedAt|true }, bk: {…} }.
+// A section's own row wins; a legacy week-level publish fills in any section
+// that has no mark of its own.
+export function publishedBySectionFromRows(rows) {
+  const out = { foh: {}, bk: {} };
+  const keyOf = { FOH: "foh", BOHKITCHEN: "bk" };
+  (rows || []).forEach((r) => {
+    const key = keyOf[r.section];
+    if (key && r.published) out[key][r.week_start] = r.published_at || true;
+  });
+  (rows || []).forEach((r) => {
+    if (r.section !== WEEK_SECTION_ALL || !r.published) return;
+    ["foh", "bk"].forEach((key) => {
+      if (!(r.week_start in out[key])) out[key][r.week_start] = r.published_at || true;
+    });
+  });
+  return out;
 }
 
 // One section of one week. sectionKey is the UI sub-tab key ('foh' etc).

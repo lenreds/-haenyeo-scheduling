@@ -35,6 +35,7 @@ import {
   fetchScheduleWeeks,
   setWeekFinalized,
   setWeekPublished,
+  publishedBySectionFromRows,
   setWeekSectionLocked,
   setRailArchived,
   deleteRailRequest,
@@ -2634,8 +2635,9 @@ export default function SchedulingHub({ session, onSignOut }) {
   const groupLockKey = (groupKey) => (groupKey === "management" ? "management" : "bohkitchen");
   const [finalizedWeeks, setFinalizedWeeks] = useState(new Set()); // { "2026-07-13" }
   const [loadError, setLoadError] = useState("");
-  const [publishedWeekStarts, setPublishedWeekStarts] = useState(new Set());
-  const [publishedAtByWeek, setPublishedAtByWeek] = useState({}); // weekStart -> iso
+  // Publish state per SECTION (Front of House / BOH & Kitchen are sent
+  // separately): { foh: { weekStart: publishedAt|true }, bk: {…} }.
+  const [publishedBySection, setPublishedBySection] = useState({ foh: {}, bk: {} });
   const [finalizeBusy, setFinalizeBusy] = useState(false);
 
   // Load everything from Supabase on mount. DB values win where present;
@@ -2879,13 +2881,8 @@ export default function SchedulingHub({ session, onSignOut }) {
       .then((rows) => {
         if (cancelled) return;
         setFinalizedWeeks(new Set(rows.filter((r) => r.finalized).map((r) => r.week_start)));
-        setPublishedWeekStarts(new Set(rows.filter((r) => r.published).map((r) => r.week_start)));
-        // When each week's emails went out, for the "Published ✓ Sep 21, 4:02 PM"
-        // badge (brief item 3). Weeks published before published_at was read
-        // back simply have no timestamp and fall back to the button.
-        const pubAt = {};
-        rows.forEach((r) => { if (r.published && r.published_at) pubAt[r.week_start] = r.published_at; });
-        setPublishedAtByWeek(pubAt);
+        // Per-section publish marks (and when each went out, for the badge).
+        setPublishedBySection(publishedBySectionFromRows(rows));
         const locks = new Set();
         rows.forEach((r) => {
           if (!r.locked) return;
@@ -3213,8 +3210,9 @@ export default function SchedulingHub({ session, onSignOut }) {
     if (!activeWeek || finalizeBusy) return;
     const weekStart = activeWeek[0].iso; // Monday of week
     const next = !finalizedWeeks.has(weekStart);
-    if (!next && publishedWeekStarts.has(weekStart) && !window.confirm(
-      `Un-finalize the week of ${shortDate(weekStart)}? It comes off the Calendar, and because it will need publishing again, its "published" mark is cleared. Emails already sent are not recalled.`
+    const sentAny = publishedBySection.foh[weekStart] || publishedBySection.bk[weekStart];
+    if (!next && sentAny && !window.confirm(
+      `Un-finalize the week of ${shortDate(weekStart)}? It comes off the Calendar, and because it will need publishing again, its "published" marks are cleared for both Front of House and BOH & Kitchen. Emails already sent are not recalled.`
     )) return;
 
     setFinalizeBusy(true);
@@ -3226,15 +3224,10 @@ export default function SchedulingHub({ session, onSignOut }) {
         return s;
       });
       if (!next) {
-        setPublishedWeekStarts((prev) => {
-          const s = new Set(prev);
-          s.delete(weekStart);
-          return s;
-        });
-        setPublishedAtByWeek((prev) => {
-          const m = { ...prev };
-          delete m[weekStart];
-          return m;
+        setPublishedBySection((prev) => {
+          const foh = { ...prev.foh }; const bk = { ...prev.bk };
+          delete foh[weekStart]; delete bk[weekStart];
+          return { foh, bk };
         });
       }
       addLog(
@@ -3307,13 +3300,25 @@ export default function SchedulingHub({ session, onSignOut }) {
     return `Schedule ${md(start)}-${md(end)}/${String(end.getFullYear()).slice(-2)}`;
   }
 
+  // The two schedule emails. Each is its own section in the dialog: include
+  // or leave it out; a section left out isn't sent and its weeks stay pending
+  // (publish state is per section — see setWeekPublished). Managers get both
+  // emails, so they're listed under each section and can be unticked per email.
+  const PUBLISH_SECTIONS = [
+    { key: "foh", label: "Front of House", serverSections: ["FOH", "Management"], payloadFor: buildSchedulePayload, sheet: "FOH" },
+    { key: "bk", label: "BOH & Kitchen", serverSections: ["BOH", "Kitchen", "Management"], payloadFor: buildBohKitchenPayload, sheet: "BOHKITCHEN" },
+  ];
+  const publishPeopleFor = (key) => [...(key === "foh" ? publishRecipients.foh : publishRecipients.bk), ...publishRecipients.mgmt];
+
   function openPublishDialog() {
     const weeks = [...unpublishedFinalizedWeeks].sort();
     if (!weeks.length) { addLog("No finalized weeks waiting to be published", "warn"); return; }
     setPublishModal({
       weeks, picked: weeks,
+      include: { foh: true, bk: true },
       subject: publishSubjectFor(weeks), subjectEdited: false,
-      notes: "", excluded: [],
+      notes: "",
+      excluded: [], // "section:staffId" — unticking someone in one email leaves the other alone
       busy: null, error: null, testResult: null,
       sentSections: [], // sections already sent in THIS dialog — a retry won't resend them
       // Company inbox (server env SCHEDULE_COPY_EMAIL): undefined while loading,
@@ -3329,46 +3334,65 @@ export default function SchedulingHub({ session, onSignOut }) {
       return { ...m, picked, subject: m.subjectEdited ? m.subject : publishSubjectFor(picked) };
     });
   }
-  function togglePublishRecipient(id) {
-    setPublishModal((m) => ({
-      ...m,
-      excluded: m.excluded.includes(id) ? m.excluded.filter((x) => x !== id) : [...m.excluded, id],
-    }));
+  function togglePublishSection(key) {
+    setPublishModal((m) => ({ ...m, include: { ...m.include, [key]: !m.include[key] } }));
+  }
+  function togglePublishRecipient(key, id) {
+    const k = `${key}:${id}`;
+    setPublishModal((m) => ({ ...m, excluded: m.excluded.includes(k) ? m.excluded.filter((x) => x !== k) : [...m.excluded, k] }));
   }
 
-  // Render every PDF up front. If any fails, nothing is sent (A5).
-  async function renderPublishPdfs(isos) {
-    const weeks = isos.map((s) => buildWeekByOffset(weekOffsetFor(new Date(`${s}T00:00:00`))));
-    const foh = [];
-    const bk = [];
-    for (let i = 0; i < weeks.length; i++) {
-      // Named by the week's Monday so they sort correctly in a folder.
-      const filename = `Haenyeo-Schedule-${isos[i]}.pdf`;
-      foh.push({ filename, b64: await sheetNodePdfBase64(scheduleSheetNodeFor("FOH", weeks[i])) });
-      bk.push({ filename, b64: await sheetNodePdfBase64(scheduleSheetNodeFor("BOHKITCHEN", weeks[i])) });
+  // Everything the dialog and the send need to know about one section right
+  // now: which weeks it would send (ticked AND still pending for it), who it
+  // goes to, whether it's going at all, and why not if it can't.
+  function publishSectionState(m, sec) {
+    const pendingAll = m.weeks.filter((w) => pendingPublish[sec.key].includes(w));
+    const weeks = m.picked.filter((w) => pendingPublish[sec.key].includes(w)).sort();
+    const people = publishPeopleFor(sec.key);
+    const ids = people.filter((r) => !m.excluded.includes(`${sec.key}:${r.id}`)).map((r) => r.id);
+    const copy = !!(m.copyEmail && m.copyOn);
+    const sent = m.sentSections.includes(sec.key);
+    const unavailable = sent ? null : pendingAll.length === 0
+      ? `Nothing to send — every finalized week has already gone out to ${sec.label}.`
+      : weeks.length === 0 && !sent
+      ? `None of the ticked weeks are pending for ${sec.label}.`
+      : null;
+    const going = !sent && !unavailable && !!m.include[sec.key] && (ids.length > 0 || copy);
+    return { ...sec, weeks, people, ids, copy, sent, unavailable, going };
+  }
+
+  // Render every PDF the send needs up front. If any fails, nothing is sent (A5).
+  async function renderPublishPdfs(states) {
+    const out = {};
+    for (const st of states) {
+      out[st.key] = [];
+      for (const iso of st.weeks) {
+        const week = buildWeekByOffset(weekOffsetFor(new Date(`${iso}T00:00:00`)));
+        // Named by the week's Monday so they sort correctly in a folder.
+        const b64 = await sheetNodePdfBase64(scheduleSheetNodeFor(st.sheet, week));
+        if (!String(b64 || "").startsWith("JVBERi0")) throw new Error(`${st.label} ${iso} didn't render`);
+        out[st.key].push({ filename: `Haenyeo-Schedule-${iso}.pdf`, b64, week });
+      }
     }
-    [...foh, ...bk].forEach((a) => {
-      if (!String(a.b64 || "").startsWith("JVBERi0")) throw new Error(`${a.filename} didn't render`);
-    });
-    return { weeks, foh, bk };
+    return out;
   }
 
-  // test=true: the identical emails, to the signed-in manager only, "[TEST]"
-  // subject. Never marks anything published, never touches the publish count,
-  // never writes a timestamp — setWeekPublished is only reachable from the
-  // real-send branch below.
+  // test=true: the identical emails for the included sections, to the
+  // signed-in manager only, "[TEST]" subject. Never marks anything published,
+  // never touches the publish count, never writes a timestamp —
+  // setWeekPublished is only reachable from the real-send branch below.
   async function sendPublish(test) {
     const m = publishModal;
     if (!m || m.busy) return;
     const token = session?.access_token;
     if (!token) { setPublishModal((p) => ({ ...p, error: "Sign in to publish." })); return; }
-    const isos = m.weeks.filter((w) => m.picked.includes(w)).sort();
-    if (!isos.length) return;
+    const jobs = PUBLISH_SECTIONS.map((sec) => publishSectionState(m, sec)).filter((st) => st.going);
+    if (!jobs.length) return;
     setPublishModal((p) => ({ ...p, busy: test ? "test" : "send", error: null, testResult: null }));
 
     let pdfs;
     try {
-      pdfs = await renderPublishPdfs(isos);
+      pdfs = await renderPublishPdfs(jobs);
     } catch (e) {
       console.error("Publish PDF render failed:", e);
       setPublishModal((p) => ({ ...p, busy: null, error: `A schedule PDF couldn't be made (${e.message || e}) — nothing was sent. Try again.` }));
@@ -3376,34 +3400,18 @@ export default function SchedulingHub({ session, onSignOut }) {
     }
 
     const shared = { subject: m.subject.trim(), notes: m.notes.trim() };
-    // copy: whether the company inbox gets this section's email. It gets both
-    // distinct schedule emails (FOH, BOH & Kitchen); the managers' email is the
-    // FOH one again, so it isn't copied twice. testable: the test send covers
-    // each distinct email once.
-    const copyOn = !!(m.copyEmail && m.copyOn);
-    const fohPayload = { weeks: pdfs.weeks.map(buildSchedulePayload), attachments: pdfs.foh };
-    const sections = [
-      { key: "foh", label: "Front of House", people: publishRecipients.foh, copy: true, testable: true, payload: { ...fohPayload, sections: ["FOH"] } },
-      { key: "bk", label: "BOH & Kitchen", people: publishRecipients.bk, copy: true, testable: true, payload: { weeks: pdfs.weeks.map(buildBohKitchenPayload), sections: ["BOH", "Kitchen"], attachments: pdfs.bk } },
-      // Managers get the Front of House schedule (its sheet carries the Manager On row).
-      { key: "mgmt", label: "Management", people: publishRecipients.mgmt, copy: false, testable: false, payload: { ...fohPayload, sections: ["Management"] } },
-    ].map((sec) => ({ ...sec, ids: sec.people.filter((r) => !m.excluded.includes(r.id)).map((r) => r.id) }));
-    const hasRecipients = (sec) => sec.ids.length > 0 || (sec.copy && copyOn);
-
-    const jobs = test
-      ? sections.filter((sec) => sec.testable)
-      : sections.filter((sec) => hasRecipients(sec) && !m.sentSections.includes(sec.key));
-    const results = await Promise.all(jobs.map((sec) =>
-      triggerSchedulePublish({
-        ...sec.payload, ...shared,
-        ...(test ? { test: true } : { recipientIds: sec.ids, includeCopy: sec.copy && copyOn }),
-      }, token)
-    ));
+    const results = await Promise.all(jobs.map((st) => triggerSchedulePublish({
+      weeks: pdfs[st.key].map((p) => st.payloadFor(p.week)),
+      attachments: pdfs[st.key].map(({ filename, b64 }) => ({ filename, b64 })),
+      sections: st.serverSections,
+      ...shared,
+      ...(test ? { test: true } : { recipientIds: st.ids, includeCopy: st.copy }),
+    }, token)));
 
     const reconnect = results.some((r) => r?.needsReconnect);
     if (reconnect) refreshGmailStatus();
     const failed = jobs.filter((_, i) => results[i]?.error || reconnect);
-    const failedText = failed.map((sec) => `${sec.label}: ${results[jobs.indexOf(sec)]?.error || "Gmail disconnected"}`).join("; ");
+    const failedText = failed.map((st) => `${st.label}: ${results[jobs.indexOf(st)]?.error || "Gmail disconnected"}`).join("; ");
     const recipientMisses = results.flatMap((r) => r?.failures || []);
 
     if (test) {
@@ -3411,33 +3419,38 @@ export default function SchedulingHub({ session, onSignOut }) {
         ...p, busy: null,
         error: failed.length ? `Test didn't go out — ${failedText}` : null,
         testResult: failed.length ? null
-          : `Test sent to ${session?.user?.email || "you"} — ${jobs.length} emails (${jobs.map((s) => s.label).join(", ")}; managers get the Front of House one). Nothing was marked published.`,
+          : `Test sent to ${session?.user?.email || "you"} — ${jobs.length} email${jobs.length === 1 ? "" : "s"} (${jobs.map((s) => s.label).join(", ")}). Nothing was marked published.`,
       }));
       return;
     }
 
-    const nowSent = [...m.sentSections, ...jobs.filter((sec) => !failed.includes(sec)).map((sec) => sec.key)];
-    const pendingSections = sections.filter((sec) => hasRecipients(sec) && !nowSent.includes(sec.key));
-    if (pendingSections.length) {
+    // Each section that went out is marked published for ITS weeks only — the
+    // other section's marks are never written here, sent or not.
+    const succeeded = jobs.filter((st) => !failed.includes(st));
+    const publishedAt = new Date().toISOString();
+    await Promise.all(succeeded.flatMap((st) => st.weeks.map((w) => setWeekPublished(w, st.key).catch((e) => {
+      console.error(`Mark ${st.key} ${w} published failed:`, e);
+    }))));
+    if (succeeded.length) {
+      setPublishedBySection((prev) => {
+        const next = { foh: { ...prev.foh }, bk: { ...prev.bk } };
+        succeeded.forEach((st) => st.weeks.forEach((w) => { next[st.key][w] = publishedAt; }));
+        return next;
+      });
+    }
+    const sentCount = results.reduce((n, r) => n + (r?.sent || 0), 0);
+    if (succeeded.length) {
+      addLog(`Published ${succeeded.map((st) => `${st.label} (${st.weeks.map(shortDate).join(", ")})`).join(" and ")} — ${sentCount} emails${recipientMisses.length ? `; not delivered: ${recipientMisses.join("; ")}` : ""}`, recipientMisses.length ? "warn" : "good");
+    }
+
+    if (failed.length) {
       // Keep the dialog open; Confirm retries only the section(s) that failed.
       setPublishModal((p) => ({
-        ...p, busy: null, sentSections: nowSent,
-        error: `Couldn't send ${failedText}.${nowSent.length ? ` ${sections.filter((s) => nowSent.includes(s.key)).map((s) => s.label).join(" and ")} already went out and won't be re-sent.` : ""} Nothing is marked published yet — press Confirm & Send to retry.`,
+        ...p, busy: null, sentSections: [...p.sentSections, ...succeeded.map((st) => st.key)],
+        error: `Couldn't send ${failedText}.${succeeded.length ? ` ${succeeded.map((st) => st.label).join(" and ")} went out and ${succeeded.length === 1 ? "is" : "are"} marked published.` : ""} ${failed.map((st) => st.label).join(" and ")} ${failed.length === 1 ? "is" : "are"} still pending — press Confirm & Send to retry.`,
       }));
       return;
     }
-
-    // Every section with recipients went out: now (and only now) mark published.
-    const publishedAt = new Date().toISOString();
-    await Promise.all(isos.map((s) => setWeekPublished(s).catch(() => {})));
-    setPublishedWeekStarts((prev) => new Set([...prev, ...isos]));
-    setPublishedAtByWeek((prev) => {
-      const next = { ...prev };
-      isos.forEach((s) => { next[s] = publishedAt; });
-      return next;
-    });
-    const sentCount = results.reduce((n, r) => n + (r?.sent || 0), 0);
-    addLog(`Published ${isos.length} week${isos.length === 1 ? "" : "s"} (${isos.map(shortDate).join(", ")}) — ${sentCount} emails${recipientMisses.length ? `; not delivered: ${recipientMisses.join("; ")}` : ""}`, recipientMisses.length ? "warn" : "good");
     setPublishModal(null);
   }
 
@@ -4310,13 +4323,23 @@ export default function SchedulingHub({ session, onSignOut }) {
 
   const activeWeek = buildWeekByOffset(weekIndex);
   const weekIsFinalized = finalizedWeeks.has(activeWeekStart);
-  const weekPublishedAt = publishedWeekStarts.has(activeWeekStart) ? publishedAtByWeek[activeWeekStart] : null;
-  // Publish is gated on the week ON SCREEN being finalized — current or future,
-  // not just this week (brief item 3) — and sends every finalized week that
-  // hasn't gone out yet. Past weeks are excluded: Publish isn't offered there.
+  // The week on screen, per section. "Published ✓" only once BOTH schedules
+  // have gone out; one sent and one pending shows which, next to Publish.
+  const weekSentFoh = publishedBySection.foh[activeWeekStart] || null;
+  const weekSentBk = publishedBySection.bk[activeWeekStart] || null;
+  const latestAt = (...ats) => ats.filter((a) => typeof a === "string").sort().pop() || null;
+  const weekPublishedAt = weekSentFoh && weekSentBk ? (latestAt(weekSentFoh, weekSentBk) || true) : null;
+  const weekPublishPartial = !!(weekSentFoh || weekSentBk) && !weekPublishedAt;
+  // Finalized weeks still waiting to go out, per section, and the union (what
+  // the Publish button counts). A week can be sent to one section and still
+  // pending for the other.
+  const pendingPublish = useMemo(() => {
+    const pend = (key) => [...finalizedWeeks].filter((w) => !publishedBySection[key][w]).sort();
+    return { foh: pend("foh"), bk: pend("bk") };
+  }, [finalizedWeeks, publishedBySection]);
   const unpublishedFinalizedWeeks = useMemo(
-    () => [...finalizedWeeks].filter((w) => !publishedWeekStarts.has(w)).sort(),
-    [finalizedWeeks, publishedWeekStarts]
+    () => [...new Set([...pendingPublish.foh, ...pendingPublish.bk])].sort(),
+    [pendingPublish]
   );
 
   return (
@@ -5514,6 +5537,14 @@ export default function SchedulingHub({ session, onSignOut }) {
         .publish-summary-none { color: #e79289; }
         .publish-group-label { font-family: 'Space Mono', monospace; font-size: 9.5px; letter-spacing: 1px; text-transform: uppercase; color: var(--muted); margin: 10px 0 4px; }
         .publish-sent-tag { color: #7fb392; }
+        .publish-section { border: 1px solid var(--line2); border-radius: 9px; padding: 8px 10px 10px; margin-top: 10px; }
+        .publish-section-off { opacity: 0.55; }
+        .publish-section-head { display: flex; align-items: center; gap: 8px; cursor: pointer; margin-bottom: 6px; }
+        .publish-section-head input { accent-color: var(--accent); }
+        .publish-section-title { font-weight: 700; font-size: 13px; color: var(--txt); }
+        .publish-section-meta { margin-left: auto; font-size: 11px; color: var(--txt2); }
+        .publish-section-reason { font-size: 11.5px; color: var(--txt2); font-style: italic; padding: 2px 0 0 24px; }
+        .published-partial { opacity: 0.85; }
         .publish-test-ok { display: flex; align-items: center; gap: 6px; margin-top: 12px; font-size: 12px; color: #7fb392; }
 
         /* ---- Manage Shifts (item 3) ---- */
@@ -6424,9 +6455,11 @@ export default function SchedulingHub({ session, onSignOut }) {
               )}
               {/* Publishing lives on Set Schedule only — the Calendar is read-only.
                   A published week still shows its badge here for reference. */}
-              {publishedWeekStarts.has(activeWeek[0].iso) && (
+              {publishedBySection.foh[activeWeek[0].iso] && publishedBySection.bk[activeWeek[0].iso] ? (
                 <span className="published-badge"><Check size={12} /> Published</span>
-              )}
+              ) : (publishedBySection.foh[activeWeek[0].iso] || publishedBySection.bk[activeWeek[0].iso]) ? (
+                <span className="published-badge"><Check size={12} /> {publishedBySection.foh[activeWeek[0].iso] ? "Front of House" : "BOH & Kitchen"} published</span>
+              ) : null}
             </div>
             {!isWeekViewable(activeWeek[0].iso) ? (
               /* Item 6: an unfinalized future week is still a draft. Showing it
@@ -6571,10 +6604,16 @@ export default function SchedulingHub({ session, onSignOut }) {
                     emailed until Confirm & Send there. */}
                 {!schedulePastWeek && (
                   weekPublishedAt && weekIsFinalized ? (
-                    <span className="published-badge" title={`Schedule emails sent ${new Date(weekPublishedAt).toLocaleString()}`}>
-                      <Check size={12} /> Published ✓ {new Date(weekPublishedAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+                    <span className="published-badge" title={typeof weekPublishedAt === "string" ? `Both schedule emails sent; last ${new Date(weekPublishedAt).toLocaleString()}` : "Both schedule emails sent"}>
+                      <Check size={12} /> Published ✓{typeof weekPublishedAt === "string" ? ` ${new Date(weekPublishedAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}` : ""}
                     </span>
                   ) : (
+                    <>
+                    {weekPublishPartial && weekIsFinalized && (
+                      <span className="published-badge published-partial" title="One schedule has gone out for this week; the other is still pending">
+                        <Check size={12} /> {weekSentFoh ? "Front of House sent · BOH & Kitchen pending" : "BOH & Kitchen sent · Front of House pending"}
+                      </span>
+                    )}
                     <button
                       className="publish-btn"
                       disabled={!!publishModal || !weekIsFinalized || unpublishedFinalizedWeeks.length === 0}
@@ -6589,6 +6628,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                     >
                       {`Publish (${unpublishedFinalizedWeeks.length})`}
                     </button>
+                    </>
                   )
                 )}
               </div>
@@ -8079,22 +8119,28 @@ export default function SchedulingHub({ session, onSignOut }) {
         </div>
       )}
 
-      {/* Publish dialog (PUBLISH brief A1). Nothing is emailed until Confirm &
-          Send; the test goes to the signed-in manager only and never marks a
-          week published. */}
+      {/* Publish dialog. Nothing is emailed until Confirm & Send; the test goes
+          to the signed-in manager only and never marks a week published. Each
+          schedule email is its own section: leave one out and it isn't sent
+          and its weeks stay pending. */}
       {publishModal && (() => {
         const m = publishModal;
         const busy = !!m.busy;
-        const picked = m.weeks.filter((w) => m.picked.includes(w));
-        const groups = [
-          { key: "foh", label: "Front of House", people: publishRecipients.foh },
-          { key: "bk", label: "BOH & Kitchen", people: publishRecipients.bk },
-          { key: "mgmt", label: "Management", people: publishRecipients.mgmt },
-        ];
-        const chosen = groups.reduce((n, g) => n + g.people.filter((r) => !m.excluded.includes(r.id)).length, 0);
+        const states = PUBLISH_SECTIONS.map((sec) => publishSectionState(m, sec));
+        const going = states.filter((st) => st.going);
         const copyOn = !!(m.copyEmail && m.copyOn);
-        const anyone = chosen > 0 || copyOn;
+        const people = new Set(going.flatMap((st) => st.ids)).size;
+        const weekWord = (n) => `${n} week${n === 1 ? "" : "s"}`;
+        const sameWeeks = going.every((st) => st.weeks.length === going[0]?.weeks.length);
+        const who = [people > 0 ? `${people} ${people === 1 ? "person" : "people"}` : "", copyOn ? "the company inbox" : ""].filter(Boolean).join(" and ");
+        const summary = going.length === 0
+          ? "Nothing selected — nothing will be sent."
+          : sameWeeks
+          ? `Sending ${going.map((st) => st.label).join(" and ")} — ${weekWord(going[0].weeks.length)} to ${who}.`
+          : `Sending ${going.map((st) => `${st.label} (${weekWord(st.weeks.length)})`).join(" and ")} to ${who}.`;
         const close = () => { if (!busy) setPublishModal(null); };
+        const weekStatus = (w) => PUBLISH_SECTIONS.map((sec) =>
+          `${sec.key === "foh" ? "FOH" : "BOH & Kitchen"} ${pendingPublish[sec.key].includes(w) ? "pending" : "sent"}`).join(" · ");
         return (
           <div className="day-popup-backdrop" onClick={close}>
             <div className="send-modal" onClick={(e) => e.stopPropagation()}>
@@ -8103,34 +8149,22 @@ export default function SchedulingHub({ session, onSignOut }) {
                 <button className="day-popup-close" disabled={busy} onClick={close}><X size={15} /></button>
               </div>
 
-              {/* The blast radius in one line, before anything else. Tracks
-                  the week and recipient checkboxes live. */}
-              <div className={`publish-summary ${picked.length === 0 || !anyone ? "publish-summary-none" : ""}`}>
-                {picked.length === 0
-                  ? "No weeks selected — nothing will be sent."
-                  : !anyone
-                  ? "Nobody selected — nothing will be sent."
-                  : `Sending ${picked.length} week${picked.length === 1 ? "" : "s"} to ${
-                      chosen > 0 ? `${chosen} ${chosen === 1 ? "person" : "people"}` : ""
-                    }${chosen > 0 && copyOn ? " and " : ""}${copyOn ? "the company inbox" : ""}.`}
-              </div>
+              {/* The blast radius in one line, before anything else. */}
+              <div className={`publish-summary ${going.length === 0 ? "publish-summary-none" : ""}`}>{summary}</div>
 
               <div className="send-section-label">
-                {m.weeks.length === 1 ? "Week" : "Weeks"} <span className="nr-count">{picked.length}</span>
+                {m.weeks.length === 1 ? "Week" : "Weeks"} <span className="nr-count">{m.picked.length}</span>
               </div>
               <div className="send-recipients">
                 {m.weeks.map((w) => (
                   <label className="send-rcpt" key={w}>
                     <input type="checkbox" disabled={busy} checked={m.picked.includes(w)} onChange={() => togglePublishWeek(w)} />
                     <span className="send-rcpt-name">{weekRangeLabel(buildWeekByOffset(weekOffsetFor(new Date(`${w}T00:00:00`))))}</span>
-                    <span className="send-rcpt-email">Haenyeo-Schedule-{w}.pdf</span>
+                    <span className="send-rcpt-email">{weekStatus(w)}</span>
                   </label>
                 ))}
               </div>
 
-              <div className="send-section-label">
-                Recipients <span className="nr-count">{chosen}</span>
-              </div>
               {/* Company inbox: its own line, ticked by default. The address comes
                   from the server (env SCHEDULE_COPY_EMAIL), not the bundle. */}
               <div className="publish-group-label">Company inbox</div>
@@ -8138,44 +8172,62 @@ export default function SchedulingHub({ session, onSignOut }) {
                 <label className={`send-rcpt ${m.copyEmail ? "" : "send-rcpt-noemail"}`}>
                   <input
                     type="checkbox"
-                    disabled={busy || !m.copyEmail || m.sentSections.includes("foh") || m.sentSections.includes("bk")}
+                    disabled={busy || !m.copyEmail || m.sentSections.length > 0}
                     checked={copyOn}
                     onChange={() => setPublishModal((p) => ({ ...p, copyOn: !p.copyOn }))}
                   />
                   <span className="send-rcpt-name">Company</span>
                   <span className="send-rcpt-email">
                     {m.copyEmail === undefined ? "checking…"
-                      : m.copyEmail ? `${m.copyEmail} — gets the FOH and BOH & Kitchen emails`
+                      : m.copyEmail ? `${m.copyEmail} — gets whichever schedule emails go out`
                       : "not set up — add SCHEDULE_COPY_EMAIL in Vercel to copy the company inbox"}
                   </span>
                 </label>
               </div>
-              {groups.map((g) => (
-                <React.Fragment key={g.key}>
-                  <div className="publish-group-label">
-                    {g.label} — {g.people.filter((r) => !m.excluded.includes(r.id)).length} of {g.people.length}
-                    {m.sentSections.includes(g.key) && <span className="publish-sent-tag"> ✓ sent</span>}
+
+              {states.map((st) => {
+                const disabled = busy || st.sent || !!st.unavailable;
+                return (
+                  <div className={`publish-section ${st.going ? "" : "publish-section-off"}`} key={st.key}>
+                    <label className="publish-section-head">
+                      <input
+                        type="checkbox"
+                        disabled={disabled}
+                        checked={!st.unavailable && (st.sent || !!m.include[st.key])}
+                        onChange={() => togglePublishSection(st.key)}
+                      />
+                      <span className="publish-section-title">{st.label}</span>
+                      <span className="publish-section-meta">
+                        {st.sent ? "✓ sent" : st.unavailable ? "" : `${weekWord(st.weeks.length)} · ${st.ids.length} of ${st.people.length} people`}
+                      </span>
+                    </label>
+                    {st.unavailable ? (
+                      <div className="publish-section-reason">{st.unavailable}</div>
+                    ) : !m.include[st.key] && !st.sent ? (
+                      <div className="publish-section-reason">Left out — not sent now; its weeks stay pending.</div>
+                    ) : st.people.length === 0 ? (
+                      <div className="notes-empty">Nobody registered for {st.label} yet.</div>
+                    ) : (
+                      <div className="send-recipients">
+                        {st.people.map((r) => (
+                          <label className="send-rcpt" key={`${st.key}-${r.id}`}>
+                            <input
+                              type="checkbox"
+                              disabled={disabled}
+                              checked={!m.excluded.includes(`${st.key}:${r.id}`)}
+                              onChange={() => togglePublishRecipient(st.key, r.id)}
+                            />
+                            <span className="send-rcpt-name">{r.name}</span>
+                            <span className="send-rcpt-email">
+                              {String(r.section || "").toLowerCase() === "management" ? `Manager · ${r.personal_email}` : r.personal_email}
+                            </span>
+                          </label>
+                        ))}
+                      </div>
+                    )}
                   </div>
-                  {g.people.length === 0 ? (
-                    <div className="notes-empty">Nobody registered in {g.label} yet.</div>
-                  ) : (
-                    <div className="send-recipients">
-                      {g.people.map((r) => (
-                        <label className="send-rcpt" key={r.id}>
-                          <input
-                            type="checkbox"
-                            disabled={busy || m.sentSections.includes(g.key)}
-                            checked={!m.excluded.includes(r.id)}
-                            onChange={() => togglePublishRecipient(r.id)}
-                          />
-                          <span className="send-rcpt-name">{r.name}</span>
-                          <span className="send-rcpt-email">{r.personal_email}</span>
-                        </label>
-                      ))}
-                    </div>
-                  )}
-                </React.Fragment>
-              ))}
+                );
+              })}
 
               <label className="manual-field-label" htmlFor="publish-subject">Subject line</label>
               <input
@@ -8214,19 +8266,19 @@ export default function SchedulingHub({ session, onSignOut }) {
               <div className="send-actions">
                 <button
                   className="nr-btn"
-                  disabled={busy || picked.length === 0}
+                  disabled={busy || going.length === 0}
                   onClick={() => sendPublish(true)}
-                  title={`Send these emails to ${session?.user?.email || "you"} only, subject tagged [TEST]. Nothing is marked published.`}
+                  title={`Send the included emails to ${session?.user?.email || "you"} only, subject tagged [TEST]. Nothing is marked published.`}
                 >{m.busy === "test" ? "Sending test…" : "Send test to me only"}</button>
                 <span style={{ flex: 1 }} />
                 <button className="nr-btn" disabled={busy} onClick={close}>Cancel</button>
                 <button
                   className="publish-btn"
-                  disabled={busy || picked.length === 0 || !anyone}
+                  disabled={busy || going.length === 0}
                   onClick={() => sendPublish(false)}
-                  title={!anyone ? "Nobody is ticked" : `Email ${chosen} staff${copyOn ? " + the company inbox" : ""}`}
+                  title={going.length === 0 ? "Nothing selected" : summary}
                 >
-                  {m.busy === "send" ? "Sending…" : `Confirm & Send (${chosen + (copyOn ? 1 : 0)})`}
+                  {m.busy === "send" ? "Sending…" : "Confirm & Send"}
                 </button>
               </div>
             </div>
