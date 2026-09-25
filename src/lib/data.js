@@ -899,11 +899,15 @@ export async function fetchTipSheet(dateIso) {
 
 // payload keys mirror the tip_sheets columns.
 export async function upsertTipSheet(payload) {
-  const { data, error } = await supabase
-    .from("tip_sheets")
-    .upsert(payload, { onConflict: "date" })
-    .select()
-    .maybeSingle();
+  const write = (p) => supabase.from("tip_sheets").upsert(p, { onConflict: "date" }).select().maybeSingle();
+  let { data, error } = await write(payload);
+  // Until migration 0017 runs, bar_tip_out doesn't exist. With the tip-out on
+  // (the column's default) nothing is lost by dropping it; with it off the
+  // save must fail visibly rather than silently record a tip-out.
+  if (error && /bar_tip_out/.test(error.message || "") && payload.bar_tip_out !== false) {
+    const { bar_tip_out, ...rest } = payload;
+    ({ data, error } = await write(rest));
+  }
   if (error) throw error;
   return data;
 }
