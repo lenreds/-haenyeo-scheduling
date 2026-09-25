@@ -1347,6 +1347,8 @@ export default function SchedulingHub({ session, onSignOut }) {
   const [genNoteBusy, setGenNoteBusy] = useState(false);
 
   const tipDateInfo = dateInfoFromIso(tipDateIso);
+  // "THURSDAY · SEPTEMBER 25, 2026" for the printed / PDF sheet (uppercased in CSS).
+  const tipSheetDateLabel = `${tipDateInfo.dateObj.toLocaleDateString("en-US", { weekday: "long" })} · ${tipDateInfo.dateObj.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}`;
   const coversNum = parseFloat(covers) || 0;
 
   // FOH roster: DB staff (active, FOH section) with their primary role; falls
@@ -4265,7 +4267,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         .tip-page-split { display: flex; gap: 22px; align-items: stretch; }
         .tip-left-col { width: 300px; flex-shrink: 0; display: flex; flex-direction: column; }
         .tip-right-col { flex: 1; min-width: 0; }
-        @media (max-width: 860px) { .tip-page-split { flex-direction: column; } .tip-left-col { width: 100%; } }
+        @media screen and (max-width: 860px) { .tip-page-split { flex-direction: column; } .tip-left-col { width: 100%; } } /* screen only: Chrome prints at a width that matches 860px, which stacked the sheet onto 3 pages */
 
         .tip-logo-space { min-height: 170px; display: flex; align-items: center; justify-content: center; }
         .tip-logo-img { max-width: 300px; max-height: 165px; object-fit: contain; }
@@ -4316,6 +4318,17 @@ export default function SchedulingHub({ session, onSignOut }) {
         .check-sub { font-size: 10.5px; color: #4a473d; }
         .custom-toggle { font-family: 'Space Mono', monospace; font-size: 10.5px; letter-spacing: 1px; text-transform: uppercase; padding: 7px 12px; border-radius: 4px; border: 1px solid rgba(43,42,37,0.2); background: #FBF8EF; color: #6b6355; cursor: pointer; white-space: nowrap; }
         .tip-staff-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+        /* .print-only is the counterpart of .screen-only: hidden on screen, shown
+           on paper (@media print below) and in the PDF capture (.tip-pdf-mode). */
+        .print-only { display: none !important; }
+        .tip-sheet-date { font-family: 'Space Mono', monospace; font-size: 10px; letter-spacing: 1px; text-transform: uppercase; color: #8c8574; text-align: left; margin: -4px 0 10px; }
+        /* Manager sign-off: same writing rule as the cash box (1px #d0d0d0, no
+           verticals), filling the gap right of the floor check. */
+        .tip-signoff { flex: 1 1 auto; align-self: flex-end; align-items: flex-end; gap: 22px; margin-left: 18px; }
+        .tip-sign-main { flex: 1 1 auto; }
+        .tip-sign-date { flex: 0 0 130px; }
+        .tip-sign-rule { height: 28px; border-bottom: 1px solid #d0d0d0; }
+        .tip-sign-label { font-family: 'Space Mono', monospace; font-size: 9px; letter-spacing: 1px; text-transform: uppercase; color: #8c8574; margin-top: 4px; }
         .add-staff-btn { font-family: 'Space Mono', monospace; font-size: 10.5px; letter-spacing: 1px; text-transform: uppercase; padding: 7px 12px; border-radius: 4px; border: 1px solid rgba(43,42,37,0.2); background: #FBF8EF; color: #6b6355; cursor: pointer; white-space: nowrap; }
         .add-staff-btn:disabled { opacity: 0.45; cursor: not-allowed; }
         .tip-name-display { display: inline-flex; align-items: center; gap: 6px; }
@@ -4367,6 +4380,9 @@ export default function SchedulingHub({ session, onSignOut }) {
           .cal-card { box-shadow: none !important; }
           /* Tip Sheet print: hide helper text, buttons, navigation, finalized banner; outline-only boxes; fit one page */
           .footer-note, .recon-note, .fm-banner, .week-header, .screen-only { display: none !important; }
+          .print-only { display: block !important; }
+          .tip-signoff.print-only { display: flex !important; }
+          .tip-staff-actions { display: none !important; } /* its buttons are all hidden on paper */
           /* A locked sheet dims + greys its inputs on screen; on paper it must
              read like any other sheet. */
           /* Extra class: the dark skin's own .tip-locked input rule is also
@@ -4406,6 +4422,13 @@ export default function SchedulingHub({ session, onSignOut }) {
           /* Logo breathing room for landscape */
           .tip-logo-space { min-height: 95px !important; margin-bottom: 14px !important; }
           .tip-logo-img { max-height: 91px !important; }
+          /* One landscape page. Chrome lays print out 988px wide (Letter, 0.35in
+             margins) — too narrow for the cash column + staff table, and the
+             sheet runs ~900px tall against ~749px of page. Zoom lays it out at
+             roughly its on-screen width and scales it onto the page, the same
+             thing the PDF does by scaling its capture. */
+          .tip-wrap { max-width: none !important; padding: 0 !important; }
+          .tip-card { zoom: var(--tip-print-zoom, 0.8); }
           /* Set Schedule print: swap the live interactive grid for the branded
              sheet node (same renderer as the PDF). Only the portal shows. */
           body.printing-schedule .hub > *:not(.schedule-print-portal) { display: none !important; }
@@ -4436,6 +4459,9 @@ export default function SchedulingHub({ session, onSignOut }) {
         .tip-pdf-mode .recon-row label, .tip-pdf-mode .denom-label,
         .tip-pdf-mode .check-sub { color: #4a473d !important; }
         .tip-pdf-mode .tip-out-na { color: #B23A2F !important; }
+        .tip-pdf-mode .print-only { display: block !important; }
+        .tip-pdf-mode .tip-signoff.print-only { display: flex !important; }
+        .tip-pdf-mode .tip-staff-actions { display: none !important; }
         .tip-pdf-mode input { background: #fff !important; color: #2B2A25 !important; border-color: rgba(43,42,37,0.2) !important; }
         .tip-pdf-mode .recon-row.final span { color: #8a5a20 !important; }
         /* Cash box writing rules (brief item 2): each denomination row gets a
@@ -6608,8 +6634,8 @@ export default function SchedulingHub({ session, onSignOut }) {
       )}
 
       {tab === "tips" && (
-        <div className="cal-wrap" key="tips">
-          <div className="cal-card" ref={tipCardRef}>
+        <div className="cal-wrap tip-wrap" key="tips">
+          <div className="cal-card tip-card" ref={tipCardRef}>
             {tipFinalized && (
               <div className="tip-finalized-banner screen-only">
                 <Lock size={14} /> FINALIZED{tipFinalizedAt ? ` — ${new Date(tipFinalizedAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}` : ""}
@@ -6630,6 +6656,9 @@ export default function SchedulingHub({ session, onSignOut }) {
                 <div className="tip-logo-space">
                   <img src={HAENYEO_LOGO} alt="Haenyeo" className="tip-logo-img" />
                 </div>
+                {/* The date the sheet is FOR (tipDateIso), never today or the
+                    print date. Paper and PDF only — the screen has the picker. */}
+                <div className="tip-sheet-date print-only">{tipSheetDateLabel}</div>
                 <div className="cash-recon">
                   <div className="recon-title">Cash</div>
 
@@ -6875,6 +6904,12 @@ export default function SchedulingHub({ session, onSignOut }) {
                     <div className="check-label">Floor Check (paid out of floor pool)</div>
                     <div className="check-value">${money(floorCheckTotal)}</div>
                     <div className="check-sub">{floorCheckMatches ? "✓ Matches floor cash + CC" : `Off by $${money(Math.abs(floorCheckTotal - floorPool))} vs floor cash + CC`}</div>
+                  </div>
+                  {/* Sign-off rules, paper and PDF only. Fills the gap between
+                      the floor check and the table's right edge. */}
+                  <div className="tip-signoff print-only">
+                    <div className="tip-sign-field tip-sign-main"><div className="tip-sign-rule" /><div className="tip-sign-label">Manager Signature</div></div>
+                    <div className="tip-sign-field tip-sign-date"><div className="tip-sign-rule" /><div className="tip-sign-label">Date</div></div>
                   </div>
                   <div className="tip-staff-actions">
                     {/* Day-of add: writes a dated override like the × above, so
