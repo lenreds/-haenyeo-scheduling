@@ -1059,7 +1059,11 @@ function onTipSheet(w) {
 
 function autoAssignSlots(working) {
   const byRole = {};
-  orderWorking(working).forEach((p) => {
+  // Roster order in, NOT orderWorking: slot assignment decides pay, and a tie
+  // must fall the way past tip-outs did (roster order, via the stable sort
+  // below) — never by a display sort. Glance may order its list however it
+  // likes; its "(swing)" marker reads these slots, so the two still agree.
+  working.forEach((p) => {
     const code = normalizeShiftCode(p.code, p.role);
     const role = roleFromCode(code);
     if (!role) return;
@@ -1068,9 +1072,9 @@ function autoAssignSlots(working) {
     const slotRole = role === "Expo" ? "Expo (Fri–Sun)" : role;
     (byRole[slotRole] = byRole[slotRole] || []).push({ name: p.name, code, start: shiftStartHour(code) });
   });
-  // Already in orderWorking order — earliest start first (ties by name):
-  // Servers slot 1, then 2, then Swing (3rd cut); Busser/Runner 1 then 2;
-  // Bartender before Bartender (Swing).
+  // Earliest start first: Servers slot 1, then 2, then Swing (3rd cut);
+  // Busser/Runner 1 then 2; Bartender before Bartender (Swing).
+  Object.keys(byRole).forEach((r) => byRole[r].sort((a, b) => a.start - b.start));
 
   const used = {};
   return SLOTS.map((slot) => {
