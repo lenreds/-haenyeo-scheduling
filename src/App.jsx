@@ -44,6 +44,7 @@ import {
   calendarNotesAvailable,
   insertRoleShiftOption,
   deleteRoleShiftOption,
+  setShiftOptionOff,
   fetchGeneralNotes,
   insertGeneralNote,
   updateGeneralNote,
@@ -738,6 +739,13 @@ function shiftCodeFor(role, label, existingCodes = []) {
   return code;
 }
 
+// Manage Shifts HINT only: does a label read like an off state ("RO", "Req
+// Off", "PTO")? Used to suggest ticking "Counts as off" — never to decide who
+// is working. That is the option's is_off flag alone (see isOffCell).
+function looksLikeOffLabel(label) {
+  return /(^|[^a-z])(rs*[./]?s*o|off|req(uest)?.?s*off|pto|vacation|leave)([^a-z]|$)/i.test(String(label || ""));
+}
+
 // which roles the Staff screen offers per section
 const SECTION_ROLES = {
   FOH: ["Bar", "Host", "Servers", "Busser/Runner", "Expo", "Training"],
@@ -1120,11 +1128,13 @@ function formatWeekRange(week) {
   return `${fmt(week[0].date)}-${fmt(week[6].date)}/${yy}`;
 }
 
-function daySummary(dateObj, patterns, overrides, roster) {
+// isOff: the component's isOffCell, so a "Counts as off" option (e.g. RO)
+// isn't counted as scheduled. Defaults to plain OFF.
+function daySummary(dateObj, patterns, overrides, roster, isOff = (t) => !t || t === "OFF") {
   let scheduled = 0, off = 0, gap = false;
   roster.forEach((p) => {
     const shift = personShiftFor(p.name, dateObj, patterns, overrides);
-    if (shift.type === "OFF") off++;
+    if (isOff(shift.type)) off++;
     else if (shift.type === "GAP") gap = true;
     else scheduled++;
   });
@@ -1664,11 +1674,25 @@ export default function SchedulingHub({ session, onSignOut }) {
   //      partially approved, and its row keeps the full requested range, so only
   //      the overrides it wrote are trustworthy;
   //   3. otherwise the week's own saved schedule, else the template.
-  // OFF / RO never count as working, and neither does GAP. Gaps come back on
-  // their own so the glance can still flag the hole.
+  // A cell is off per isOffCell — never by reading a label. GAP isn't working
+  // either; gaps come back on their own so the glance can still flag the hole.
   //
-  // Management rows count only on a day their cell holds an FOH shift (Expo) —
-  // that's how a manager scheduled as Expo reaches the Expo tip slot.
+  // This answers "who is working", so it includes managers on FM and anyone
+  // untipped. Who gets a Tip Sheet slot is a separate, narrower question —
+  // onTipSheet() below — applied by the Tip Sheet only.
+  //
+  // Off is decided by the OPTION, not its wording: a shift option can carry
+  // "Counts as off" (role_shift_options.is_off, migration 0019) — e.g. an "RO"
+  // option kept on the grid on purpose. Its code (SV_RO etc.) looks like a real
+  // shift, which is how RO staff leaked onto Glance and the Tip Sheet. Empty,
+  // OFF and the legacy bare "RO" code are off regardless of the flag, so plain
+  // Off never depends on the migration.
+  const offCodes = useMemo(() => {
+    const s = new Set();
+    Object.values(roleOptions || {}).forEach((list) => (list || []).forEach((o) => { if (o?.isOff) s.add(o.code); }));
+    return s;
+  }, [roleOptions]);
+  const isOffCell = (code) => !code || code === "OFF" || code === "RO" || offCodes.has(code);
   const railOffByDate = useMemo(() => {
     const m = {};
     resolvedReqs.forEach((it) => {
@@ -1693,16 +1717,15 @@ export default function SchedulingHub({ session, onSignOut }) {
       const ov = overrides[`${name}|${dateIso}`];
       let type = ov?.type || baseType;
       if (!ov?.type && railOff?.has(name)) type = "OFF";
-      if (!type || type === "OFF" || type === "RO") off.push(name);
+      if (isOffCell(type)) off.push(name);
       else if (type === "GAP") gaps.push({ name, role, code: "GAP" });
       else working.push({ name, role, code: type, swapped: !!ov?.swap });
     }
     fohRoster.forEach((p) => place(p.name, p.role, (pats[p.name] || ALL_OFF_WEEK)[di.weekday]));
+    // Every manager with a working cell — FM included (they're in the
+    // building). Only an FOH code (Expo) puts them on the Tip Sheet.
     (groupRosters.management || []).forEach((name, idx) => {
       const code = ph.management?.[idx]?.[di.weekday] || "OFF";
-      const ov = overrides[`${name}|${dateIso}`];
-      // FM (and any other management-only day) isn't a floor shift.
-      if (!roleFromCode(ov?.type || code)) return;
       place(name, "Management", code);
     });
     // Anyone else whose dated override carries an FOH shift — e.g. a BOH or
@@ -1727,7 +1750,7 @@ export default function SchedulingHub({ session, onSignOut }) {
   const glanceRoster = useMemo(() => {
     const { working, gaps } = staffWorkingOn(glanceIso);
     return [...working, ...gaps];
-  }, [fohRoster, patterns, weeklyPatterns, placeholderPatterns, weeklyPlaceholders, groupRosters, overrides, railOffByDate, staffList, glanceIso]);
+  }, [fohRoster, patterns, weeklyPatterns, placeholderPatterns, weeklyPlaceholders, groupRosters, overrides, railOffByDate, staffList, offCodes, glanceIso]);
   const glanceIsToday = glanceIso === TODAY_ISO;
   // "THURSDAY, SEP 24" for any other day; today stays the familiar label.
   const glanceHeading = glanceIsToday
@@ -1896,11 +1919,29 @@ export default function SchedulingHub({ session, onSignOut }) {
     setShiftMsg("");
     try {
       await insertRoleShiftOption({ role, code, label, sortOrder });
-      setShiftMsg(`Added "${label}" to ${role}.`);
+      setShiftMsg(looksLikeOffLabel(label)
+        ? `Added "${label}" to ${role}. If it means off, tick "Counts as off" on it.`
+        : `Added "${label}" to ${role}.`);
     } catch (e) {
       console.error("Add shift option failed:", e);
       setRoleOptions((prev) => ({ ...prev, [role]: (prev[role] || []).filter((o) => o.code !== code) }));
       setShiftMsg(`Couldn't add "${label}": ${e.message || e}`);
+    }
+  }
+  // "Counts as off" checkbox. Optimistic; rolls back if the write fails.
+  async function toggleShiftOptionOff(role, code, label, isOff) {
+    const flip = (v) => setRoleOptions((prev) => ({
+      ...prev,
+      [role]: (prev[role] || []).map((o) => (o.code === code ? { ...o, isOff: v } : o)),
+    }));
+    flip(isOff);
+    setShiftMsg("");
+    try {
+      await setShiftOptionOff(role, code, isOff);
+    } catch (e) {
+      console.error("Counts-as-off update failed:", e);
+      flip(!isOff);
+      setShiftMsg(`Couldn't update "${label}": ${e.message || e}`);
     }
   }
   async function handleRemoveShiftOption(role, code, label) {
@@ -1956,10 +1997,15 @@ export default function SchedulingHub({ session, onSignOut }) {
     catch (e) { console.error("Delete note failed:", e); reloadNotes(ws); }
   }
 
-  const tipWorking = useMemo(
-    () => staffWorkingOn(tipDateIso),
-    [tipDateIso, fohRoster, patterns, weeklyPatterns, placeholderPatterns, weeklyPlaceholders, groupRosters, overrides, railOffByDate, staffList]
-  );
+  // The Tip Sheet's own step on top of staffWorkingOn: a manager is only a
+  // Tip Sheet candidate on a floor shift (Expo), not on FM. Everyone on the FOH
+  // roster who's working stays, exactly as before — slot filling
+  // (autoAssignSlots) then decides who is tipped. Glance never applies this.
+  const onTipSheet = (w) => w.role !== "Management" || !!roleFromCode(normalizeShiftCode(w.code, w.role));
+  const tipWorking = useMemo(() => {
+    const all = staffWorkingOn(tipDateIso);
+    return { ...all, working: all.working.filter(onTipSheet) };
+  }, [tipDateIso, fohRoster, patterns, weeklyPatterns, placeholderPatterns, weeklyPlaceholders, groupRosters, overrides, railOffByDate, staffList, offCodes]);
   const autoSlots = useMemo(() => autoAssignSlots(tipWorking.working), [tipWorking]);
 
   function toggleCustomMode() {
@@ -3306,7 +3352,7 @@ export default function SchedulingHub({ session, onSignOut }) {
     for (const [grp, label] of checks) {
       const idx = (groupRosters[grp] || []).indexOf(name);
       if (idx < 0) continue;
-      if ((activePlaceholders[grp]?.[idx]?.[weekday] || "OFF") !== "OFF") return label;
+      if (!isOffCell(activePlaceholders[grp]?.[idx]?.[weekday])) return label;
     }
     return null;
   }
@@ -3934,7 +3980,7 @@ export default function SchedulingHub({ session, onSignOut }) {
     const ph = placeholdersForWeekStart(week?.[0]?.iso);
     return week.map((d) =>
       (groupRosters.management || []).filter(
-        (_, idx) => (ph.management?.[idx]?.[d.weekday] || "OFF") !== "OFF"
+        (_, idx) => !isOffCell(ph.management?.[idx]?.[d.weekday])
       )
     );
   }
@@ -5233,6 +5279,11 @@ export default function SchedulingHub({ session, onSignOut }) {
         .shift-mgmt-role { font-family: 'Space Mono', monospace; font-size: 10.5px; letter-spacing: 1.5px; text-transform: uppercase; font-weight: 700; width: 120px; flex-shrink: 0; padding-top: 4px; }
         .shift-mgmt-opts { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex: 1; min-width: 0; }
         .shift-mgmt-chip { display: inline-flex; align-items: center; gap: 3px; background: #1a1a1a; border: 1px solid var(--line2); border-radius: 20px; padding: 3px 5px 3px 11px; font-family: 'Space Mono', monospace; font-size: 10.5px; color: var(--txt2); }
+        .shift-mgmt-chip.is-off { border-style: dashed; }
+        .shift-off-check { display: inline-flex; align-items: center; gap: 3px; margin-left: 6px; padding-left: 7px; border-left: 1px solid var(--line2); font-size: 9px; letter-spacing: 0.3px; color: var(--muted); cursor: pointer; white-space: nowrap; }
+        .shift-mgmt-chip.is-off .shift-off-check { color: var(--accent); }
+        .shift-off-check input { accent-color: var(--accent); margin: 0; width: 11px; height: 11px; cursor: pointer; }
+        .shift-off-hint { font-size: 9px; color: #e0b36c; margin-left: 4px; white-space: nowrap; }
         .shift-mgmt-x { background: none; border: none; cursor: pointer; color: var(--muted); padding: 0 2px; display: inline-flex; align-items: center; }
         .shift-mgmt-x:hover { color: #e0796c; }
         .shift-mgmt-add { background: rgba(90,138,106,0.16); border: 1px solid rgba(90,138,106,0.5); color: #7fb392; border-radius: 20px; padding: 4px 12px; font-family: 'Manrope', sans-serif; font-weight: 700; font-size: 11px; cursor: pointer; }
@@ -5901,7 +5952,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                 <>
                   {WEEKDAY_LABELS.map((w) => <div className="cal-weekday" key={w}>{w}</div>)}
                   {weeks.flat().map((d, i) => {
-                const s = daySummary(d, patternsForDate(d), overrides, fohRoster);
+                const s = daySummary(d, patternsForDate(d), overrides, fohRoster, isOffCell);
                 const holiday = holidayFor(d.iso);
                 const offNames = timeOffNamesForDate(d.iso);
                 const hasOtherRail = railItemsForDate(d.iso).some((it) => it.type !== "REQUEST OFF");
@@ -5939,7 +5990,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                         <div className={`cal-month-label ${isCurrentMonth ? "current" : ""}`}>{monthLabel}</div>
                         {WEEKDAY_LABELS.map((w) => <div className="cal-weekday" key={`${monthIdx}-${w}`}>{w}</div>)}
                         {monthWeeks.flat().map((d, i) => {
-                          const s = daySummary(d, patternsForDate(d), overrides, fohRoster);
+                          const s = daySummary(d, patternsForDate(d), overrides, fohRoster, isOffCell);
                           const holiday = holidayFor(d.iso);
                           const offNames = timeOffNamesForDate(d.iso);
                           const hasOtherRail = railItemsForDate(d.iso).some((it) => it.type !== "REQUEST OFF");
@@ -6346,7 +6397,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                   {WEEKDAY_LABELS.map((w, wi) => {
                     const weekday = WEEKDAY_ORDER[wi];
                     const names = (groupRosters.management || []).filter(
-                      (_, idx) => (activePlaceholders.management?.[idx]?.[weekday] || "OFF") !== "OFF"
+                      (_, idx) => !isOffCell(activePlaceholders.management?.[idx]?.[weekday])
                     );
                     return (
                       <div className={`fm-chip ${names.length === 0 ? "fm-chip-empty" : ""}`} key={w}>
@@ -7256,8 +7307,19 @@ export default function SchedulingHub({ session, onSignOut }) {
                     <div className="shift-mgmt-role" style={{ color: ROLE_COLOR[role] || undefined }}>{role}</div>
                     <div className="shift-mgmt-opts">
                       {list.filter((o) => o.code !== "OFF").map((o) => (
-                        <span className="shift-mgmt-chip" key={o.code} title={o.code}>
+                        <span className={`shift-mgmt-chip ${o.isOff ? "is-off" : ""}`} key={o.code} title={o.code}>
                           {o.label}
+                          <label className="shift-off-check" title="Counts as off — excluded from Tip Sheet and Today at a Glance">
+                            <input
+                              type="checkbox"
+                              checked={!!o.isOff}
+                              onChange={(e) => toggleShiftOptionOff(role, o.code, o.label, e.target.checked)}
+                            />
+                            Counts as off
+                          </label>
+                          {!o.isOff && looksLikeOffLabel(o.label) && (
+                            <span className="shift-off-hint" title="This name reads like an off state. Tick Counts as off if staff on it are not working.">off? tick it</span>
+                          )}
                           <button
                             className="shift-mgmt-x"
                             title={`Remove ${o.label} from ${role}`}
@@ -7278,7 +7340,11 @@ export default function SchedulingHub({ session, onSignOut }) {
                           }}
                           onBlur={() => { setShiftAddRole(null); setShiftAddLabel(""); }}
                         />
-                      ) : (
+                      ) : null}
+                      {shiftAddRole === role && looksLikeOffLabel(shiftAddLabel) ? (
+                        <span className="shift-off-hint">Looks like an off state — tick "Counts as off" on it once it's added.</span>
+                      ) : null}
+                      {shiftAddRole === role ? null : (
                         <button
                           className="shift-mgmt-add"
                           onClick={() => { setShiftAddRole(role); setShiftAddLabel(""); setShiftMsg(""); }}
@@ -7288,6 +7354,9 @@ export default function SchedulingHub({ session, onSignOut }) {
                   </div>
                 );
               })}
+            </div>
+            <div className="template-note" style={{ marginTop: 8 }}>
+              Counts as off — excluded from Tip Sheet and Today at a Glance. The option still shows on the schedule grid.
             </div>
           </div>
 
@@ -7459,7 +7528,7 @@ export default function SchedulingHub({ session, onSignOut }) {
           shows up in each immediately. */}
       {swapModal && (() => {
         const replRole = swapForm.withName ? primaryRoleOf(swapForm.withName) : null;
-        const shiftOpts = (replRole ? roleOptions[replRole] || [] : []).filter((o) => o.code !== "OFF");
+        const shiftOpts = (replRole ? roleOptions[replRole] || [] : []).filter((o) => !isOffCell(o.code)); // no "Counts as off" option as a replacement
         // The date the glance box was showing when the swap was opened, not
         // necessarily today (brief item 7).
         const dateLabel = new Date(`${swapModal.dateIso || TODAY_ISO}T00:00:00`)
@@ -7570,7 +7639,7 @@ export default function SchedulingHub({ session, onSignOut }) {
           .filter((s) => s.active !== false && s.name && !tipWorkingNames.has(s.name))
           .sort((a, b) => a.name.localeCompare(b.name));
         const role = dayOfForm.role;
-        const shiftOpts = role ? (roleOptions[role] || []).filter((o) => o.code !== "OFF") : [];
+        const shiftOpts = role ? (roleOptions[role] || []).filter((o) => !isOffCell(o.code)) : []; // adding someone as "off" would be a no-op
         const full = isAdd && role ? dayOfSlotsFull(role) : false;
         const roleLabel = role === "Servers" ? "Server" : role;
         const shiftLabel = dayOfForm.shift ? roleShiftText(role, dayOfForm.shift) : "";

@@ -198,20 +198,43 @@ export async function replaceStaffRoles(staffId, roles) {
 }
 
 /* -------------------------------------------------- role_shift_options ----- */
-// -> { [role]: [{ code, label }] } in sort order — null pre-migration.
+// -> { [role]: [{ code, label, isOff }] } in sort order — null pre-migration.
+// isOff (migration 0019) marks an option that means "off" (e.g. an RO option):
+// staff on it are not working. Pre-0019 the select degrades and isOff is false.
 
 export async function fetchRoleShiftOptions() {
-  const { data, error } = await supabase
+  let { data, error } = await supabase
     .from("role_shift_options")
-    .select("role, code, label, sort_order")
+    .select("role, code, label, sort_order, is_off")
     .order("sort_order", { ascending: true });
+  if (error) {
+    ({ data, error } = await supabase
+      .from("role_shift_options")
+      .select("role, code, label, sort_order")
+      .order("sort_order", { ascending: true }));
+  }
   if (error) return null;
   if (!data || data.length === 0) return null;
   const byRole = {};
   data.forEach((row) => {
-    (byRole[row.role] = byRole[row.role] || []).push({ code: row.code, label: row.label });
+    (byRole[row.role] = byRole[row.role] || []).push({ code: row.code, label: row.label, isOff: row.is_off === true });
   });
   return byRole;
+}
+
+// Tick / untick "Counts as off" on one option (migration 0019).
+export async function setShiftOptionOff(role, code, isOff) {
+  const { error } = await supabase
+    .from("role_shift_options")
+    .update({ is_off: !!isOff })
+    .eq("role", role)
+    .eq("code", code);
+  if (error) {
+    if (/is_off/.test(error.message || "")) {
+      throw new Error("\"Counts as off\" needs migration 0019 — run it in the Supabase SQL editor.");
+    }
+    throw error;
+  }
 }
 
 // Add one option to a role's dropdown. sort_order defaults to the end of the
