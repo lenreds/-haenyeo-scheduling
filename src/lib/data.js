@@ -18,11 +18,18 @@ function canonSection(section) {
 
 export async function fetchStaff() {
   // Columns arrived across migrations (section=0002; personal_email/phone/
-  // registered=0005) — degrade the select gracefully if any are missing.
+  // registered=0005; scheduling_note=0018) — degrade the select gracefully if
+  // any are missing.
   let { data, error } = await supabase
     .from("staff")
-    .select("id, name, role, active, section, personal_email, phone, registered")
+    .select("id, name, role, active, section, personal_email, phone, registered, scheduling_note")
     .order("created_at", { ascending: true });
+  if (error) {
+    ({ data, error } = await supabase
+      .from("staff")
+      .select("id, name, role, active, section, personal_email, phone, registered")
+      .order("created_at", { ascending: true }));
+  }
   if (error) {
     ({ data, error } = await supabase
       .from("staff")
@@ -42,7 +49,22 @@ export async function fetchStaff() {
     registered: !!s.registered,
     personal_email: s.personal_email ?? null,
     phone: s.phone ?? null,
+    scheduling_note: s.scheduling_note ?? null,
   }));
+}
+
+// One writer for the scheduling note, used by both the Staff tab and the flag
+// editor on Set Schedule. Blank clears it (null = no flag).
+export async function updateSchedulingNote(id, note) {
+  const value = String(note || "").trim().slice(0, 60) || null;
+  const { error } = await supabase.from("staff").update({ scheduling_note: value }).eq("id", id);
+  if (error) {
+    if (/scheduling_note/.test(error.message || "")) {
+      throw new Error("Scheduling notes need migration 0018 — run it in the Supabase SQL editor.");
+    }
+    throw error;
+  }
+  return value;
 }
 
 /* -------------------------------------------------- staff_info_updates ----- */
@@ -595,6 +617,59 @@ export async function deleteGeneralNote(id) {
   if (generalNotesPresent === false) return;
   const { error } = await supabase.from("general_notes").delete().eq("id", id);
   if (error && !isMissingTable(error)) throw error;
+}
+
+/* ---------------------------------------------------- schedule_pad_notes -- */
+// Standing general notes in the Set Schedule side pad (migration 0018). Its
+// own table, deliberately not general_notes, so the pad and the Rail's Notes
+// box can never show each other's notes. Global: no week, no date.
+
+let padNotesPresent = null;
+export function padNotesAvailable() {
+  return padNotesPresent !== false;
+}
+const PAD_MISSING = "The notes pad needs migration 0018 — run it in the Supabase SQL editor.";
+
+export async function fetchPadNotes() {
+  const { data, error } = await supabase
+    .from("schedule_pad_notes")
+    .select("id, note, sort_order, created_at, updated_at")
+    .order("sort_order", { ascending: true })
+    .order("created_at", { ascending: true });
+  if (error) {
+    if (isMissingTable(error)) { padNotesPresent = false; return []; }
+    throw error;
+  }
+  padNotesPresent = true;
+  return data || [];
+}
+
+// Unlike the other note tables these throw pre-migration: the pad adds
+// optimistically, so a silent no-op would show a note that was never stored.
+export async function insertPadNote(note) {
+  const { data, error } = await supabase
+    .from("schedule_pad_notes")
+    .insert({ note })
+    .select()
+    .single();
+  if (error) {
+    if (isMissingTable(error)) { padNotesPresent = false; throw new Error(PAD_MISSING); }
+    throw error;
+  }
+  return data;
+}
+
+export async function updatePadNote(id, note) {
+  const { error } = await supabase
+    .from("schedule_pad_notes")
+    .update({ note, updated_at: new Date().toISOString() })
+    .eq("id", id);
+  if (error) throw isMissingTable(error) ? new Error(PAD_MISSING) : error;
+}
+
+export async function deletePadNote(id) {
+  const { error } = await supabase.from("schedule_pad_notes").delete().eq("id", id);
+  if (error) throw isMissingTable(error) ? new Error(PAD_MISSING) : error;
 }
 
 /* -------------------------------------------------------- rail_view_state -- */

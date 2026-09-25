@@ -49,6 +49,12 @@ import {
   updateGeneralNote,
   deleteGeneralNote,
   generalNotesAvailable,
+  fetchPadNotes,
+  insertPadNote,
+  updatePadNote,
+  deletePadNote,
+  padNotesAvailable,
+  updateSchedulingNote,
   fetchRailViewState,
   setRailCleared as persistRailCleared,
   RAIL_LISTS,
@@ -821,6 +827,10 @@ function normalizePatterns(patterns, roleByName) {
 }
 const DEFAULT_PRIMARY_ROLE = {};
 PERSON_ROSTER.forEach((p) => { DEFAULT_PRIMARY_ROLE[p.name] = p.role; });
+// Set Schedule notes (migration 0018): the per-staff note is one short line,
+// and the side pad remembers being collapsed per browser.
+const SCHED_NOTE_MAX = 60;
+const PAD_COLLAPSED_KEY = "haenyeo.schedPadCollapsed";
 const ALL_OFF_WEEK = ["OFF", "OFF", "OFF", "OFF", "OFF", "OFF", "OFF"];
 
 /* -------------------------------- TIP OUT DATA -------------------------------- */
@@ -1456,6 +1466,154 @@ export default function SchedulingHub({ session, onSignOut }) {
     } catch (e) {
       console.error("Notes load failed:", e);
     }
+  }
+
+  // ---- Set Schedule notes (migration 0018) ----------------------------------
+  // Two surfaces, both permanent and global — switching weeks never touches
+  // them. (1) staff.scheduling_note: a ⚑ beside the name on the grid, edited on
+  // the Staff tab or from the flag itself; both go through saveSchedulingNote.
+  // (2) The side pad: schedule_pad_notes, its own table so it can't mix with
+  // the Rail's Notes box (general_notes).
+  const schedNoteByName = useMemo(() => {
+    const m = {};
+    staffList.forEach((s) => { if (s.scheduling_note) m[s.name] = s.scheduling_note; });
+    return m;
+  }, [staffList]);
+  const [schedNoteEdit, setSchedNoteEdit] = useState(null); // { name, draft } — flag editor on the grid
+  const [staffNoteDrafts, setStaffNoteDrafts] = useState({}); // { name: text } — Staff tab inputs mid-edit
+  const [schedNoteMsg, setSchedNoteMsg] = useState("");
+
+  async function saveSchedulingNote(name, text) {
+    const s = staffList.find((x) => x.name === name);
+    if (!s) return;
+    const value = String(text || "").trim().slice(0, SCHED_NOTE_MAX) || null;
+    const prev = s.scheduling_note ?? null;
+    if (value === prev) return;
+    const setNote = (v) => setStaffList((list) => list.map((x) => (x.name === name ? { ...x, scheduling_note: v } : x)));
+    setNote(value);
+    setSchedNoteMsg("");
+    if (!s.id) return; // sample roster (local dev) — nothing to write
+    try {
+      await updateSchedulingNote(s.id, value);
+    } catch (e) {
+      console.error("Scheduling note save failed:", e);
+      setNote(prev);
+      setSchedNoteMsg(`Couldn't save ${name}'s scheduling note: ${e.message || e}`);
+    }
+  }
+  const schedNoteCancelRef = useRef(false);
+  function commitSchedNoteEdit() {
+    if (schedNoteCancelRef.current) { schedNoteCancelRef.current = false; return; }
+    if (!schedNoteEdit) return;
+    const { name, draft } = schedNoteEdit;
+    setSchedNoteEdit(null);
+    saveSchedulingNote(name, draft);
+  }
+
+  const [padNotes, setPadNotes] = useState([]);
+  const [padDraft, setPadDraft] = useState("");
+  const [padEdit, setPadEdit] = useState(null); // { id, text }
+  const [padMsg, setPadMsg] = useState("");
+  const [padCollapsed, setPadCollapsed] = useState(() => {
+    try { return localStorage.getItem(PAD_COLLAPSED_KEY) === "1"; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(PAD_COLLAPSED_KEY, padCollapsed ? "1" : "0"); } catch { /* private window etc. */ }
+  }, [padCollapsed]);
+  // Loaded once — the pad is global, so week navigation must not reload it.
+  useEffect(() => {
+    fetchPadNotes().then(setPadNotes).catch((e) => console.error("Pad notes load failed:", e));
+  }, []);
+
+  async function addPadNote() {
+    const note = padDraft.trim();
+    if (!note) return;
+    const tempId = `tmp-${Date.now()}`;
+    setPadNotes((list) => [...list, { id: tempId, note }]);
+    setPadDraft("");
+    setPadMsg("");
+    try {
+      const row = await insertPadNote(note);
+      setPadNotes((list) => list.map((n) => (n.id === tempId ? row : n)));
+    } catch (e) {
+      console.error("Pad note add failed:", e);
+      setPadNotes((list) => list.filter((n) => n.id !== tempId));
+      setPadDraft(note);
+      setPadMsg(e.message || String(e));
+    }
+  }
+  const padCancelRef = useRef(false);
+  async function commitPadEdit() {
+    if (padCancelRef.current) { padCancelRef.current = false; return; }
+    if (!padEdit) return;
+    const { id, text } = padEdit;
+    setPadEdit(null);
+    const note = text.trim();
+    const before = padNotes.find((n) => n.id === id);
+    if (!before || note === before.note) return;
+    if (!note) { removePadNote(id); return; } // emptied = deleted
+    setPadNotes((list) => list.map((n) => (n.id === id ? { ...n, note } : n)));
+    try {
+      await updatePadNote(id, note);
+    } catch (e) {
+      console.error("Pad note edit failed:", e);
+      setPadNotes((list) => list.map((n) => (n.id === id ? before : n)));
+      setPadMsg(e.message || String(e));
+    }
+  }
+  async function removePadNote(id) {
+    const before = padNotes;
+    setPadNotes((list) => list.filter((n) => n.id !== id));
+    try {
+      await deletePadNote(id);
+    } catch (e) {
+      console.error("Pad note delete failed:", e);
+      setPadNotes(before);
+      setPadMsg(e.message || String(e));
+    }
+  }
+
+  // Name cell for every Set Schedule grid. The flag, tooltip and editor are all
+  // absolutely positioned, so a note never widens the name column — the day
+  // columns keep their width whether or not anyone is flagged.
+  function schedNameCell(name, label = name) {
+    const note = schedNoteByName[name];
+    const editable = staffList.some((s) => s.name === name);
+    const editing = schedNoteEdit?.name === name;
+    const openEditor = () => {
+      schedNoteCancelRef.current = false;
+      setSchedNoteEdit({ name, draft: note || "" });
+    };
+    return (
+      <td className="emp-name">
+        <span className={`sched-name ${note ? "has-note" : ""}`}>
+          {label}
+          {note ? (
+            <button className="sched-flag screen-only" onClick={openEditor} aria-label={`Edit ${name}'s scheduling note`}>⚑</button>
+          ) : editable ? (
+            <button className="sched-flag sched-flag-add screen-only" onClick={openEditor} title={`Add a scheduling note for ${name}`} aria-label={`Add a scheduling note for ${name}`}>⚑</button>
+          ) : null}
+          {note && !editing && <span className="sched-note-tip screen-only" role="tooltip">{note}</span>}
+          {editing && (
+            <span className="sched-note-editor screen-only">
+              <input
+                autoFocus
+                maxLength={SCHED_NOTE_MAX}
+                value={schedNoteEdit.draft}
+                placeholder="e.g. No Tuesdays"
+                onChange={(e) => setSchedNoteEdit({ name, draft: e.target.value })}
+                onBlur={commitSchedNoteEdit}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") e.currentTarget.blur();
+                  if (e.key === "Escape") { schedNoteCancelRef.current = true; setSchedNoteEdit(null); }
+                }}
+              />
+              <span className="sched-note-hint">Enter saves · blank clears · Esc cancels</span>
+            </span>
+          )}
+        </span>
+      </td>
+    );
   }
 
   // Auto-note on Rail approval: "Bernie — Request Off — Aug 3 — Approved".
@@ -3169,7 +3327,7 @@ export default function SchedulingHub({ session, onSignOut }) {
     const opts = roleOptions[GROUP_ROLE[groupKey]] || [{ code: "OFF", label: "Off" }];
     return (
       <tr key={groupKey + personName + idx}>
-        <td className="emp-name">{personName.startsWith("Jenny") ? `${personName} — Head Chef` : personName}</td>
+        {schedNameCell(personName, personName.startsWith("Jenny") ? `${personName} — Head Chef` : personName)}
         {WEEKDAY_LABELS.map((w, wi) => {
           const realWeekday = WEEKDAY_ORDER[wi];
           const type = row[realWeekday] || "OFF";
@@ -4885,7 +5043,55 @@ export default function SchedulingHub({ session, onSignOut }) {
         .staff-add-title, .staff-profile-key { color: var(--muted); }
         .staff-row { border-color: var(--line); }
         .staff-name-input { background: var(--s2); border-color: var(--line2); color: var(--txt); }
+        .staff-note-input { font-family: 'Inter', sans-serif; font-size: 12px; padding: 6px 9px; border: 1px solid var(--line2); border-radius: 4px; background: var(--s2); color: var(--txt); width: 210px; }
+        .staff-note-input::placeholder { color: var(--muted); }
+        .staff-note-input:focus { outline: none; border-color: var(--accent); }
         .staff-role-check { color: var(--txt2); }
+
+        /* ---- Set Schedule notes: ⚑ flags + side pad (migration 0018) ----
+           Everything here is out of flow: the flag, tooltip and editor are
+           absolute inside the name, and the pad is absolute in the margin
+           beside the card, so the grid lays out exactly as it did before. */
+        .sched-name { position: relative; display: inline-block; cursor: default; }
+        .sched-name.has-note { cursor: help; }
+        .sched-flag { position: absolute; left: 100%; top: 50%; transform: translateY(-50%); margin-left: 3px; padding: 0 1px; background: none; border: 0; font-size: 9px; line-height: 1; color: #c8956c; cursor: pointer; }
+        .sched-flag-add { opacity: 0; transition: opacity 0.12s; }
+        .emp-name:hover .sched-flag-add { opacity: 0.35; }
+        .sched-flag-add:hover, .sched-flag-add:focus-visible { opacity: 1 !important; }
+        .sched-note-tip, .sched-note-editor {
+          position: absolute; left: 0; top: calc(100% + 5px); z-index: 60;
+          background: #1a1a1a; border: 0.5px solid #c8956c; border-radius: 6px; padding: 7px 10px;
+          font-family: 'Inter', sans-serif; font-size: 10.5px; font-weight: 400; letter-spacing: 0; text-transform: none;
+          color: #ddd; white-space: nowrap; box-shadow: 0 4px 12px rgba(0,0,0,0.5); text-align: left;
+        }
+        .sched-note-tip { display: none; pointer-events: none; }
+        .sched-name:hover .sched-note-tip { display: block; }
+        .sched-note-editor { display: flex; flex-direction: column; gap: 5px; }
+        .sched-note-editor input { width: 380px; background: #0f0f0f; border: 0.5px solid #2a2a2a; border-radius: 4px; padding: 5px 7px; color: #fff; font-family: inherit; font-size: 11px; outline: none; }
+        .sched-note-editor input:focus { border-color: #c8956c; }
+        .sched-note-hint { font-size: 9.5px; color: #666; }
+
+        .sched-wrap { position: relative; }
+        /* Card's right edge sits 28px inside the wrap (its side padding); the
+           pad starts 14px past it, in what was empty margin. */
+        .sched-pad { position: absolute; top: 0; left: calc(100% - 14px); width: 160px; box-sizing: border-box; background: #141414; border: 0.5px solid #2a2a2a; border-radius: 10px; padding: 10px; font-family: 'Inter', sans-serif; }
+        .sched-pad.collapsed { width: 20px; padding: 0; border-radius: 6px; }
+        .sched-pad-tab { display: flex; flex-direction: column; align-items: center; gap: 6px; width: 100%; padding: 8px 0; background: none; border: 0; color: #c8956c; cursor: pointer; }
+        .sched-pad-count { font-size: 10px; color: #aaa; font-family: 'Space Mono', monospace; }
+        .sched-pad-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: #c8956c; }
+        .sched-pad-head span { display: inline-flex; align-items: center; gap: 5px; }
+        .sched-pad-collapse { background: none; border: 0; padding: 2px; color: #666; cursor: pointer; display: inline-flex; }
+        .sched-pad-collapse:hover { color: #c8956c; }
+        .sched-pad-input { width: 100%; box-sizing: border-box; background: #0f0f0f; border: 0.5px solid #2a2a2a; border-radius: 6px; padding: 6px 8px; color: #fff; font-family: inherit; font-size: 10.5px; outline: none; margin-bottom: 8px; }
+        .sched-pad-input:focus { border-color: #c8956c; }
+        .sched-pad-input::placeholder { color: #555; }
+        .sched-pad-msg { font-size: 10px; color: #e79289; margin-bottom: 8px; line-height: 1.4; }
+        .sched-pad-list { display: flex; flex-direction: column; gap: 5px; }
+        .sched-pad-chip { position: relative; background: #1a1a1a; border-radius: 4px; padding: 6px 16px 6px 8px; font-size: 10.5px; line-height: 1.4; color: #aaa; cursor: text; overflow-wrap: anywhere; }
+        .sched-pad-edit { width: 100%; box-sizing: border-box; border: 0.5px solid #c8956c; font-family: inherit; resize: vertical; outline: none; padding-right: 8px; }
+        .sched-pad-x { position: absolute; top: 3px; right: 3px; background: none; border: 0; padding: 0 2px; color: #666; font-size: 12px; line-height: 1; cursor: pointer; opacity: 0; }
+        .sched-pad-chip:hover .sched-pad-x, .sched-pad-x:focus-visible { opacity: 1; }
+        .sched-pad-x:hover { color: #e79289; }
         .staff-role-check input { accent-color: var(--accent); }
         .staff-delete-btn { background: rgba(178,58,47,0.15); border-color: rgba(178,58,47,0.5); color: #e0796c; }
         .staff-delete-btn:hover { background: rgba(178,58,47,0.28); }
@@ -5956,7 +6162,7 @@ export default function SchedulingHub({ session, onSignOut }) {
       )}
 
       {tab === "template" && (
-        <div className="cal-wrap" key="template">
+        <div className="cal-wrap sched-wrap" key="template">
           <div className="cal-card" ref={scheduleCardRef}>
             <div className="print-header">
               <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -6077,6 +6283,9 @@ export default function SchedulingHub({ session, onSignOut }) {
                 <button className="back-btn" onClick={() => setWeekIndex((i) => i + 1)}><ChevronRight size={13} /></button>
               </div>
             </div>
+            {schedNoteMsg && (
+              <div className="staff-msg screen-only" style={{ display: "block", marginBottom: 10 }}>{schedNoteMsg}</div>
+            )}
             {scheduleLocked && (
               <div className="template-note" style={{ marginBottom: 14, marginTop: -8 }}>
                 🔒 {SECTION_LABEL[scheduleView]} is locked for the week of {shortDate(activeWeekStart)} — its cells won't respond to clicks. Other sections, and other weeks, are unaffected. Hit "Locked ✓" above to unlock.
@@ -6137,7 +6346,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                           const personRoles = staffRolesMap[p.name] || [p.role];
                           return (
                             <tr key={p.name}>
-                              <td className="emp-name">{p.name}</td>
+                              {schedNameCell(p.name)}
                               {WEEKDAY_LABELS.map((w, wi) => {
                                 const weekday = WEEKDAY_ORDER[wi];
                                 const code = (activePatterns[p.name] || ALL_OFF_WEEK)[weekday];
@@ -6263,7 +6472,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                         : null;
                       return (
                         <tr key={personName + idx}>
-                          <td className="emp-name">{personName}</td>
+                          {schedNameCell(personName)}
                           {WEEKDAY_LABELS.map((w, wi) => {
                             const realWeekday = WEEKDAY_ORDER[wi];
                             const type = row[realWeekday] || "OFF";
@@ -6330,6 +6539,68 @@ export default function SchedulingHub({ session, onSignOut }) {
               </>
             )}
           </div>
+
+          {/* Standing notes pad. Absolutely positioned in the margin to the
+              right of the card, outside scheduleCardRef — the card (and so the
+              grid) is laid out exactly as if the pad weren't there. When the
+              window is too narrow for it, the page scrolls sideways instead of
+              the grid shrinking. */}
+          <aside className={`sched-pad screen-only ${padCollapsed ? "collapsed" : ""}`} aria-label="Standing schedule notes">
+            {padCollapsed ? (
+              <button className="sched-pad-tab" onClick={() => setPadCollapsed(false)} title="Show standing notes">
+                <StickyNote size={12} />
+                <span className="sched-pad-count">{padNotes.length}</span>
+              </button>
+            ) : (
+              <>
+                <div className="sched-pad-head">
+                  <span><StickyNote size={11} /> Notes</span>
+                  <button className="sched-pad-collapse" onClick={() => setPadCollapsed(true)} title="Collapse" aria-label="Collapse notes"><ChevronRight size={12} /></button>
+                </div>
+                {padNotesAvailable() ? (
+                  <input
+                    className="sched-pad-input"
+                    value={padDraft}
+                    placeholder="Add a note…"
+                    onChange={(e) => setPadDraft(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") addPadNote(); }}
+                  />
+                ) : (
+                  <div className="sched-pad-msg">Run migration 0018 to use this pad.</div>
+                )}
+                {padMsg && <div className="sched-pad-msg">{padMsg}</div>}
+                <div className="sched-pad-list">
+                  {padNotes.map((n) => (
+                    padEdit?.id === n.id ? (
+                      <textarea
+                        key={n.id}
+                        className="sched-pad-chip sched-pad-edit"
+                        autoFocus
+                        rows={2}
+                        value={padEdit.text}
+                        onChange={(e) => setPadEdit({ id: n.id, text: e.target.value })}
+                        onBlur={commitPadEdit}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); e.currentTarget.blur(); }
+                          if (e.key === "Escape") { padCancelRef.current = true; setPadEdit(null); }
+                        }}
+                      />
+                    ) : (
+                      <div key={n.id} className="sched-pad-chip" onClick={() => { padCancelRef.current = false; setPadEdit({ id: n.id, text: n.note }); }} title="Click to edit">
+                        <span className="sched-pad-text">{n.note}</span>
+                        <button
+                          className="sched-pad-x"
+                          onClick={(e) => { e.stopPropagation(); removePadNote(n.id); }}
+                          title="Delete note"
+                          aria-label="Delete note"
+                        >×</button>
+                      </div>
+                    )
+                  ))}
+                </div>
+              </>
+            )}
+          </aside>
         </div>
       )}
 
@@ -6694,6 +6965,7 @@ export default function SchedulingHub({ session, onSignOut }) {
             <div className="week-header" style={{ marginBottom: 14 }}>
               <div className="week-range"><Users size={14} style={{ verticalAlign: "-2px", marginRight: 6 }} />Staff &amp; Roles</div>
               {staffMsg && <span className="staff-msg">{staffMsg}</span>}
+              {schedNoteMsg && <span className="staff-msg">{schedNoteMsg}</span>}
             </div>
 
             <div className="qr-row">
@@ -6829,6 +7101,23 @@ export default function SchedulingHub({ session, onSignOut }) {
                           type="text"
                           value={d.name}
                           onChange={(e) => setStaffDraft(s, { name: e.target.value })}
+                        />
+                        {/* Saves on its own (blur / Enter), apart from the row's
+                            Save — same writer as the ⚑ editor on Set Schedule. */}
+                        <input
+                          className="staff-note-input"
+                          type="text"
+                          maxLength={SCHED_NOTE_MAX}
+                          placeholder="Scheduling note"
+                          title="Scheduling note — shows as ⚑ beside their name on Set Schedule"
+                          value={staffNoteDrafts[s.name] ?? (s.scheduling_note || "")}
+                          onChange={(e) => setStaffNoteDrafts((d) => ({ ...d, [s.name]: e.target.value }))}
+                          onBlur={(e) => {
+                            const v = e.target.value;
+                            setStaffNoteDrafts((d) => { const n = { ...d }; delete n[s.name]; return n; });
+                            saveSchedulingNote(s.name, v);
+                          }}
+                          onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
                         />
                         <div className="staff-role-checks">
                           {SECTION_ROLES[section].map((r) => (
