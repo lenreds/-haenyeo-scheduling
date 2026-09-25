@@ -347,15 +347,22 @@ const escHtml = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;
 // Longest run of rows one group prints before it is split under a repeated
 // "(CONT.)" heading — comfortably less than a landscape page holds.
 const SHEET_MAX_GROUP_ROWS = 18;
-function buildScheduleSheetNode({ sectionTitle, weekLabel, days, todayIdx, groups, managerOn }) {
+// compact: the FOH sheet's tighter row spacing — the one layout that fits 16
+// staff + Manager On on one landscape page at full type size. Built into the
+// sheet (not print-only CSS) so Print, Save as PDF and the Publish attachment
+// are the same layout from one source. BOH/Kitchen keep the roomy default.
+function buildScheduleSheetNode({ sectionTitle, weekLabel, days, todayIdx, groups, managerOn, compact = false }) {
+  const P = compact
+    ? { th: "5px 6px", cell: "3px 6px", name: "3px 12px", grp: "3px 12px", head: "6px 22px", pill: "3px 4px", legend: 6 }
+    : { th: "11px 6px", cell: "8px 6px", name: "8px 12px", grp: "7px 12px", head: "16px 26px", pill: "6px 4px", legend: 12 };
   const mono = "'Space Mono', monospace";
   const sans = "'Manrope', sans-serif";
   const dayTint = (i) => (i === todayIdx ? `background:${SHEET.tint};` : "");
   const dayHead = days
     .map((d, i) =>
       i === todayIdx
-        ? `<th class="sh-th" style="padding:11px 6px;background:${SHEET.orange};color:#fff;font-family:${mono};font-weight:700;font-size:11px;letter-spacing:1.5px;text-align:center;">★ ${d.dow} ${d.date}</th>`
-        : `<th class="sh-th" style="padding:11px 6px;color:#8c8c8c;font-family:${mono};font-weight:700;font-size:11px;letter-spacing:1.5px;text-align:center;border-bottom:1.5px solid #e4e4e4;">${d.dow} ${d.date}</th>`
+        ? `<th class="sh-th" style="padding:${P.th};background:${SHEET.orange};color:#fff;font-family:${mono};font-weight:700;font-size:11px;letter-spacing:1.5px;text-align:center;">★ ${d.dow} ${d.date}</th>`
+        : `<th class="sh-th" style="padding:${P.th};color:#8c8c8c;font-family:${mono};font-weight:700;font-size:11px;letter-spacing:1.5px;text-align:center;border-bottom:1.5px solid #e4e4e4;">${d.dow} ${d.date}</th>`
     )
     .join("");
   // Cell text takes the color of the role worked that day (r.roles), not the
@@ -367,7 +374,7 @@ function buildScheduleSheetNode({ sectionTitle, weekLabel, days, todayIdx, group
     const crossLine = cross
       ? `<div style="font-size:9px;line-height:1.1;margin-top:1px;font-weight:700;color:${ROLE_COLOR_MUTED[role] || "#a6a6a6"};">${escHtml(crossRoleLabelText(role))}</div>`
       : "";
-    return `<td class="sh-cell" style="padding:8px 6px;text-align:center;border-bottom:1px solid #efefef;${dayTint(i)}${
+    return `<td class="sh-cell" style="padding:${P.cell};text-align:center;border-bottom:1px solid #efefef;${dayTint(i)}${
       off ? `font-style:italic;color:#cccccc;` : `color:${ROLE_COLOR[role] || "#3a3a3a"};`
     }font-family:${sans};font-size:12px;${off ? "" : "font-weight:700;"}">${off ? "—" : escHtml(label)}${crossLine}</td>`;
   };
@@ -378,12 +385,12 @@ function buildScheduleSheetNode({ sectionTitle, weekLabel, days, todayIdx, group
   // The date row is the table's <thead>, which the browser repeats per page.
   const groupBlock = (g) => {
     const color = SHEET_GROUP_COLOR[g.label] || SHEET.grey;
-    const head = (cont) => `<tr><td class="sh-grp" colspan="8" style="border-top:2.5px solid ${color};background:#fafafa;padding:7px 12px;">
+    const head = (cont) => `<tr><td class="sh-grp" colspan="8" style="border-top:2.5px solid ${color};background:#fafafa;padding:${P.grp};">
       <span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${color};margin-right:8px;"></span>
       <span style="font-family:${mono};font-weight:700;font-size:11px;letter-spacing:2px;color:#333;">${escHtml(g.label).toUpperCase()}${cont ? " (CONT.)" : ""}</span>
     </td></tr>`;
     const row = (r) => `<tr>
-        <td class="sh-name" style="padding:8px 12px;border-bottom:1px solid #efefef;font-family:${sans};font-weight:600;font-size:12.5px;color:#2b2b2b;white-space:nowrap;">${escHtml(r.name)}</td>
+        <td class="sh-name" style="padding:${P.name};border-bottom:1px solid #efefef;font-family:${sans};font-weight:600;font-size:12.5px;color:#2b2b2b;white-space:nowrap;">${escHtml(r.name)}</td>
         ${r.shifts.map((label, i) => shiftCell(label, r.roles?.[i], r.primaryRole, i)).join("")}
       </tr>`;
     const chunks = [];
@@ -394,17 +401,17 @@ function buildScheduleSheetNode({ sectionTitle, weekLabel, days, todayIdx, group
   const pill = (n) =>
     `<span style="display:inline-block;background:${SHEET.dark};color:#fff;border-radius:999px;padding:2.5px 9px;font-family:${sans};font-weight:600;font-size:10px;margin:1px;white-space:nowrap;">${escHtml(n)}</span>`;
   const managerRow = managerOn
-    ? `<tbody class="sh-group"><tr><td class="sh-grp" colspan="8" style="border-top:2.5px solid ${SHEET.grey};background:#fafafa;padding:7px 12px;">
+    ? `<tbody class="sh-group"><tr><td class="sh-grp" colspan="8" style="border-top:2.5px solid ${SHEET.grey};background:#fafafa;padding:${P.grp};">
         <span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${SHEET.grey};margin-right:8px;"></span>
         <span style="font-family:${mono};font-weight:700;font-size:11px;letter-spacing:2px;color:#333;">MANAGER ON</span>
       </td></tr>
       <tr>
-        <td class="sh-name" style="padding:8px 12px;border-bottom:1px solid #efefef;font-family:${sans};font-weight:600;font-size:11px;color:#8c8c8c;">Manager on</td>
+        <td class="sh-name" style="padding:${P.name};border-bottom:1px solid #efefef;font-family:${sans};font-weight:600;font-size:11px;color:#8c8c8c;">Manager on</td>
         ${managerOn
           .map((names, i) =>
             names.length
-              ? `<td class="sh-cell" style="padding:6px 4px;text-align:center;border-bottom:1px solid #efefef;${dayTint(i)}">${names.map(pill).join(" ")}</td>`
-              : `<td class="sh-cell" style="padding:8px 6px;text-align:center;border-bottom:1px solid #efefef;${dayTint(i)}font-style:italic;color:#cccccc;font-family:${sans};font-size:12px;">—</td>`
+              ? `<td class="sh-cell" style="padding:${P.pill};text-align:center;border-bottom:1px solid #efefef;${dayTint(i)}">${names.map(pill).join(" ")}</td>`
+              : `<td class="sh-cell" style="padding:${P.cell};text-align:center;border-bottom:1px solid #efefef;${dayTint(i)}font-style:italic;color:#cccccc;font-family:${sans};font-size:12px;">—</td>`
           )
           .join("")}
       </tr></tbody>`
@@ -424,7 +431,7 @@ function buildScheduleSheetNode({ sectionTitle, weekLabel, days, todayIdx, group
   const node = document.createElement("div");
   node.style.cssText = "position:absolute;left:-10000px;top:0;width:1560px;background:#ffffff;padding:0 0 6px;";
   node.innerHTML = `
-    <div class="sh-head" style="background:#ffffff;border-bottom:2px solid #2b2a25;padding:16px 26px;display:flex;align-items:center;justify-content:space-between;">
+    <div class="sh-head" style="background:#ffffff;border-bottom:2px solid #2b2a25;padding:${P.head};display:flex;align-items:center;justify-content:space-between;">
       <div style="display:flex;align-items:center;gap:14px;">
         <img src="${HAENYEO_ICON}" alt="" style="width:36px;height:36px;object-fit:contain;" />
         <div>
@@ -442,7 +449,7 @@ function buildScheduleSheetNode({ sectionTitle, weekLabel, days, todayIdx, group
       <thead><tr><th style="border-bottom:1.5px solid #e4e4e4;"></th>${dayHead}</tr></thead>
       ${groups.map(groupBlock).join("")}${managerRow}
     </table>
-    <div class="sh-legend" style="display:flex;align-items:center;margin-top:12px;padding:0 4px;font-family:${sans};font-size:10.5px;color:#7a7a7a;">
+    <div class="sh-legend" style="display:flex;align-items:center;margin-top:${P.legend}px;padding:0 4px;font-family:${sans};font-size:10.5px;color:#7a7a7a;">
       <div>${todaySwatch}<span style="white-space:nowrap;"><span style="font-style:italic;color:#cccccc;">—</span>&nbsp; Day off</span></div>
       <div style="margin-left:auto;">${legendDots}</div>
     </div>`;
@@ -1324,7 +1331,6 @@ export default function SchedulingHub({ session, onSignOut }) {
   const [qrPrintUrls, setQrPrintUrls] = useState({}); // all 7 QR images for the print sheet
   const [qrPrinting, setQrPrinting] = useState(false);
   const [timeOffBlock, setTimeOffBlock] = useState(null); // { name, dayLabel, onOverride } | null
-  const [publishBusy, setPublishBusy] = useState(false);
   // Dark Split Rail: which request the centre detail panel is showing. The
   // auto-action log and the resolved list are hidden by the shared cleared_at
   // watermarks in `railCleared` below — the DB is never touched, entries simply
@@ -2987,6 +2993,7 @@ export default function SchedulingHub({ session, onSignOut }) {
             { label: "BOH", rows: buildGroupRows("boh", week) },
           ],
       managerOn: buildManagerOn(week),
+      compact: isFoh,
     });
     // Print CSS keys off this: only the FOH sheet gets the tightened print
     // density; BOH/Kitchen prints exactly as before.
@@ -3197,70 +3204,153 @@ export default function SchedulingHub({ session, onSignOut }) {
     }
   }
 
-  // Send every finalized week, using the same real publish path as the Calendar
-  // preview modal did: build one branded PDF per week per section client-side,
-  // then hand the payloads + attachments to /api/send-schedule. The previous
-  // version posted a placeholder payload with empty recipients and no token, so
-  // it never actually sent anything — and it cleared the finalized set whether
-  // or not the send worked.
-  async function publishFinalizedWeeks() {
-    if (publishBusy) return;
-    const token = session?.access_token;
-    if (!token) { addLog("Sign in to publish", "warn"); return; }
-    // Finalized AND not already sent (brief item 3) — publishing twice would
-    // re-email staff a schedule they already have.
-    const starts = unpublishedFinalizedWeeks;
-    if (!starts.length) { addLog("No finalized weeks waiting to be published", "warn"); return; }
+  // ---- Publish dialog (PUBLISH brief A1–A5) ---------------------------------
+  // Publish is the one button that reaches every employee at once, so it opens
+  // a confirmation instead of sending: the weeks, an editable subject, a
+  // message, every recipient as a checkbox, a test send to yourself, then
+  // Confirm & Send. One email per section (FOH; BOH & Kitchen) carries every
+  // selected week — the inline table for phones plus one PDF per week from the
+  // same sheet builder as Print.
+  const [publishModal, setPublishModal] = useState(null);
 
-    setPublishBusy(true);
-    try {
-      const selWeeks = starts.map((s) => buildWeekByOffset(weekOffsetFor(new Date(`${s}T00:00:00`))));
-      const fohAttachments = [];
-      const bkAttachments = [];
-      for (const week of selWeeks) {
-        fohAttachments.push({
-          filename: `Haenyeo-Schedule-FOH-${weekFileRange(week)}.pdf`,
-          b64: await sheetNodePdfBase64(scheduleSheetNodeFor("FOH", week)),
-        });
-        bkAttachments.push({
-          filename: `Haenyeo-Schedule-BOH-Kitchen-${weekFileRange(week)}.pdf`,
-          b64: await sheetNodePdfBase64(scheduleSheetNodeFor("BOHKITCHEN", week)),
-        });
-      }
-      const [fohRes, bkRes] = await Promise.all([
-        triggerSchedulePublish(
-          { weeks: selWeeks.map(buildSchedulePayload), sections: ["FOH"], attachments: fohAttachments },
-          token
-        ),
-        triggerSchedulePublish(
-          { weeks: selWeeks.map(buildBohKitchenPayload), sections: ["BOH", "Kitchen"], attachments: bkAttachments },
-          token
-        ),
-      ]);
-      const err = fohRes?.error || bkRes?.error;
-      if (fohRes?.needsReconnect || bkRes?.needsReconnect) {
-        addLog("Publish failed — Gmail disconnected. Use Reconnect by the Gmail dot, then publish again.", "warn");
-        refreshGmailStatus();
-      } else if (err) {
-        addLog(`Publish email issue (${err})`, "warn");
-      } else {
-        // Only mark published once the sends actually came back clean.
-        const publishedAt = new Date().toISOString();
-        await Promise.all(starts.map((s) => setWeekPublished(s).catch(() => {})));
-        setPublishedWeekStarts((prev) => new Set([...prev, ...starts]));
-        setPublishedAtByWeek((prev) => {
-          const m = { ...prev };
-          starts.forEach((s) => { m[s] = publishedAt; });
-          return m;
-        });
-        const n = starts.length;
-        addLog(`Published ${n} week${n === 1 ? "" : "s"} — FOH ${fohRes?.sent ?? 0}, BOH & Kitchen ${bkRes?.sent ?? 0}`, "good");
-      }
-    } catch (e) {
-      console.error("Publish failed:", e);
-      addLog(`Publish failed: ${e.message}`, "warn");
+  // Everyone a real send can reach, split the way the server splits them.
+  // Addresses shown here are for the manager's eyes; the server re-reads them
+  // from the DB by id and never trusts one from the page.
+  const publishRecipients = useMemo(() => {
+    const reachable = staffList.filter((s) => s.id && s.registered && s.active !== false && s.personal_email);
+    const bySection = (secs) => reachable
+      .filter((s) => secs.includes(String(s.section || "FOH").toLowerCase()))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    return { foh: bySection(["foh"]), bk: bySection(["boh", "kitchen"]) };
+  }, [staffList]);
+
+  // "Schedule 11/09-11/15/26": first selected week's Monday through the last
+  // selected week's Sunday.
+  function publishSubjectFor(isos) {
+    if (!isos.length) return "Schedule";
+    const sorted = [...isos].sort();
+    const start = new Date(`${sorted[0]}T00:00:00`);
+    const end = new Date(`${sorted[sorted.length - 1]}T00:00:00`);
+    end.setDate(end.getDate() + 6);
+    const md = (d) => `${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getDate()).padStart(2, "0")}`;
+    return `Schedule ${md(start)}-${md(end)}/${String(end.getFullYear()).slice(-2)}`;
+  }
+
+  function openPublishDialog() {
+    const weeks = [...unpublishedFinalizedWeeks].sort();
+    if (!weeks.length) { addLog("No finalized weeks waiting to be published", "warn"); return; }
+    setPublishModal({
+      weeks, picked: weeks,
+      subject: publishSubjectFor(weeks), subjectEdited: false,
+      notes: "", excluded: [],
+      busy: null, error: null, testResult: null,
+      sentSections: [], // sections already sent in THIS dialog — a retry won't resend them
+    });
+  }
+  function togglePublishWeek(iso) {
+    setPublishModal((m) => {
+      const picked = m.picked.includes(iso) ? m.picked.filter((w) => w !== iso) : [...m.picked, iso].sort();
+      return { ...m, picked, subject: m.subjectEdited ? m.subject : publishSubjectFor(picked) };
+    });
+  }
+  function togglePublishRecipient(id) {
+    setPublishModal((m) => ({
+      ...m,
+      excluded: m.excluded.includes(id) ? m.excluded.filter((x) => x !== id) : [...m.excluded, id],
+    }));
+  }
+
+  // Render every PDF up front. If any fails, nothing is sent (A5).
+  async function renderPublishPdfs(isos) {
+    const weeks = isos.map((s) => buildWeekByOffset(weekOffsetFor(new Date(`${s}T00:00:00`))));
+    const foh = [];
+    const bk = [];
+    for (let i = 0; i < weeks.length; i++) {
+      // Named by the week's Monday so they sort correctly in a folder.
+      const filename = `Haenyeo-Schedule-${isos[i]}.pdf`;
+      foh.push({ filename, b64: await sheetNodePdfBase64(scheduleSheetNodeFor("FOH", weeks[i])) });
+      bk.push({ filename, b64: await sheetNodePdfBase64(scheduleSheetNodeFor("BOHKITCHEN", weeks[i])) });
     }
-    setPublishBusy(false);
+    [...foh, ...bk].forEach((a) => {
+      if (!String(a.b64 || "").startsWith("JVBERi0")) throw new Error(`${a.filename} didn't render`);
+    });
+    return { weeks, foh, bk };
+  }
+
+  // test=true: the identical emails, to the signed-in manager only, "[TEST]"
+  // subject. Never marks anything published, never touches the publish count,
+  // never writes a timestamp — setWeekPublished is only reachable from the
+  // real-send branch below.
+  async function sendPublish(test) {
+    const m = publishModal;
+    if (!m || m.busy) return;
+    const token = session?.access_token;
+    if (!token) { setPublishModal((p) => ({ ...p, error: "Sign in to publish." })); return; }
+    const isos = m.weeks.filter((w) => m.picked.includes(w)).sort();
+    if (!isos.length) return;
+    setPublishModal((p) => ({ ...p, busy: test ? "test" : "send", error: null, testResult: null }));
+
+    let pdfs;
+    try {
+      pdfs = await renderPublishPdfs(isos);
+    } catch (e) {
+      console.error("Publish PDF render failed:", e);
+      setPublishModal((p) => ({ ...p, busy: null, error: `A schedule PDF couldn't be made (${e.message || e}) — nothing was sent. Try again.` }));
+      return;
+    }
+
+    const shared = { subject: m.subject.trim(), notes: m.notes.trim() };
+    const sections = [
+      { key: "foh", label: "Front of House", people: publishRecipients.foh, payload: { weeks: pdfs.weeks.map(buildSchedulePayload), sections: ["FOH"], attachments: pdfs.foh } },
+      { key: "bk", label: "BOH & Kitchen", people: publishRecipients.bk, payload: { weeks: pdfs.weeks.map(buildBohKitchenPayload), sections: ["BOH", "Kitchen"], attachments: pdfs.bk } },
+    ].map((sec) => ({ ...sec, ids: sec.people.filter((r) => !m.excluded.includes(r.id)).map((r) => r.id) }));
+
+    const jobs = test
+      ? sections
+      : sections.filter((sec) => sec.ids.length > 0 && !m.sentSections.includes(sec.key));
+    const results = await Promise.all(jobs.map((sec) =>
+      triggerSchedulePublish({ ...sec.payload, ...shared, ...(test ? { test: true } : { recipientIds: sec.ids }) }, token)
+    ));
+
+    const reconnect = results.some((r) => r?.needsReconnect);
+    if (reconnect) refreshGmailStatus();
+    const failed = jobs.filter((_, i) => results[i]?.error || reconnect);
+    const failedText = failed.map((sec) => `${sec.label}: ${results[jobs.indexOf(sec)]?.error || "Gmail disconnected"}`).join("; ");
+    const recipientMisses = results.flatMap((r) => r?.failures || []);
+
+    if (test) {
+      setPublishModal((p) => ({
+        ...p, busy: null,
+        error: failed.length ? `Test didn't go out — ${failedText}` : null,
+        testResult: failed.length ? null
+          : `Test sent to ${session?.user?.email || "you"} — ${jobs.length} emails (${jobs.map((s) => s.label).join(", ")}). Nothing was marked published.`,
+      }));
+      return;
+    }
+
+    const nowSent = [...m.sentSections, ...jobs.filter((sec) => !failed.includes(sec)).map((sec) => sec.key)];
+    const pendingSections = sections.filter((sec) => sec.ids.length > 0 && !nowSent.includes(sec.key));
+    if (pendingSections.length) {
+      // Keep the dialog open; Confirm retries only the section(s) that failed.
+      setPublishModal((p) => ({
+        ...p, busy: null, sentSections: nowSent,
+        error: `Couldn't send ${failedText}.${nowSent.length ? ` ${sections.filter((s) => nowSent.includes(s.key)).map((s) => s.label).join(" and ")} already went out and won't be re-sent.` : ""} Nothing is marked published yet — press Confirm & Send to retry.`,
+      }));
+      return;
+    }
+
+    // Every section with recipients went out: now (and only now) mark published.
+    const publishedAt = new Date().toISOString();
+    await Promise.all(isos.map((s) => setWeekPublished(s).catch(() => {})));
+    setPublishedWeekStarts((prev) => new Set([...prev, ...isos]));
+    setPublishedAtByWeek((prev) => {
+      const next = { ...prev };
+      isos.forEach((s) => { next[s] = publishedAt; });
+      return next;
+    });
+    const sentCount = results.reduce((n, r) => n + (r?.sent || 0), 0);
+    addLog(`Published ${isos.length} week${isos.length === 1 ? "" : "s"} (${isos.map(shortDate).join(", ")}) — ${sentCount} emails${recipientMisses.length ? `; not delivered: ${recipientMisses.join("; ")}` : ""}`, recipientMisses.length ? "warn" : "good");
+    setPublishModal(null);
   }
 
   // Re-pull rail requests from the DB (used after a manual Gmail poll so new
@@ -4540,17 +4630,11 @@ export default function SchedulingHub({ session, onSignOut }) {
              sheet node (same renderer as the PDF). Only the portal shows. */
           body.printing-schedule .hub > *:not(.schedule-print-portal) { display: none !important; }
           body.printing-schedule .schedule-print-portal { display: block !important; page: scheduleLandscape; }
-          /* FOH schedule print: one landscape page at full type size. Only the
-             padding tightens (the PDF, the email attachment and the BOH/Kitchen
-             print keep the builder's inline spacing). A group never splits
-             across pages; the date row (thead) repeats if a page break happens. */
+          /* FOH schedule print: the sheet's compact spacing (built into the
+             sheet, shared with the PDF) fits one landscape page at full type
+             size. A group never splits across pages; the date row (thead)
+             repeats if a page break happens. */
           .schedule-print-portal [data-sheet="foh"] .sh-group { break-inside: avoid; page-break-inside: avoid; }
-          .schedule-print-portal [data-sheet="foh"] .sh-head { padding: 6px 22px !important; }
-          .schedule-print-portal [data-sheet="foh"] .sh-th { padding: 5px 6px !important; }
-          .schedule-print-portal [data-sheet="foh"] .sh-grp { padding: 3px 12px !important; }
-          .schedule-print-portal [data-sheet="foh"] .sh-name,
-          .schedule-print-portal [data-sheet="foh"] .sh-cell { padding-top: 3px !important; padding-bottom: 3px !important; }
-          .schedule-print-portal [data-sheet="foh"] .sh-legend { margin-top: 6px !important; }
           body.printing-qr .hub > *:not(.qr-print-sheet) { display: none !important; }
           body.printing-qr .qr-print-sheet { display: block !important; }
         }
@@ -5338,6 +5422,9 @@ export default function SchedulingHub({ session, onSignOut }) {
         .send-rcpt-noemail .send-rcpt-email { color: #e79289; font-style: italic; }
         .send-error { margin-top: 12px; font-size: 12px; color: #e79289; }
         .send-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
+        .publish-group-label { font-family: 'Space Mono', monospace; font-size: 9.5px; letter-spacing: 1px; text-transform: uppercase; color: var(--muted); margin: 10px 0 4px; }
+        .publish-sent-tag { color: #7fb392; }
+        .publish-test-ok { display: flex; align-items: center; gap: 6px; margin-top: 12px; font-size: 12px; color: #7fb392; }
 
         /* ---- Manage Shifts (item 3) ---- */
         .shift-mgmt { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
@@ -6389,9 +6476,9 @@ export default function SchedulingHub({ session, onSignOut }) {
                     Notes ({weekNotes.length})
                   </button>
                 )}
-                {/* Publish lives here only, never on the Calendar. It emails every
-                    finalized week that hasn't gone out yet, and is enabled on ANY
-                    finalized week on screen — current or future (brief item 3). */}
+                {/* Publish lives here only, never on the Calendar. It opens the Publish
+                    dialog for every finalized week that hasn't gone out yet; nothing is
+                    emailed until Confirm & Send there. */}
                 {!schedulePastWeek && (
                   weekPublishedAt && weekIsFinalized ? (
                     <span className="published-badge" title={`Schedule emails sent ${new Date(weekPublishedAt).toLocaleString()}`}>
@@ -6400,8 +6487,8 @@ export default function SchedulingHub({ session, onSignOut }) {
                   ) : (
                     <button
                       className="publish-btn"
-                      disabled={publishBusy || !weekIsFinalized || unpublishedFinalizedWeeks.length === 0}
-                      onClick={publishFinalizedWeeks}
+                      disabled={!!publishModal || !weekIsFinalized || unpublishedFinalizedWeeks.length === 0}
+                      onClick={openPublishDialog}
                       title={
                         !weekIsFinalized
                           ? "Finalize this week before publishing"
@@ -6410,7 +6497,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                           : `Send schedule emails for ${unpublishedFinalizedWeeks.length} finalized week${unpublishedFinalizedWeeks.length === 1 ? "" : "s"}`
                       }
                     >
-                      {publishBusy ? "Sending…" : `Publish (${unpublishedFinalizedWeeks.length})`}
+                      {`Publish (${unpublishedFinalizedWeeks.length})`}
                     </button>
                   )
                 )}
@@ -7891,6 +7978,127 @@ export default function SchedulingHub({ session, onSignOut }) {
           </div>
         </div>
       )}
+
+      {/* Publish dialog (PUBLISH brief A1). Nothing is emailed until Confirm &
+          Send; the test goes to the signed-in manager only and never marks a
+          week published. */}
+      {publishModal && (() => {
+        const m = publishModal;
+        const busy = !!m.busy;
+        const picked = m.weeks.filter((w) => m.picked.includes(w));
+        const groups = [
+          { key: "foh", label: "Front of House", people: publishRecipients.foh },
+          { key: "bk", label: "BOH & Kitchen", people: publishRecipients.bk },
+        ];
+        const chosen = groups.reduce((n, g) => n + g.people.filter((r) => !m.excluded.includes(r.id)).length, 0);
+        const close = () => { if (!busy) setPublishModal(null); };
+        return (
+          <div className="day-popup-backdrop" onClick={close}>
+            <div className="send-modal" onClick={(e) => e.stopPropagation()}>
+              <div className="day-popup-head">
+                <div className="day-popup-date">Publish schedule</div>
+                <button className="day-popup-close" disabled={busy} onClick={close}><X size={15} /></button>
+              </div>
+
+              <div className="send-section-label">
+                {m.weeks.length === 1 ? "Week" : "Weeks"} <span className="nr-count">{picked.length}</span>
+              </div>
+              <div className="send-recipients">
+                {m.weeks.map((w) => (
+                  <label className="send-rcpt" key={w}>
+                    <input type="checkbox" disabled={busy} checked={m.picked.includes(w)} onChange={() => togglePublishWeek(w)} />
+                    <span className="send-rcpt-name">{weekRangeLabel(buildWeekByOffset(weekOffsetFor(new Date(`${w}T00:00:00`))))}</span>
+                    <span className="send-rcpt-email">Haenyeo-Schedule-{w}.pdf</span>
+                  </label>
+                ))}
+              </div>
+
+              <div className="send-section-label">
+                Recipients <span className="nr-count">{chosen}</span>
+              </div>
+              {groups.map((g) => (
+                <React.Fragment key={g.key}>
+                  <div className="publish-group-label">
+                    {g.label} — {g.people.filter((r) => !m.excluded.includes(r.id)).length} of {g.people.length}
+                    {m.sentSections.includes(g.key) && <span className="publish-sent-tag"> ✓ sent</span>}
+                  </div>
+                  {g.people.length === 0 ? (
+                    <div className="notes-empty">Nobody registered in {g.label} yet.</div>
+                  ) : (
+                    <div className="send-recipients">
+                      {g.people.map((r) => (
+                        <label className="send-rcpt" key={r.id}>
+                          <input
+                            type="checkbox"
+                            disabled={busy || m.sentSections.includes(g.key)}
+                            checked={!m.excluded.includes(r.id)}
+                            onChange={() => togglePublishRecipient(r.id)}
+                          />
+                          <span className="send-rcpt-name">{r.name}</span>
+                          <span className="send-rcpt-email">{r.personal_email}</span>
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                </React.Fragment>
+              ))}
+
+              <label className="manual-field-label" htmlFor="publish-subject">Subject line</label>
+              <input
+                id="publish-subject"
+                className="manual-field"
+                type="text"
+                disabled={busy}
+                value={m.subject}
+                onChange={(e) => setPublishModal((p) => ({ ...p, subject: e.target.value, subjectEdited: true }))}
+              />
+
+              <label className="manual-field-label" htmlFor="publish-notes">Message (optional)</label>
+              <textarea
+                id="publish-notes"
+                className="manual-field"
+                rows={3}
+                disabled={busy}
+                placeholder="Anything to say above the schedule…"
+                value={m.notes}
+                onChange={(e) => setPublishModal((p) => ({ ...p, notes: e.target.value }))}
+              />
+
+              {m.error && <div className="send-error">{m.error}</div>}
+              {m.testResult && <div className="publish-test-ok"><Check size={12} /> {m.testResult}</div>}
+              {gmailDisconnected && (
+                <div className="send-reconnect">
+                  <AlertTriangle size={13} />
+                  <span>
+                    Gmail disconnected — nothing can be emailed until it's reconnected.{" "}
+                    <a href={gmailReconnectUrl} target="_blank" rel="noopener">Reconnect Gmail</a>
+                    {" "}(sign in as the scheduling inbox), then come back and send.
+                  </span>
+                </div>
+              )}
+
+              <div className="send-actions">
+                <button
+                  className="nr-btn"
+                  disabled={busy || picked.length === 0}
+                  onClick={() => sendPublish(true)}
+                  title={`Send these emails to ${session?.user?.email || "you"} only, subject tagged [TEST]. Nothing is marked published.`}
+                >{m.busy === "test" ? "Sending test…" : "Send test to me only"}</button>
+                <span style={{ flex: 1 }} />
+                <button className="nr-btn" disabled={busy} onClick={close}>Cancel</button>
+                <button
+                  className="publish-btn"
+                  disabled={busy || picked.length === 0 || chosen === 0}
+                  onClick={() => sendPublish(false)}
+                  title={chosen === 0 ? "Nobody is ticked" : `Email ${chosen} staff`}
+                >
+                  {m.busy === "send" ? "Sending…" : `Confirm & Send (${chosen})`}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {notesWeek && (
         <div className="day-popup-backdrop" onClick={() => { setNotesWeek(null); setNoteEditId(null); }}>

@@ -15,7 +15,7 @@ import { buildHtmlRawEmail } from "./_lib/reply.js";
 import { buildScheduleEmailHtml, buildMultiWeekScheduleHtml } from "./_lib/emails.js";
 import { HAENYEO_ICON_B64 } from "./_lib/brand.js";
 import { makeLabeler, LABELS } from "./_lib/labels.js";
-import { isManager, fetchRegisteredStaff } from "./_lib/store.js";
+import { isManager, managerEmail, fetchRegisteredStaff } from "./_lib/store.js";
 
 function readBody(req) {
   if (req.body && typeof req.body === "object") return req.body;
@@ -29,6 +29,18 @@ export default async function handler(req, res) {
 
   const body = readBody(req);
   const { sections, attachments } = body;
+  // Publish dialog fields (all optional — older clients omit them):
+  //   subject      — the confirmed subject line;
+  //   notes        — the manager's message, above the schedule;
+  //   recipientIds — staff ids ticked in the dialog. Only registered staff with
+  //                  those ids are emailed; addresses always come from the DB;
+  //   test         — send ONLY to the signed-in manager (address from their
+  //                  JWT, never the client), subject prefixed "[TEST]". This
+  //                  endpoint never writes publish state either way — the
+  //                  client marks weeks published, and only after a real send.
+  const test = body.test === true;
+  const notes = typeof body.notes === "string" ? body.notes : "";
+  const wantSubject = typeof body.subject === "string" ? body.subject.replace(/^\s*\[TEST\]\s*/i, "").trim() : "";
   // New clients send a `weeks` array; legacy single-week bodies carry the week
   // fields at the top level — wrap them so the rest of the flow is uniform.
   const weeks = Array.isArray(body.weeks) && body.weeks.length
@@ -40,19 +52,38 @@ export default async function handler(req, res) {
   }
   const sectionLabel = w0.sectionLabel;
 
+  // Every attachment must be a real PDF ("JVBERi0" = "%PDF-" in base64). One bad
+  // file means nothing is sent — same rule as the Tip Sheet.
+  const rawAttachments = Array.isArray(attachments) ? attachments : [];
+  if (rawAttachments.some((a) => !a?.filename || !String(a?.b64 || "").startsWith("JVBERi0"))) {
+    return res.status(400).json({ sent: 0, error: "a schedule PDF is missing or invalid — nothing was sent" });
+  }
+  const pdfAttachments = rawAttachments.map((a) => ({ filename: a.filename, b64: a.b64, mime: "application/pdf" }));
+
   try {
-    const { accessToken } = await gmailAccessToken("send-schedule");
-    let recipients = await fetchRegisteredStaff();
-    if (Array.isArray(sections) && sections.length) {
-      const want = sections.map((s) => String(s).toLowerCase());
-      recipients = recipients.filter((r) => want.includes(String(r.section || "").toLowerCase()));
+    let recipients;
+    if (test) {
+      const email = await managerEmail(token);
+      if (!email) return res.status(400).json({ sent: 0, error: "couldn't find your sign-in email for the test" });
+      recipients = [{ name: "Test (you)", personal_email: email }];
+    } else {
+      recipients = await fetchRegisteredStaff();
+      if (Array.isArray(sections) && sections.length) {
+        const want = sections.map((s) => String(s).toLowerCase());
+        recipients = recipients.filter((r) => want.includes(String(r.section || "").toLowerCase()));
+      }
+      if (Array.isArray(body.recipientIds)) {
+        const ids = new Set(body.recipientIds.map(String));
+        recipients = recipients.filter((r) => ids.has(String(r.id)));
+      }
     }
-    const { subject, text, html } = weeks.length > 1
-      ? buildMultiWeekScheduleHtml({ weeks, sectionLabel })
-      : buildScheduleEmailHtml(weeks[0]);
-    const pdfAttachments = (Array.isArray(attachments) ? attachments : [])
-      .filter((a) => a && a.b64 && a.filename)
-      .map((a) => ({ filename: a.filename, b64: a.b64, mime: "application/pdf" }));
+    const { accessToken } = await gmailAccessToken("send-schedule");
+    const email = weeks.length > 1
+      ? buildMultiWeekScheduleHtml({ weeks, sectionLabel }, { subject: wantSubject, notes })
+      : buildScheduleEmailHtml(weeks[0], { subject: wantSubject, notes });
+    const { text, html } = email;
+    // Identical email to the real send, except the [TEST] tag (always the server's call).
+    const subject = test ? `[TEST] ${email.subject}` : email.subject;
     const labeler = makeLabeler(accessToken);
     let labelId = null;
     try { labelId = await labeler.ensure(LABELS.sentSchedules); } catch { /* non-fatal */ }
@@ -73,7 +104,7 @@ export default async function handler(req, res) {
         failures.push(`${r.name}: ${e.message}`);
       }
     }
-    return res.status(200).json({ sent, recipients: recipients.length, failures });
+    return res.status(200).json({ sent, recipients: recipients.length, failures, test });
   } catch (e) {
     console.error(`[send-schedule] ${e.message}`);
     return res.status(200).json({ sent: 0, ...gmailErrorFields(e) });

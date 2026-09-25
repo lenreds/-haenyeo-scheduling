@@ -183,6 +183,18 @@ export async function getRailRequestById(id) {
 }
 
 // True if the bearer token is a valid Supabase user (an authenticated manager).
+// The signed-in manager's own email, from their JWT — the ONLY address a
+// "send test to me" may go to (never an address the client supplies).
+export async function managerEmail(token) {
+  if (!token) return null;
+  try {
+    const { data, error } = await admin().auth.getUser(token);
+    return !error && data?.user?.email ? data.user.email : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function isManager(token) {
   if (!token) return false;
   try {

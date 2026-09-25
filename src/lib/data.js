@@ -108,7 +108,12 @@ export async function triggerSchedulePublish(payload, accessToken) {
       headers: { "Content-Type": "application/json", ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}) },
       body: JSON.stringify(payload),
     });
-    if (!res.ok) return { sent: 0, error: `HTTP ${res.status}` };
+    if (!res.ok) {
+      // Keep the server's reason ("a schedule PDF is missing…"); 413 means the
+      // attached PDFs were over Vercel's 4.5 MB request-body limit.
+      const data = await res.json().catch(() => ({}));
+      return { sent: 0, error: data.error || (res.status === 413 ? "the schedule PDFs are too large to send in one go" : `HTTP ${res.status}`) };
+    }
     return await res.json();
   } catch (e) {
     return { sent: 0, error: e.message };

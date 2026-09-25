@@ -226,6 +226,16 @@ function emailFooterRows({ groups, showToday }) {
     </td></tr>`;
 }
 
+// The manager's message from the Publish dialog: its own card ABOVE the
+// schedule, so staff read it before the table. Empty = nothing added.
+function messageRowHtml(notes) {
+  const t = String(notes || "").trim();
+  if (!t) return "";
+  return `<tr><td style="background:#ffffff;border:1px solid #e6e6e6;border-radius:12px;padding:14px 16px;font-family:${EMAIL_SANS};font-size:13px;line-height:1.5;color:#2b2b2b;">${escHtml(t).replace(/\n/g, "<br>")}</td></tr>
+    <tr><td style="height:12px;font-size:0;line-height:0;">&nbsp;</td></tr>`;
+}
+const withNotesText = (notes, text) => (String(notes || "").trim() ? `${String(notes).trim()}\n\n${text}` : text);
+
 const groupListOf = (p) =>
   p.groups && p.groups.length ? p.groups : [{ label: p.sectionLabel || "Schedule", rows: p.rows || [] }];
 
@@ -234,13 +244,18 @@ const groupListOf = (p) =>
 // sections, orange today column, em-dash off days, manager pill badges.
 // Email-safe fonts only (Courier New stands in for Space Mono).
 // Returns { subject, text, html } — text is the plain-text alternative.
-export function buildScheduleEmailHtml(payload) {
+// opts: { subject?, notes? } from the Publish dialog — the subject replaces the
+// default, the notes go above the table (HTML) / at the top (plain text).
+export function buildScheduleEmailHtml(payload, opts = {}) {
   const { weekLabel, sectionLabel } = payload;
-  const { subject, body: text } = buildScheduleEmail(payload);
+  const built = buildScheduleEmail(payload);
+  const subject = String(opts.subject || "").trim() || built.subject;
+  const text = withNotesText(opts.notes, built.body);
   const todayIdx = Number.isInteger(payload.todayIdx) ? payload.todayIdx : -1;
   const sectionTitle = sectionLabel ? `${sectionLabel.toUpperCase()} SCHEDULE` : "FRONT OF HOUSE SCHEDULE";
   const html = `<div style="margin:0;padding:14px 8px;background:#f4f4f2;">
   <table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center" style="width:100%;max-width:640px;margin:0 auto;">
+    ${messageRowHtml(opts.notes)}
     ${emailHeaderBand({ sectionTitle, rangeLabel: weekLabel })}
     <tr><td style="background:#ffffff;border:1px solid #e6e6e6;border-top:none;padding:0 0 4px;">
       ${scheduleTableHtml(payload)}
@@ -257,19 +272,20 @@ export function buildScheduleEmailHtml(payload) {
 // table with a divider between. Today highlights only within its own week (each
 // payload carries its own todayIdx). weeks[i] is a single-week payload; sectionLabel
 // (from the BOH+Kitchen payload) tags the subject. Returns { subject, text, html }.
-export function buildMultiWeekScheduleHtml({ weeks, sectionLabel }) {
+export function buildMultiWeekScheduleHtml({ weeks, sectionLabel }, opts = {}) {
   const list = weeks || [];
   const first = list[0] || {};
   const last = list[list.length - 1] || {};
   const spanStart = String(first.weekLabel || "").split(" – ")[0];
   const spanEnd = String(last.weekLabel || "").split(" – ")[1] || String(last.weekLabel || "");
   const range = `${spanStart} – ${spanEnd}`;
-  const subject = sectionLabel ? `Haenyeo Schedule — ${sectionLabel} — ${range}` : `Haenyeo Schedule — ${range}`;
+  const subject = String(opts.subject || "").trim()
+    || (sectionLabel ? `Haenyeo Schedule — ${sectionLabel} — ${range}` : `Haenyeo Schedule — ${range}`);
   const heading = sectionLabel ? `Haenyeo — ${sectionLabel} schedule` : "Haenyeo — Front of House schedule";
-  const text =
+  const text = withNotesText(opts.notes,
     `${heading}\n${range}\n\n` +
     list.map((w) => `Week of ${w.weekLabel}\n${scheduleBodyMain(w)}`).join("\n\n\n") +
-    `\n\n${SIG}`;
+    `\n\n${SIG}`);
 
   const sectionTitle = sectionLabel ? `${sectionLabel.toUpperCase()} SCHEDULE` : "FRONT OF HOUSE SCHEDULE";
   const showToday = list.some((w) => Number.isInteger(w.todayIdx) && w.todayIdx >= 0);
@@ -290,6 +306,7 @@ export function buildMultiWeekScheduleHtml({ weeks, sectionLabel }) {
 
   const html = `<div style="margin:0;padding:14px 8px;background:#f4f4f2;">
   <table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center" style="width:100%;max-width:640px;margin:0 auto;">
+    ${messageRowHtml(opts.notes)}
     ${emailHeaderBand({ sectionTitle, rangeLabel: range })}
     ${weekBlocks}
     ${emailFooterRows({ groups: groupListOf(first), showToday })}
