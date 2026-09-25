@@ -903,6 +903,20 @@ function shiftStartHour(code) {
   const m = String(code || "").match(/_(\d{1,2})/);
   return m ? Number(m[1]) : 99;
 }
+// Slot rank: start hour first, then — within the same start hour — the LONGER
+// shift first: CL (stays to close) → SC → FC (cut first). Slots fill in this
+// order and the last one filled is the Swing, the smaller share, because that
+// person is on the floor least. (Isabella 4pm-FC vs Angel 4pm-CL: Angel stays
+// to close, so Angel takes the 0.85 and Isabella the Swing.) Codes with no cut
+// (HOST_4, EXPO_5, a manager-added "7pm") rank after FC at their hour.
+const CUT_RANK = { CL: 0, SC: 1, FC: 2 };
+function shiftCutRank(code) {
+  const m = String(code || "").match(/(CL|SC|FC)\d*$/);
+  return m ? CUT_RANK[m[1]] : 3;
+}
+function compareSlotRank(aCode, bCode) {
+  return shiftStartHour(aCode) - shiftStartHour(bCode) || shiftCutRank(aCode) - shiftCutRank(bCode);
+}
 
 function dateInfoFromIso(isoStr) {
   const [y, m, d] = isoStr.split("-").map(Number);
@@ -1046,8 +1060,11 @@ function workGroupOf(p) {
 }
 function orderWorking(list) {
   const group = (p) => WORK_GROUP_ORDER.indexOf(workGroupOf(p));
-  const start = (p) => shiftStartHour(normalizeShiftCode(p.code, p.role));
-  return [...list].sort((a, b) => group(a) - group(b) || start(a) - start(b) || a.name.localeCompare(b.name));
+  const code = (p) => normalizeShiftCode(p.code, p.role);
+  // Same slot rank as the Tip Sheet (start hour, then CL → SC → FC); only a
+  // genuine tie falls to the name here — for display. Slot assignment keeps
+  // roster order for those (see slotCandidates).
+  return [...list].sort((a, b) => group(a) - group(b) || compareSlotRank(code(a), code(b)) || a.name.localeCompare(b.name));
 }
 // The Tip Sheet's own step on top of staffWorkingOn: a manager is only a Tip
 // Sheet candidate on a floor shift (Expo), not on FM. Everyone on the FOH roster
@@ -1057,12 +1074,11 @@ function onTipSheet(w) {
   return w.role !== "Management" || !!roleFromCode(normalizeShiftCode(w.code, w.role));
 }
 
-function autoAssignSlots(working) {
+// Tip-pool candidates per slot role, in slot order: compareSlotRank, and for a
+// genuine tie (identical rank) ROSTER order — the input order, kept by the
+// stable sort. Never a display sort: slot assignment decides pay.
+function slotCandidates(working) {
   const byRole = {};
-  // Roster order in, NOT orderWorking: slot assignment decides pay, and a tie
-  // must fall the way past tip-outs did (roster order, via the stable sort
-  // below) — never by a display sort. Glance may order its list however it
-  // likes; its "(swing)" marker reads these slots, so the two still agree.
   working.forEach((p) => {
     const code = normalizeShiftCode(p.code, p.role);
     const role = roleFromCode(code);
@@ -1070,12 +1086,14 @@ function autoAssignSlots(working) {
     // Trainees aren't tipped, so they never fill a tip-out slot.
     if (role === "Training") return;
     const slotRole = role === "Expo" ? "Expo (Fri–Sun)" : role;
-    (byRole[slotRole] = byRole[slotRole] || []).push({ name: p.name, code, start: shiftStartHour(code) });
+    (byRole[slotRole] = byRole[slotRole] || []).push({ name: p.name, code });
   });
-  // Earliest start first: Servers slot 1, then 2, then Swing (3rd cut);
-  // Busser/Runner 1 then 2; Bartender before Bartender (Swing).
-  Object.keys(byRole).forEach((r) => byRole[r].sort((a, b) => a.start - b.start));
+  Object.values(byRole).forEach((list) => list.sort((a, b) => compareSlotRank(a.code, b.code)));
+  return byRole;
+}
 
+function autoAssignSlots(working) {
+  const byRole = slotCandidates(working);
   const used = {};
   return SLOTS.map((slot) => {
     const list = byRole[slot.role] || [];
@@ -1083,6 +1101,30 @@ function autoAssignSlots(working) {
     used[slot.role] = idx + 1;
     return { ...slot, autoName: list[idx] ? list[idx].name : "" };
   });
+}
+
+// Genuine ties the app had to settle by roster order, where it matters: people
+// with identical rank (same start hour and cut) who landed in slots worth
+// different points — full vs Swing — or where one got a slot and another
+// didn't. Ties inside equal slots (two 4pm-FC servers in Server 1 and 2) don't
+// change anyone's pay and aren't reported.
+function slotTies(working) {
+  const ties = [];
+  Object.entries(slotCandidates(working)).forEach(([slotRole, list]) => {
+    const slots = SLOTS.filter((s) => s.role === slotRole);
+    for (let i = 0; i < list.length; ) {
+      let j = i + 1;
+      while (j < list.length && compareSlotRank(list[i].code, list[j].code) === 0) j++;
+      if (j - i > 1) {
+        const outcome = (k) => (slots[k] ? `${slots[k].defaultPts}` : "none");
+        if (new Set(Array.from({ length: j - i }, (_, n) => outcome(i + n))).size > 1) {
+          ties.push({ slotRole, code: list[i].code, people: list.slice(i, j).map((p, n) => ({ name: p.name, slot: slots[i + n] || null })) });
+        }
+      }
+      i = j;
+    }
+  });
+  return ties;
 }
 
 // build a 5-week grid (35 days) around a given month, starting Monday
@@ -2059,6 +2101,10 @@ export default function SchedulingHub({ session, onSignOut }) {
     return { ...all, working: all.working.filter(onTipSheet) };
   }, [tipDateIso, fohRoster, patterns, weeklyPatterns, placeholderPatterns, weeklyPlaceholders, groupRosters, overrides, railOffByDate, staffList, offCodes]);
   const autoSlots = useMemo(() => autoAssignSlots(tipWorking.working), [tipWorking]);
+  // Ties the app settled by roster order that change someone's points. A tie
+  // is the manager's call, so it's surfaced, not silently resolved. Custom
+  // Schedule is the manager choosing by hand, so no note there.
+  const tipSlotTies = useMemo(() => (customMode ? [] : slotTies(tipWorking.working)), [tipWorking, customMode]);
 
   function toggleCustomMode() {
     if (!customMode) {
@@ -7152,6 +7198,16 @@ export default function SchedulingHub({ session, onSignOut }) {
 
                 {/* Never drop someone from the sheet silently — payroll needs to
                     know why a name it expected isn't there. */}
+                {tipSlotTies.map((t) => {
+                  const pts = (slot) => (slot ? `${slot.label} (${Number(slot.defaultPts).toFixed(2)})` : "no slot");
+                  const names = t.people.map((p) => p.name);
+                  return (
+                    <div className="tip-off-note screen-only" key={`tie-${t.slotRole}-${t.code}`}>
+                      <AlertTriangle size={12} />
+                      Tie: {names.slice(0, -1).join(", ")} and {names[names.length - 1]} are {names.length === 2 ? "both" : "all"} on {shiftLabelForType(t.code)}, so nothing in the shift decides who gets which slot. The app used roster order: {t.people.map((p) => `${p.name} → ${pts(p.slot)}`).join(", ")}. If that's wrong, turn on Custom Schedule and swap them.
+                    </div>
+                  );
+                })}
                 {slotsExcludedOff.length > 0 && (() => {
                   const names = [...new Set(slotsExcludedOff)];
                   const one = names.length === 1;
