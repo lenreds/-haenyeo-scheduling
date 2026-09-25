@@ -1,5 +1,7 @@
 // POST /api/send-schedule — emails one or more weeks' schedule to registered staff.
-// Manager-JWT auth. Body: { weeks:[weekPayload,…], sections?:["FOH"|"BOH"|"Kitchen"],
+// GET (manager JWT) -> { copyEmail } = env SCHEDULE_COPY_EMAIL, the company
+// inbox copied on real sends when the POST carries includeCopy: true.
+// Manager-JWT auth. Body: { weeks:[weekPayload,…], sections?:["FOH"|"BOH"|"Kitchen"|"Management"],
 // attachments?:[{filename,b64}] } where each weekPayload is
 // { weekLabel, dayHeaders:[7], rows:[{name,shifts:[7],roles?,primaryRole?}] OR
 // groups:[{label,rows}], sectionLabel?, days?:[{dow,date}×7], todayIdx?, managerOn? }.
@@ -22,9 +24,19 @@ function readBody(req) {
   try { return JSON.parse(req.body || "{}"); } catch { return {}; }
 }
 
+// Company inbox that gets a copy of every schedule email. Server-side only
+// (never in the client bundle), so it can change in Vercel without a deploy.
+const copyEmail = () => String(process.env.SCHEDULE_COPY_EMAIL || "").trim() || null;
+
 export default async function handler(req, res) {
-  if (req.method !== "POST") return res.status(405).json({ error: "method_not_allowed" });
   const token = (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+  // GET = the Publish dialog asking which company address a real send would
+  // copy, so it can show it as its own line. Managers only.
+  if (req.method === "GET") {
+    if (!(await isManager(token))) return res.status(401).json({ error: "unauthorized" });
+    return res.status(200).json({ copyEmail: copyEmail() });
+  }
+  if (req.method !== "POST") return res.status(405).json({ error: "method_not_allowed" });
   if (!(await isManager(token))) return res.status(401).json({ error: "unauthorized" });
 
   const body = readBody(req);
@@ -75,6 +87,13 @@ export default async function handler(req, res) {
       if (Array.isArray(body.recipientIds)) {
         const ids = new Set(body.recipientIds.map(String));
         recipients = recipients.filter((r) => ids.has(String(r.id)));
+      }
+      // includeCopy: the dialog's "Company inbox" line was ticked. The address
+      // is only ever the server's own env var, and never duplicated if it's
+      // also a staff address. Never on a test send.
+      const copy = body.includeCopy === true ? copyEmail() : null;
+      if (copy && !recipients.some((r) => String(r.personal_email || "").toLowerCase() === copy.toLowerCase())) {
+        recipients = [...recipients, { name: "Company inbox", personal_email: copy }];
       }
     }
     const { accessToken } = await gmailAccessToken("send-schedule");

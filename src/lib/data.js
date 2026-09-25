@@ -101,6 +101,22 @@ export async function denyInfoUpdate(id) {
 
 // payload: { weeks: [weekPayload,…], sections, attachments: [{filename,b64}] }.
 // Multiple weeks stack in one email with one PDF attached per week.
+// The company inbox copied on schedule emails (server env SCHEDULE_COPY_EMAIL),
+// fetched when the Publish dialog opens so the address never ships in the
+// bundle. -> { copyEmail: string|null } or { error }.
+export async function fetchScheduleCopyEmail(accessToken) {
+  try {
+    const res = await fetch("/api/send-schedule", {
+      headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
+    });
+    if (!res.ok) return { copyEmail: null, error: `HTTP ${res.status}` };
+    const data = await res.json();
+    return { copyEmail: data.copyEmail || null };
+  } catch (e) {
+    return { copyEmail: null, error: e.message };
+  }
+}
+
 export async function triggerSchedulePublish(payload, accessToken) {
   try {
     const res = await fetch("/api/send-schedule", {

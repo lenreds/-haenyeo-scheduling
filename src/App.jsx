@@ -18,6 +18,7 @@ import {
   approveInfoUpdate,
   denyInfoUpdate,
   triggerSchedulePublish,
+  fetchScheduleCopyEmail,
   triggerTipSheetSend,
   submitManualRail,
   fetchWeeklySchedule,
@@ -2105,6 +2106,15 @@ export default function SchedulingHub({ session, onSignOut }) {
   // is the manager's call, so it's surfaced, not silently resolved. Custom
   // Schedule is the manager choosing by hand, so no note there.
   const tipSlotTies = useMemo(() => (customMode ? [] : slotTies(tipWorking.working)), [tipWorking, customMode]);
+  // Manager On for this date — Send Tip Sheet RECIPIENTS ONLY. They receive the
+  // sheet; they are never on it: this list feeds tipSendRoster and nothing
+  // else — not autoSlots, displaySlots, finalSlots or any total. Same gate as
+  // everywhere (staffWorkingOn), so a day-of removal or an approved Request Off
+  // keeps them off it too.
+  const tipManagersOn = useMemo(
+    () => staffWorkingOn(tipDateIso).working.filter((w) => w.role === "Management").map((w) => w.name),
+    [tipDateIso, fohRoster, patterns, weeklyPatterns, placeholderPatterns, weeklyPlaceholders, groupRosters, overrides, railOffByDate, staffList, offCodes]
+  );
 
   function toggleCustomMode() {
     if (!customMode) {
@@ -2449,18 +2459,29 @@ export default function SchedulingHub({ session, onSignOut }) {
   // Everyone who worked that night, in slot order, with the email we'd use.
   // Staff without one are listed too, flagged as skipped, so the manager can see
   // who won't get it rather than finding out afterwards.
+  // Then the Manager On for the date (recipient only — no slot, no payout),
+  // unless they're already listed as a payee (a manager on Expo): once only.
   const tipSendRoster = useMemo(() => {
     const seen = new Set();
     const out = [];
+    const contact = (name) => {
+      const staff = staffList.find((st) => st.name === name);
+      const email = staff && staff.registered && staff.personal_email ? staff.personal_email : null;
+      const reason = email ? null : !staff ? "not on the staff list" : !staff.registered ? "not registered" : "no email on file";
+      return { email, reason };
+    };
     finalSlots.forEach((p) => {
       if (!p.name || seen.has(p.name)) return;
       seen.add(p.name);
-      const staff = staffList.find((st) => st.name === p.name);
-      const email = staff && staff.registered && staff.personal_email ? staff.personal_email : null;
-      out.push({ name: p.name, position: p.label, email, payout: money(p.final || 0) });
+      out.push({ name: p.name, position: p.label, ...contact(p.name), payout: money(p.final || 0) });
+    });
+    tipManagersOn.forEach((name) => {
+      if (seen.has(name)) return;
+      seen.add(name);
+      out.push({ name, position: "Manager on", ...contact(name), payout: null });
     });
     return out;
-  }, [finalSlots, staffList]);
+  }, [finalSlots, staffList, tipManagersOn]);
 
   const tipSendDayLabel = tipDateInfo.dateObj.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
   // "" for a sheet sent before sent_at existed, so the button just reads "Sent ✓".
@@ -3271,7 +3292,7 @@ export default function SchedulingHub({ session, onSignOut }) {
     const bySection = (secs) => reachable
       .filter((s) => secs.includes(String(s.section || "FOH").toLowerCase()))
       .sort((a, b) => a.name.localeCompare(b.name));
-    return { foh: bySection(["foh"]), bk: bySection(["boh", "kitchen"]) };
+    return { foh: bySection(["foh"]), bk: bySection(["boh", "kitchen"]), mgmt: bySection(["management"]) };
   }, [staffList]);
 
   // "Schedule 11/09-11/15/26": first selected week's Monday through the last
@@ -3295,7 +3316,12 @@ export default function SchedulingHub({ session, onSignOut }) {
       notes: "", excluded: [],
       busy: null, error: null, testResult: null,
       sentSections: [], // sections already sent in THIS dialog — a retry won't resend them
+      // Company inbox (server env SCHEDULE_COPY_EMAIL): undefined while loading,
+      // null if not configured. Ticked by default once known.
+      copyEmail: undefined, copyOn: true,
     });
+    fetchScheduleCopyEmail(session?.access_token).then(({ copyEmail }) =>
+      setPublishModal((p) => (p ? { ...p, copyEmail } : p)));
   }
   function togglePublishWeek(iso) {
     setPublishModal((m) => {
@@ -3350,16 +3376,28 @@ export default function SchedulingHub({ session, onSignOut }) {
     }
 
     const shared = { subject: m.subject.trim(), notes: m.notes.trim() };
+    // copy: whether the company inbox gets this section's email. It gets both
+    // distinct schedule emails (FOH, BOH & Kitchen); the managers' email is the
+    // FOH one again, so it isn't copied twice. testable: the test send covers
+    // each distinct email once.
+    const copyOn = !!(m.copyEmail && m.copyOn);
+    const fohPayload = { weeks: pdfs.weeks.map(buildSchedulePayload), attachments: pdfs.foh };
     const sections = [
-      { key: "foh", label: "Front of House", people: publishRecipients.foh, payload: { weeks: pdfs.weeks.map(buildSchedulePayload), sections: ["FOH"], attachments: pdfs.foh } },
-      { key: "bk", label: "BOH & Kitchen", people: publishRecipients.bk, payload: { weeks: pdfs.weeks.map(buildBohKitchenPayload), sections: ["BOH", "Kitchen"], attachments: pdfs.bk } },
+      { key: "foh", label: "Front of House", people: publishRecipients.foh, copy: true, testable: true, payload: { ...fohPayload, sections: ["FOH"] } },
+      { key: "bk", label: "BOH & Kitchen", people: publishRecipients.bk, copy: true, testable: true, payload: { weeks: pdfs.weeks.map(buildBohKitchenPayload), sections: ["BOH", "Kitchen"], attachments: pdfs.bk } },
+      // Managers get the Front of House schedule (its sheet carries the Manager On row).
+      { key: "mgmt", label: "Management", people: publishRecipients.mgmt, copy: false, testable: false, payload: { ...fohPayload, sections: ["Management"] } },
     ].map((sec) => ({ ...sec, ids: sec.people.filter((r) => !m.excluded.includes(r.id)).map((r) => r.id) }));
+    const hasRecipients = (sec) => sec.ids.length > 0 || (sec.copy && copyOn);
 
     const jobs = test
-      ? sections
-      : sections.filter((sec) => sec.ids.length > 0 && !m.sentSections.includes(sec.key));
+      ? sections.filter((sec) => sec.testable)
+      : sections.filter((sec) => hasRecipients(sec) && !m.sentSections.includes(sec.key));
     const results = await Promise.all(jobs.map((sec) =>
-      triggerSchedulePublish({ ...sec.payload, ...shared, ...(test ? { test: true } : { recipientIds: sec.ids }) }, token)
+      triggerSchedulePublish({
+        ...sec.payload, ...shared,
+        ...(test ? { test: true } : { recipientIds: sec.ids, includeCopy: sec.copy && copyOn }),
+      }, token)
     ));
 
     const reconnect = results.some((r) => r?.needsReconnect);
@@ -3373,13 +3411,13 @@ export default function SchedulingHub({ session, onSignOut }) {
         ...p, busy: null,
         error: failed.length ? `Test didn't go out — ${failedText}` : null,
         testResult: failed.length ? null
-          : `Test sent to ${session?.user?.email || "you"} — ${jobs.length} emails (${jobs.map((s) => s.label).join(", ")}). Nothing was marked published.`,
+          : `Test sent to ${session?.user?.email || "you"} — ${jobs.length} emails (${jobs.map((s) => s.label).join(", ")}; managers get the Front of House one). Nothing was marked published.`,
       }));
       return;
     }
 
     const nowSent = [...m.sentSections, ...jobs.filter((sec) => !failed.includes(sec)).map((sec) => sec.key)];
-    const pendingSections = sections.filter((sec) => sec.ids.length > 0 && !nowSent.includes(sec.key));
+    const pendingSections = sections.filter((sec) => hasRecipients(sec) && !nowSent.includes(sec.key));
     if (pendingSections.length) {
       // Keep the dialog open; Confirm retries only the section(s) that failed.
       setPublishModal((p) => ({
@@ -7986,8 +8024,8 @@ export default function SchedulingHub({ session, onSignOut }) {
                     />
                     <span className="send-rcpt-name">{r.name}</span>
                     <span className="send-rcpt-pos">{r.position}</span>
-                    <span className="send-rcpt-email">{r.email || "no email — will be skipped"}</span>
-                    <span className="send-rcpt-payout">${r.payout}</span>
+                    <span className="send-rcpt-email">{r.email || `${r.reason || "no email"} — will be skipped`}</span>
+                    <span className="send-rcpt-payout">{r.payout != null ? `$${r.payout}` : "—"}</span>
                   </label>
                 ))}
               </div>
@@ -8051,8 +8089,11 @@ export default function SchedulingHub({ session, onSignOut }) {
         const groups = [
           { key: "foh", label: "Front of House", people: publishRecipients.foh },
           { key: "bk", label: "BOH & Kitchen", people: publishRecipients.bk },
+          { key: "mgmt", label: "Management", people: publishRecipients.mgmt },
         ];
         const chosen = groups.reduce((n, g) => n + g.people.filter((r) => !m.excluded.includes(r.id)).length, 0);
+        const copyOn = !!(m.copyEmail && m.copyOn);
+        const anyone = chosen > 0 || copyOn;
         const close = () => { if (!busy) setPublishModal(null); };
         return (
           <div className="day-popup-backdrop" onClick={close}>
@@ -8064,12 +8105,14 @@ export default function SchedulingHub({ session, onSignOut }) {
 
               {/* The blast radius in one line, before anything else. Tracks
                   the week and recipient checkboxes live. */}
-              <div className={`publish-summary ${picked.length === 0 || chosen === 0 ? "publish-summary-none" : ""}`}>
+              <div className={`publish-summary ${picked.length === 0 || !anyone ? "publish-summary-none" : ""}`}>
                 {picked.length === 0
                   ? "No weeks selected — nothing will be sent."
-                  : chosen === 0
+                  : !anyone
                   ? "Nobody selected — nothing will be sent."
-                  : `Sending ${picked.length} week${picked.length === 1 ? "" : "s"} to ${chosen} ${chosen === 1 ? "person" : "people"}.`}
+                  : `Sending ${picked.length} week${picked.length === 1 ? "" : "s"} to ${
+                      chosen > 0 ? `${chosen} ${chosen === 1 ? "person" : "people"}` : ""
+                    }${chosen > 0 && copyOn ? " and " : ""}${copyOn ? "the company inbox" : ""}.`}
               </div>
 
               <div className="send-section-label">
@@ -8087,6 +8130,25 @@ export default function SchedulingHub({ session, onSignOut }) {
 
               <div className="send-section-label">
                 Recipients <span className="nr-count">{chosen}</span>
+              </div>
+              {/* Company inbox: its own line, ticked by default. The address comes
+                  from the server (env SCHEDULE_COPY_EMAIL), not the bundle. */}
+              <div className="publish-group-label">Company inbox</div>
+              <div className="send-recipients">
+                <label className={`send-rcpt ${m.copyEmail ? "" : "send-rcpt-noemail"}`}>
+                  <input
+                    type="checkbox"
+                    disabled={busy || !m.copyEmail || m.sentSections.includes("foh") || m.sentSections.includes("bk")}
+                    checked={copyOn}
+                    onChange={() => setPublishModal((p) => ({ ...p, copyOn: !p.copyOn }))}
+                  />
+                  <span className="send-rcpt-name">Company</span>
+                  <span className="send-rcpt-email">
+                    {m.copyEmail === undefined ? "checking…"
+                      : m.copyEmail ? `${m.copyEmail} — gets the FOH and BOH & Kitchen emails`
+                      : "not set up — add SCHEDULE_COPY_EMAIL in Vercel to copy the company inbox"}
+                  </span>
+                </label>
               </div>
               {groups.map((g) => (
                 <React.Fragment key={g.key}>
@@ -8160,11 +8222,11 @@ export default function SchedulingHub({ session, onSignOut }) {
                 <button className="nr-btn" disabled={busy} onClick={close}>Cancel</button>
                 <button
                   className="publish-btn"
-                  disabled={busy || picked.length === 0 || chosen === 0}
+                  disabled={busy || picked.length === 0 || !anyone}
                   onClick={() => sendPublish(false)}
-                  title={chosen === 0 ? "Nobody is ticked" : `Email ${chosen} staff`}
+                  title={!anyone ? "Nobody is ticked" : `Email ${chosen} staff${copyOn ? " + the company inbox" : ""}`}
                 >
-                  {m.busy === "send" ? "Sending…" : `Confirm & Send (${chosen})`}
+                  {m.busy === "send" ? "Sending…" : `Confirm & Send (${chosen + (copyOn ? 1 : 0)})`}
                 </button>
               </div>
             </div>
