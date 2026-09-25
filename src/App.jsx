@@ -5422,6 +5422,8 @@ export default function SchedulingHub({ session, onSignOut }) {
         .send-rcpt-noemail .send-rcpt-email { color: #e79289; font-style: italic; }
         .send-error { margin-top: 12px; font-size: 12px; color: #e79289; }
         .send-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
+        .publish-summary { font-size: 15px; font-weight: 700; color: var(--txt); margin: 2px 0 12px; }
+        .publish-summary-none { color: #e79289; }
         .publish-group-label { font-family: 'Space Mono', monospace; font-size: 9.5px; letter-spacing: 1px; text-transform: uppercase; color: var(--muted); margin: 10px 0 4px; }
         .publish-sent-tag { color: #7fb392; }
         .publish-test-ok { display: flex; align-items: center; gap: 6px; margin-top: 12px; font-size: 12px; color: #7fb392; }
@@ -7998,6 +8000,16 @@ export default function SchedulingHub({ session, onSignOut }) {
               <div className="day-popup-head">
                 <div className="day-popup-date">Publish schedule</div>
                 <button className="day-popup-close" disabled={busy} onClick={close}><X size={15} /></button>
+              </div>
+
+              {/* The blast radius in one line, before anything else. Tracks
+                  the week and recipient checkboxes live. */}
+              <div className={`publish-summary ${picked.length === 0 || chosen === 0 ? "publish-summary-none" : ""}`}>
+                {picked.length === 0
+                  ? "No weeks selected — nothing will be sent."
+                  : chosen === 0
+                  ? "Nobody selected — nothing will be sent."
+                  : `Sending ${picked.length} week${picked.length === 1 ? "" : "s"} to ${chosen} ${chosen === 1 ? "person" : "people"}.`}
               </div>
 
               <div className="send-section-label">
