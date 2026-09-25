@@ -13,9 +13,7 @@ const DEV_BYPASS = import.meta.env.DEV && import.meta.env.VITE_AUTH_BYPASS === "
 
 export default function AuthGate() {
   if (DEV_BYPASS) {
-    // A test harness may preset window.__DEV_SESSION__ (e.g. to drive the
-    // Publish dialog end to end); otherwise there's no session, as before.
-    return <SchedulingHub session={window.__DEV_SESSION__ || null} onSignOut={() => {}} />;
+    return <SchedulingHub session={null} onSignOut={() => {}} />;
   }
   return <AuthedGate />;
 }
