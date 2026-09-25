@@ -4754,6 +4754,9 @@ export default function SchedulingHub({ session, onSignOut }) {
         .add-payout-btn { color: var(--accent); border-color: var(--line2); }
         .tip-out-toggle.on { color: var(--accent); border-color: var(--line2); }
         .tip-out-toggle:not(.on) { color: #e79289; }
+        /* Lighter tint on the dark screen (#B23A2F is ~3.2:1 there); print and
+           the PDF keep #B23A2F via their !important rules. */
+        .tip-out-na { color: #e79289; }
         .week-range-current { background: rgba(200,149,108,0.18); color: var(--accent); }
 
         /* ---- calendar ---- */
