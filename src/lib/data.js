@@ -260,14 +260,33 @@ export async function setShiftOptionOff(role, code, isOff) {
 
 // Add one option to a role's dropdown. sort_order defaults to the end of the
 // role's current list so new shifts append rather than jumping the order.
-export async function insertRoleShiftOption({ role, code, label, sortOrder }) {
+export async function insertRoleShiftOption({ role, code, label, sortOrder, isOff = false }) {
+  // is_off only when set, so adding an ordinary shift still works on a database
+  // that hasn't run migration 0019.
+  const row = { role, code, label, sort_order: sortOrder, ...(isOff ? { is_off: true } : {}) };
   const { data, error } = await supabase
     .from("role_shift_options")
-    .insert({ role, code, label, sort_order: sortOrder })
+    .insert(row)
     .select()
     .single();
   if (error) throw error;
   return data;
+}
+
+// The shift editor's Save for an existing option: its name and/or "Counts as
+// off". The code never changes — schedules store codes, so renaming a label
+// relabels every cell already using it rather than orphaning them.
+export async function updateRoleShiftOption(role, code, { label, isOff }) {
+  const patch = {};
+  if (label !== undefined) patch.label = label;
+  if (isOff !== undefined) patch.is_off = !!isOff;
+  const { error } = await supabase.from("role_shift_options").update(patch).eq("role", role).eq("code", code);
+  if (error) {
+    if (/is_off/.test(error.message || "")) {
+      throw new Error("\"Counts as off\" needs migration 0019 — run it in the Supabase SQL editor.");
+    }
+    throw error;
+  }
 }
 
 // Remove an option from the dropdown. Deliberately does NOT touch
@@ -714,6 +733,53 @@ export async function updatePadNote(id, note) {
 export async function deletePadNote(id) {
   const { error } = await supabase.from("schedule_pad_notes").delete().eq("id", id);
   if (error) throw isMissingTable(error) ? new Error(PAD_MISSING) : error;
+}
+
+/* ------------------------------------------------------------ role_duties -- */
+// Responsibilities & Duties reference sheet (migration 0020). Pre-migration the
+// read returns [] with dutiesAvailable() false, and the tab says to run it.
+
+let dutiesPresent = null;
+export function dutiesAvailable() {
+  return dutiesPresent !== false;
+}
+const DUTIES_MISSING = "Responsibilities & Duties needs migration 0020 — run it in the Supabase SQL editor.";
+
+export async function fetchRoleDuties() {
+  const { data, error } = await supabase
+    .from("role_duties")
+    .select("id, role, duty, sort_order, created_at")
+    .order("sort_order", { ascending: true })
+    .order("created_at", { ascending: true });
+  if (error) {
+    if (isMissingTable(error)) { dutiesPresent = false; return []; }
+    throw error;
+  }
+  dutiesPresent = true;
+  return data || [];
+}
+
+export async function insertRoleDuty({ role, duty, sortOrder }) {
+  const { data, error } = await supabase
+    .from("role_duties")
+    .insert({ role, duty, sort_order: sortOrder })
+    .select()
+    .single();
+  if (error) throw isMissingTable(error) ? new Error(DUTIES_MISSING) : error;
+  return data;
+}
+
+export async function updateRoleDuty(id, fields) {
+  const patch = { updated_at: new Date().toISOString() };
+  if (fields.duty !== undefined) patch.duty = fields.duty;
+  if (fields.sortOrder !== undefined) patch.sort_order = fields.sortOrder;
+  const { error } = await supabase.from("role_duties").update(patch).eq("id", id);
+  if (error) throw isMissingTable(error) ? new Error(DUTIES_MISSING) : error;
+}
+
+export async function deleteRoleDuty(id) {
+  const { error } = await supabase.from("role_duties").delete().eq("id", id);
+  if (error) throw isMissingTable(error) ? new Error(DUTIES_MISSING) : error;
 }
 
 /* -------------------------------------------------------- rail_view_state -- */

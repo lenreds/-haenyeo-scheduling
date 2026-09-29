@@ -46,7 +46,12 @@ import {
   calendarNotesAvailable,
   insertRoleShiftOption,
   deleteRoleShiftOption,
-  setShiftOptionOff,
+  updateRoleShiftOption,
+  fetchRoleDuties,
+  insertRoleDuty,
+  updateRoleDuty,
+  deleteRoleDuty,
+  dutiesAvailable,
   fetchGeneralNotes,
   insertGeneralNote,
   updateGeneralNote,
@@ -740,6 +745,7 @@ const ROLE_SHORT = { Bar: "Bar", Host: "Host", Servers: "Server", "Busser/Runner
 // role a shift belongs to, so a hand-rolled code would lose its role color and
 // its Tip Sheet slot.
 // Roles whose dropdowns the Manage Shifts panel exposes, in display order.
+const DUTY_ROLES = ["Server", "Busser/Runner", "Expo", "Host", "Bartender", "BOH", "Kitchen", "Management"];
 const SHIFT_MANAGED_ROLES = ["Bar", "Host", "Servers", "Busser/Runner", "Expo", "Training", "BOH", "Kitchen", "Management"];
 const ROLE_CODE_PREFIX = {
   Servers: "SV", "Busser/Runner": "BR", Bar: "BAR", Host: "HOST", Expo: "EXPO",
@@ -1367,8 +1373,6 @@ export default function SchedulingHub({ session, onSignOut }) {
   const [quickNoteBusy, setQuickNoteBusy] = useState(false);
   const [quickNoteMsg, setQuickNoteMsg] = useState("");
   // Manage Shifts (brief item 3): which role has its add-field open, and its text
-  const [shiftAddRole, setShiftAddRole] = useState(null);
-  const [shiftAddLabel, setShiftAddLabel] = useState("");
   const [shiftMsg, setShiftMsg] = useState("");
   // Today at a Glance swap dialog (brief item 5)
   // Which day the "Today at a Glance" box is showing (brief item 7). Driven by
@@ -2016,48 +2020,76 @@ export default function SchedulingHub({ session, onSignOut }) {
   }
 
   // ---- Manage Shifts (brief item 3) ---------------------------------------
-  async function handleAddShiftOption(role) {
-    const label = shiftAddLabel.trim();
-    if (!label) return;
+  // ---- Shift editor (Staff › Manage Shifts) --------------------------------
+  // Chips show just the shift name; clicking one — or "+ Add Shift" — opens
+  // this editor, where the name and "Counts as off" are set together. So
+  // whether a shift is an off state is decided once, when it's made, not
+  // toggled from a checkbox on every chip.
+  // shiftEditor: { role, code (null = new), label, isOff, confirmDelete, busy, error }
+  const [shiftEditor, setShiftEditor] = useState(null);
+  function openShiftEditor(role, opt = null) {
+    setShiftMsg("");
+    setShiftEditor({
+      role, code: opt ? opt.code : null,
+      label: opt ? opt.label : "", isOff: opt ? !!opt.isOff : false,
+      confirmDelete: false, busy: false, error: null,
+    });
+  }
+  async function saveShiftEditor() {
+    const ed = shiftEditor;
+    if (!ed || ed.busy) return;
+    const role = ed.role;
+    const label = ed.label.trim();
+    if (!label) { setShiftEditor({ ...ed, error: "Give the shift a name." }); return; }
     const current = roleOptions[role] || [];
-    if (current.some((o) => o.label.toLowerCase() === label.toLowerCase())) {
-      setShiftMsg(`${role} already has a "${label}" option.`);
+    if (current.some((o) => o.code !== ed.code && o.label.toLowerCase() === label.toLowerCase())) {
+      setShiftEditor({ ...ed, error: `${role} already has a "${label}" shift.` });
       return;
     }
-    const code = shiftCodeFor(role, label, current.map((o) => o.code));
-    const sortOrder = current.length;
-    // Optimistic: the dropdowns pick it up immediately, and we roll back if the
-    // write fails so the UI never claims an option that isn't saved.
-    setRoleOptions((prev) => ({ ...prev, [role]: [...(prev[role] || []), { code, label }] }));
-    setShiftAddLabel("");
-    setShiftAddRole(null);
-    setShiftMsg("");
+    setShiftEditor({ ...ed, busy: true, error: null });
+    if (!ed.code) {
+      // New shift. Optimistic: the dropdowns pick it up immediately; rolled
+      // back if the write fails so the UI never claims an unsaved option.
+      const code = shiftCodeFor(role, label, current.map((o) => o.code));
+      setRoleOptions((prev) => ({ ...prev, [role]: [...(prev[role] || []), { code, label, isOff: ed.isOff }] }));
+      try {
+        await insertRoleShiftOption({ role, code, label, sortOrder: current.length, isOff: ed.isOff });
+        setShiftEditor(null);
+        setShiftMsg(`Added "${label}" to ${role}${ed.isOff ? " — counts as off" : ""}.`);
+      } catch (e) {
+        console.error("Add shift option failed:", e);
+        setRoleOptions((prev) => ({ ...prev, [role]: (prev[role] || []).filter((o) => o.code !== code) }));
+        setShiftEditor((p) => (p ? { ...p, busy: false, error: `Couldn't add "${label}": ${e.message || e}` } : p));
+      }
+      return;
+    }
+    // Existing shift: name and/or "Counts as off". The code never changes.
+    const before = current.find((o) => o.code === ed.code);
+    const patch = {};
+    if (!before || before.label !== label) patch.label = label;
+    if (!before || !!before.isOff !== ed.isOff) patch.isOff = ed.isOff;
+    if (!Object.keys(patch).length) { setShiftEditor(null); return; }
+    const apply = (o) => setRoleOptions((prev) => ({
+      ...prev, [role]: (prev[role] || []).map((x) => (x.code === ed.code ? { ...x, ...o } : x)),
+    }));
+    apply({ label, isOff: ed.isOff });
     try {
-      await insertRoleShiftOption({ role, code, label, sortOrder });
-      setShiftMsg(looksLikeOffLabel(label)
-        ? `Added "${label}" to ${role}. If it means off, tick "Counts as off" on it.`
-        : `Added "${label}" to ${role}.`);
+      await updateRoleShiftOption(role, ed.code, patch);
+      setShiftEditor(null);
+      setShiftMsg(`Saved "${label}" (${role}).`);
     } catch (e) {
-      console.error("Add shift option failed:", e);
-      setRoleOptions((prev) => ({ ...prev, [role]: (prev[role] || []).filter((o) => o.code !== code) }));
-      setShiftMsg(`Couldn't add "${label}": ${e.message || e}`);
+      console.error("Update shift option failed:", e);
+      if (before) apply({ label: before.label, isOff: !!before.isOff });
+      setShiftEditor((p) => (p ? { ...p, busy: false, error: `Couldn't save: ${e.message || e}` } : p));
     }
   }
-  // "Counts as off" checkbox. Optimistic; rolls back if the write fails.
-  async function toggleShiftOptionOff(role, code, label, isOff) {
-    const flip = (v) => setRoleOptions((prev) => ({
-      ...prev,
-      [role]: (prev[role] || []).map((o) => (o.code === code ? { ...o, isOff: v } : o)),
-    }));
-    flip(isOff);
-    setShiftMsg("");
-    try {
-      await setShiftOptionOff(role, code, isOff);
-    } catch (e) {
-      console.error("Counts-as-off update failed:", e);
-      flip(!isOff);
-      setShiftMsg(`Couldn't update "${label}": ${e.message || e}`);
-    }
+  async function deleteFromShiftEditor() {
+    const ed = shiftEditor;
+    if (!ed?.code || ed.busy) return;
+    if (!ed.confirmDelete) { setShiftEditor({ ...ed, confirmDelete: true }); return; }
+    setShiftEditor(null);
+    const saved = (roleOptions[ed.role] || []).find((o) => o.code === ed.code);
+    await handleRemoveShiftOption(ed.role, ed.code, saved?.label || ed.code);
   }
   async function handleRemoveShiftOption(role, code, label) {
     if (code === "OFF") return; // Off is structural, not a real shift
@@ -2073,6 +2105,106 @@ export default function SchedulingHub({ session, onSignOut }) {
       setShiftMsg(`Couldn't remove "${label}": ${e.message || e}`);
     }
   }
+
+  // ---- Staff sub-tabs -------------------------------------------------------
+  // Staff & Roles / Manage Shifts / Responsibilities & Duties. Plain state, so
+  // it remembers the sub-tab while the app stays open and always starts on
+  // Staff & Roles on a fresh load.
+  const [staffView, setStaffView] = useState("roles");
+
+  // ---- Responsibilities & Duties (migration 0020) ---------------------------
+  // A written reference list per role: add, edit, reorder, delete, print. No
+  // assignment, tracking or checklists.
+  const [duties, setDuties] = useState([]); // [{ id, role, duty, sort_order }]
+  const [dutiesLoaded, setDutiesLoaded] = useState(false);
+  const [dutyDrafts, setDutyDrafts] = useState({}); // role -> new-duty text
+  const [dutyEdit, setDutyEdit] = useState(null); // { id, text }
+  const [dutyMsg, setDutyMsg] = useState("");
+  const [dutiesPrintRole, setDutiesPrintRole] = useState(undefined); // undefined = not printing; null = all roles
+  useEffect(() => {
+    if (tab !== "staff" || staffView !== "duties" || dutiesLoaded) return;
+    fetchRoleDuties()
+      .then((rows) => { setDuties(rows); setDutiesLoaded(true); })
+      .catch((e) => { console.error("Duties load failed:", e); setDutyMsg(`Couldn't load duties: ${e.message || e}`); });
+  }, [tab, staffView, dutiesLoaded]);
+  const dutiesFor = (role) => duties.filter((d) => d.role === role).sort((a, b) => a.sort_order - b.sort_order);
+
+  async function addDuty(role) {
+    const text = String(dutyDrafts[role] || "").trim();
+    if (!text) return;
+    const list = dutiesFor(role);
+    const sortOrder = list.length ? list[list.length - 1].sort_order + 1 : 0;
+    const tempId = `tmp-${Date.now()}`;
+    setDuties((prev) => [...prev, { id: tempId, role, duty: text, sort_order: sortOrder }]);
+    setDutyDrafts((d) => ({ ...d, [role]: "" }));
+    setDutyMsg("");
+    try {
+      const row = await insertRoleDuty({ role, duty: text, sortOrder });
+      setDuties((prev) => prev.map((d) => (d.id === tempId ? row : d)));
+    } catch (e) {
+      setDuties((prev) => prev.filter((d) => d.id !== tempId));
+      setDutyDrafts((d) => ({ ...d, [role]: text }));
+      setDutyMsg(e.message || String(e));
+    }
+  }
+  async function saveDutyEdit() {
+    if (!dutyEdit) return;
+    const { id, text } = dutyEdit;
+    setDutyEdit(null);
+    const before = duties.find((d) => d.id === id);
+    const duty = text.trim();
+    if (!before || duty === before.duty) return;
+    if (!duty) { removeDuty(id); return; } // emptied = deleted
+    setDuties((prev) => prev.map((d) => (d.id === id ? { ...d, duty } : d)));
+    try {
+      await updateRoleDuty(id, { duty });
+    } catch (e) {
+      setDuties((prev) => prev.map((d) => (d.id === id ? before : d)));
+      setDutyMsg(e.message || String(e));
+    }
+  }
+  async function removeDuty(id) {
+    const before = duties;
+    setDuties((prev) => prev.filter((d) => d.id !== id));
+    try {
+      await deleteRoleDuty(id);
+    } catch (e) {
+      setDuties(before);
+      setDutyMsg(e.message || String(e));
+    }
+  }
+  // Swap a duty with its neighbour (dir -1 = up, +1 = down) by swapping their
+  // sort_order values.
+  async function moveDuty(role, id, dir) {
+    const list = dutiesFor(role);
+    const i = list.findIndex((d) => d.id === id);
+    const j = i + dir;
+    if (i < 0 || j < 0 || j >= list.length) return;
+    const a = list[i], b = list[j];
+    const before = duties;
+    setDuties((prev) => prev.map((d) => (d.id === a.id ? { ...d, sort_order: b.sort_order } : d.id === b.id ? { ...d, sort_order: a.sort_order } : d)));
+    try {
+      await Promise.all([updateRoleDuty(a.id, { sortOrder: b.sort_order }), updateRoleDuty(b.id, { sortOrder: a.sort_order })]);
+    } catch (e) {
+      setDuties(before);
+      setDutyMsg(e.message || String(e));
+    }
+  }
+  // Print the whole reference sheet (role null) or one role, portrait, via the
+  // print-only .duties-print block.
+  function printDuties(role) {
+    setDutiesPrintRole(role);
+  }
+  useEffect(() => {
+    if (dutiesPrintRole === undefined) return;
+    document.body.classList.add("printing-duties");
+    const t = setTimeout(() => {
+      window.print();
+      document.body.classList.remove("printing-duties");
+      setDutiesPrintRole(undefined);
+    }, 50);
+    return () => clearTimeout(t);
+  }, [dutiesPrintRole]);
 
   async function handleAddNote() {
     const text = noteDraft.trim();
@@ -4806,12 +4938,23 @@ export default function SchedulingHub({ session, onSignOut }) {
           .schedule-print-portal [data-sheet="foh"] .sh-group { break-inside: avoid; page-break-inside: avoid; }
           body.printing-qr .hub > *:not(.qr-print-sheet) { display: none !important; }
           body.printing-qr .qr-print-sheet { display: block !important; }
+          body.printing-duties .hub > *:not(.duties-print) { display: none !important; }
+          body.printing-duties .duties-print { display: block !important; page: dutiesPortrait; }
+          .duties-print { color: #1a1a1a; font-family: 'Manrope', sans-serif; }
+          .duties-print-head { border-bottom: 2px solid #2b2a25; padding-bottom: 10px; margin-bottom: 18px; }
+          .duties-print-brand { font-family: 'Space Mono', monospace; font-weight: 700; font-size: 16px; letter-spacing: 5px; }
+          .duties-print-title { font-family: 'Space Mono', monospace; font-weight: 700; font-size: 10.5px; letter-spacing: 2px; text-transform: uppercase; color: #c8956c; margin-top: 3px; }
+          .duties-print-role { break-inside: avoid; margin-bottom: 16px; }
+          .duties-print-role h2 { font-size: 14px; margin: 0 0 6px; padding-bottom: 3px; border-bottom: 1px solid #d0d0d0; }
+          .duties-print-role ol { margin: 0; padding-left: 20px; font-size: 12px; line-height: 1.55; }
+          .duties-print-empty { font-size: 11px; font-style: italic; color: #8a8a8a; margin: 0; }
         }
         /* Tip sheet + schedule print landscape by default; the QR sheet keeps its
            branded portrait layout via a named page. */
         @page { size: landscape; margin: 0.35in; }
         @page scheduleLandscape { size: landscape; margin: 0.35in; }
         @page qrPortrait { size: portrait; margin: 0.4in; }
+        @page dutiesPortrait { size: portrait; margin: 0.6in; }
         body.printing-qr .qr-print-sheet { page: qrPortrait; }
         .schedule-print-portal { display: none; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
         /* PDF capture (html2canvas on the live card) doesn't see @media print, so
@@ -5611,6 +5754,40 @@ export default function SchedulingHub({ session, onSignOut }) {
         .shift-mgmt-role { font-family: 'Space Mono', monospace; font-size: 10.5px; letter-spacing: 1.5px; text-transform: uppercase; font-weight: 700; width: 120px; flex-shrink: 0; padding-top: 4px; }
         .shift-mgmt-opts { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex: 1; min-width: 0; }
         .shift-mgmt-chip { display: inline-flex; align-items: center; gap: 3px; background: #1a1a1a; border: 1px solid var(--line2); border-radius: 20px; padding: 3px 5px 3px 11px; font-family: 'Space Mono', monospace; font-size: 10.5px; color: var(--txt2); }
+        /* Chips are buttons that open the shift editor; OFF tags an off state. */
+        .shift-chip-btn { cursor: pointer; padding-right: 11px; }
+        .shift-chip-btn:hover { border-color: var(--accent); color: var(--txt); }
+        .shift-off-tag { display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 4px; background: rgba(200,149,108,0.18); color: var(--accent); font-family: 'Space Mono', monospace; font-size: 8.5px; font-weight: 700; letter-spacing: 0.8px; line-height: 15px; }
+        .shift-editor { width: min(420px, calc(100vw - 32px)); }
+        .shift-editor-toggle { display: flex; align-items: center; gap: 8px; margin-top: 14px; font-weight: 700; font-size: 13px; color: var(--txt); cursor: pointer; }
+        .shift-editor-toggle input { accent-color: var(--accent); width: 15px; height: 15px; }
+        .shift-editor-explain { font-size: 11.5px; color: var(--txt2); margin: 3px 0 0 23px; line-height: 1.4; }
+        .shift-editor-hint { display: block; margin: 8px 0 0 23px; white-space: normal; font-size: 11px; }
+        /* Responsibilities & Duties */
+        .duties-head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+        .duties-head .print-btn { margin-left: auto; flex-shrink: 0; }
+        .duty-role { border: 1px solid var(--line2); border-radius: 9px; padding: 10px 12px; margin-bottom: 12px; }
+        .duty-role-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+        .duty-role-name { font-weight: 700; font-size: 13.5px; color: var(--txt); }
+        .duty-role-count { font-family: 'Space Mono', monospace; font-size: 10px; color: var(--muted); }
+        .duty-print-one { margin-left: auto; }
+        .duty-list { margin: 0 0 8px; padding-left: 22px; }
+        .duty-item { display: list-item; list-style: decimal; padding: 4px 0; font-size: 13px; color: var(--txt); }
+        .duty-item::after { content: ""; display: table; clear: both; }
+        .duty-item .duty-actions { float: right; margin-left: 8px; }
+        .duty-item .duty-edit { width: calc(100% - 110px); }
+        .duty-item::marker { color: var(--txt2); font-family: 'Space Mono', monospace; font-size: 11px; }
+        .duty-text { flex: 1; cursor: text; line-height: 1.4; }
+        .duty-edit { flex: 1; }
+        .duty-actions { display: inline-flex; gap: 3px; opacity: 0.35; }
+        .duty-item:hover .duty-actions, .duty-actions:focus-within { opacity: 1; }
+        .duty-btn { background: none; border: 1px solid var(--line2); border-radius: 4px; color: var(--txt2); font-size: 11px; line-height: 1; padding: 3px 6px; cursor: pointer; }
+        .duty-btn:disabled { opacity: 0.3; cursor: default; }
+        .duty-del:hover { color: #e79289; border-color: #e79289; }
+        .duty-add { display: flex; gap: 8px; }
+        .duty-add .notes-input { flex: 1; }
+        /* The duties print sheet: rendered only while printing, never on screen. */
+        .duties-print { display: none; }
         .shift-mgmt-chip.is-off { border-style: dashed; }
         .shift-off-check { display: inline-flex; align-items: center; gap: 3px; margin-left: 6px; padding-left: 7px; border-left: 1px solid var(--line2); font-size: 9px; letter-spacing: 0.3px; color: var(--muted); cursor: pointer; white-space: nowrap; }
         .shift-mgmt-chip.is-off .shift-off-check { color: var(--accent); }
@@ -7413,11 +7590,19 @@ export default function SchedulingHub({ session, onSignOut }) {
         <div className="cal-wrap" key="staff">
           <div className="cal-card">
             <div className="week-header" style={{ marginBottom: 14 }}>
-              <div className="week-range"><Users size={14} style={{ verticalAlign: "-2px", marginRight: 6 }} />Staff &amp; Roles</div>
+              <div className="week-range"><Users size={14} style={{ verticalAlign: "-2px", marginRight: 6 }} />Staff</div>
               {staffMsg && <span className="staff-msg">{staffMsg}</span>}
               {schedNoteMsg && <span className="staff-msg">{schedNoteMsg}</span>}
             </div>
 
+            <div className="subtabs">
+              <button className={`subtab-btn ${staffView === "roles" ? "active" : ""}`} onClick={() => setStaffView("roles")}>Staff &amp; Roles</button>
+              <button className={`subtab-btn ${staffView === "shifts" ? "active" : ""}`} onClick={() => setStaffView("shifts")}>Manage Shifts</button>
+              <button className={`subtab-btn ${staffView === "duties" ? "active" : ""}`} onClick={() => setStaffView("duties")}>Responsibilities &amp; Duties</button>
+            </div>
+
+            {staffView === "roles" && (
+            <>
             <div className="qr-row">
               <span className="qr-row-label">QR codes:</span>
               {QR_CODES.map((q) => (
@@ -7649,72 +7834,118 @@ export default function SchedulingHub({ session, onSignOut }) {
               from the Front of House schedule; BOH/Kitchen/Management rows stay put so the grid stays aligned.
             </div>
 
-            {/* ---- Manage Shifts (brief item 3) ---- */}
-            <div className="role-header" style={{ display: "block", padding: "22px 2px 4px" }}>Manage Shifts</div>
-            <div className="template-note" style={{ marginTop: 0, marginBottom: 10 }}>
-              These are the options each role sees in the Set Schedule dropdowns. Removing one stops it being picked
-              going forward — shifts already on the schedule keep it.
-            </div>
-            {shiftMsg && <div className="staff-msg" style={{ display: "block", marginBottom: 10 }}>{shiftMsg}</div>}
-            <div className="shift-mgmt">
-              {SHIFT_MANAGED_ROLES.map((role) => {
-                const list = roleOptions[role] || [];
-                return (
-                  <div className="shift-mgmt-row" key={role}>
-                    <div className="shift-mgmt-role" style={{ color: ROLE_COLOR[role] || undefined }}>{role}</div>
-                    <div className="shift-mgmt-opts">
-                      {list.filter((o) => o.code !== "OFF").map((o) => (
-                        <span className={`shift-mgmt-chip ${o.isOff ? "is-off" : ""}`} key={o.code} title={o.code}>
-                          {o.label}
-                          <label className="shift-off-check" title="Counts as off — excluded from Tip Sheet and Today at a Glance">
-                            <input
-                              type="checkbox"
-                              checked={!!o.isOff}
-                              onChange={(e) => toggleShiftOptionOff(role, o.code, o.label, e.target.checked)}
-                            />
-                            Counts as off
-                          </label>
-                          {!o.isOff && looksLikeOffLabel(o.label) && (
-                            <span className="shift-off-hint" title="This name reads like an off state. Tick Counts as off if staff on it are not working.">off? tick it</span>
-                          )}
-                          <button
-                            className="shift-mgmt-x"
-                            title={`Remove ${o.label} from ${role}`}
-                            onClick={() => handleRemoveShiftOption(role, o.code, o.label)}
-                          ><X size={11} /></button>
-                        </span>
-                      ))}
-                      {shiftAddRole === role ? (
-                        <input
-                          className="notes-input shift-mgmt-input"
-                          autoFocus
-                          placeholder="Shift label, e.g. 7pm-CL"
-                          value={shiftAddLabel}
-                          onChange={(e) => setShiftAddLabel(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") handleAddShiftOption(role);
-                            if (e.key === "Escape") { setShiftAddRole(null); setShiftAddLabel(""); }
-                          }}
-                          onBlur={() => { setShiftAddRole(null); setShiftAddLabel(""); }}
-                        />
-                      ) : null}
-                      {shiftAddRole === role && looksLikeOffLabel(shiftAddLabel) ? (
-                        <span className="shift-off-hint">Looks like an off state — tick "Counts as off" on it once it's added.</span>
-                      ) : null}
-                      {shiftAddRole === role ? null : (
-                        <button
-                          className="shift-mgmt-add"
-                          onClick={() => { setShiftAddRole(role); setShiftAddLabel(""); setShiftMsg(""); }}
-                        >+ Add Shift</button>
-                      )}
-                    </div>
+            </>
+            )}
+
+            {staffView === "shifts" && (
+              <>
+                <div className="template-note" style={{ marginTop: 0, marginBottom: 10 }}>
+                  These are the options each role sees in the Set Schedule dropdowns. Click a shift to rename it, set
+                  whether it counts as off, or delete it. Deleting stops it being picked going forward — shifts already on
+                  the schedule keep it.
+                </div>
+                {shiftMsg && <div className="staff-msg" style={{ display: "block", marginBottom: 10 }}>{shiftMsg}</div>}
+                <div className="shift-mgmt">
+                  {SHIFT_MANAGED_ROLES.map((role) => {
+                    const list = roleOptions[role] || [];
+                    return (
+                      <div className="shift-mgmt-row" key={role}>
+                        <div className="shift-mgmt-role" style={{ color: ROLE_COLOR[role] || undefined }}>{role}</div>
+                        <div className="shift-mgmt-opts">
+                          {list.filter((o) => o.code !== "OFF").map((o) => (
+                            <button
+                              className={`shift-mgmt-chip shift-chip-btn ${o.isOff ? "is-off" : ""}`}
+                              key={o.code}
+                              onClick={() => openShiftEditor(role, o)}
+                              title={o.isOff ? `${o.label} — counts as off. Click to edit.` : `${o.label} — click to edit`}
+                            >
+                              {o.label}
+                              {o.isOff && <span className="shift-off-tag">OFF</span>}
+                            </button>
+                          ))}
+                          <button className="shift-mgmt-add" onClick={() => openShiftEditor(role)}>+ Add Shift</button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="template-note" style={{ marginTop: 8 }}>
+                  <span className="shift-off-tag">OFF</span> marks a shift that counts as off: it shows on the schedule grid,
+                  but staff on it are left off the Tip Sheet and Today at a Glance.
+                </div>
+              </>
+            )}
+
+            {staffView === "duties" && (
+              <>
+                <div className="duties-head">
+                  <div className="template-note" style={{ margin: 0 }}>
+                    What each role is responsible for — a reference sheet. Add, edit, reorder or delete duties per role.
                   </div>
-                );
-              })}
-            </div>
-            <div className="template-note" style={{ marginTop: 8 }}>
-              Counts as off — excluded from Tip Sheet and Today at a Glance. The option still shows on the schedule grid.
-            </div>
+                  <button className="print-btn" onClick={() => printDuties(null)} disabled={!dutiesAvailable()}>
+                    <Printer size={13} /> Print all
+                  </button>
+                </div>
+                {dutyMsg && <div className="staff-msg" style={{ display: "block", marginBottom: 10 }}>{dutyMsg}</div>}
+                {!dutiesAvailable() ? (
+                  <div className="template-note">⚠ Run supabase/migrations/0020_role_duties.sql in the Supabase SQL editor to use this tab.</div>
+                ) : !dutiesLoaded ? (
+                  <div className="notes-empty">Loading…</div>
+                ) : (
+                  DUTY_ROLES.map((role) => {
+                    const list = dutiesFor(role);
+                    return (
+                      <div className="duty-role" key={role}>
+                        <div className="duty-role-head">
+                          <span className="duty-role-name">{role}</span>
+                          <span className="duty-role-count">{list.length}</span>
+                          <button className="qr-btn duty-print-one" onClick={() => printDuties(role)} title={`Print ${role} only`}>
+                            <Printer size={11} /> Print
+                          </button>
+                        </div>
+                        {list.length === 0 && <div className="notes-empty">No duties written for {role} yet.</div>}
+                        <ol className="duty-list">
+                          {list.map((d, i) => (
+                            <li className="duty-item" key={d.id}>
+                              {dutyEdit?.id === d.id ? (
+                                <input
+                                  className="notes-input duty-edit"
+                                  autoFocus
+                                  value={dutyEdit.text}
+                                  onChange={(e) => setDutyEdit({ id: d.id, text: e.target.value })}
+                                  onBlur={saveDutyEdit}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter") e.currentTarget.blur();
+                                    if (e.key === "Escape") setDutyEdit({ id: d.id, text: d.duty });
+                                  }}
+                                />
+                              ) : (
+                                <span className="duty-text" onClick={() => setDutyEdit({ id: d.id, text: d.duty })} title="Click to edit">{d.duty}</span>
+                              )}
+                              <span className="duty-actions">
+                                <button className="duty-btn" disabled={i === 0} onClick={() => moveDuty(role, d.id, -1)} title="Move up" aria-label="Move up">↑</button>
+                                <button className="duty-btn" disabled={i === list.length - 1} onClick={() => moveDuty(role, d.id, 1)} title="Move down" aria-label="Move down">↓</button>
+                                <button className="duty-btn duty-del" onClick={() => removeDuty(d.id)} title="Delete duty" aria-label="Delete duty"><X size={11} /></button>
+                              </span>
+                            </li>
+                          ))}
+                        </ol>
+                        <div className="duty-add">
+                          <input
+                            className="notes-input"
+                            placeholder={`Add a duty for ${role}…`}
+                            value={dutyDrafts[role] || ""}
+                            onChange={(e) => setDutyDrafts((dd) => ({ ...dd, [role]: e.target.value }))}
+                            onKeyDown={(e) => { if (e.key === "Enter") addDuty(role); }}
+                          />
+                          <button className="publish-btn" disabled={!String(dutyDrafts[role] || "").trim()} onClick={() => addDuty(role)}>Add</button>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </>
+            )}
           </div>
 
           {qrModal && (() => {
@@ -8374,6 +8605,66 @@ export default function SchedulingHub({ session, onSignOut }) {
         );
       })()}
 
+      {/* Shift editor (Staff › Manage Shifts): name + "Counts as off" set
+          together, when the shift is made or edited. */}
+      {shiftEditor && (() => {
+        const ed = shiftEditor;
+        const isNew = !ed.code;
+        const close = () => { if (!ed.busy) setShiftEditor(null); };
+        const hint = !ed.isOff && looksLikeOffLabel(ed.label);
+        return (
+          <div className="day-popup-backdrop" onClick={close}>
+            <div className="delete-modal shift-editor" onClick={(e) => e.stopPropagation()}>
+              <div className="day-popup-head">
+                <div className="day-popup-date">{isNew ? `Add a ${ed.role} shift` : `Edit ${ed.role} shift`}</div>
+                <button className="day-popup-close" disabled={ed.busy} onClick={close}><X size={15} /></button>
+              </div>
+              <label className="manual-field-label" htmlFor="shift-editor-name">Shift name</label>
+              <input
+                id="shift-editor-name"
+                className="manual-field"
+                autoFocus
+                placeholder="e.g. 7pm-CL"
+                value={ed.label}
+                disabled={ed.busy}
+                onChange={(e) => setShiftEditor({ ...ed, label: e.target.value, error: null, confirmDelete: false })}
+                onKeyDown={(e) => { if (e.key === "Enter") saveShiftEditor(); if (e.key === "Escape") close(); }}
+              />
+              <label className="shift-editor-toggle">
+                <input
+                  type="checkbox"
+                  checked={ed.isOff}
+                  disabled={ed.busy}
+                  onChange={(e) => setShiftEditor({ ...ed, isOff: e.target.checked })}
+                />
+                <span>Counts as off</span>
+              </label>
+              <div className="shift-editor-explain">
+                Shows on the schedule grid, but staff on it are left off the Tip Sheet and Today at a Glance.
+              </div>
+              {hint && (
+                <div className="shift-off-hint shift-editor-hint">
+                  "{ed.label.trim()}" reads like an off state — tick Counts as off if staff on it aren't working.
+                </div>
+              )}
+              {ed.error && <div className="send-error">{ed.error}</div>}
+              <div className="send-actions">
+                {!isNew && (
+                  <button className={`nr-btn ${ed.confirmDelete ? "nr-btn-deny" : ""}`} disabled={ed.busy} onClick={deleteFromShiftEditor}>
+                    {ed.confirmDelete ? "Confirm delete" : "Delete"}
+                  </button>
+                )}
+                <span style={{ flex: 1 }} />
+                <button className="nr-btn" disabled={ed.busy} onClick={close}>Cancel</button>
+                <button className="publish-btn" disabled={ed.busy || !ed.label.trim()} onClick={saveShiftEditor}>
+                  {ed.busy ? "Saving…" : isNew ? "Add" : "Save"}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {notesWeek && (
         <div className="day-popup-backdrop" onClick={() => { setNotesWeek(null); setNoteEditId(null); }}>
           <div className="notes-modal" onClick={(e) => e.stopPropagation()}>
@@ -8451,6 +8742,31 @@ export default function SchedulingHub({ session, onSignOut }) {
           shown only when body.printing-schedule is set, see @media print rules).
           printSchedule() fills this with the same renderer used for the PDF. */}
       <div className="schedule-print-portal" ref={schedulePrintRef} aria-hidden="true" />
+      {/* Responsibilities & Duties print sheet — only rendered while printing
+          (body.printing-duties), portrait. Role null = the whole sheet. */}
+      {dutiesPrintRole !== undefined && (
+        <div className="duties-print" aria-hidden="true">
+          <div className="duties-print-head">
+            <div className="duties-print-brand">HAENYEO</div>
+            <div className="duties-print-title">
+              {dutiesPrintRole ? `${dutiesPrintRole} — Responsibilities & Duties` : "Responsibilities & Duties"}
+            </div>
+          </div>
+          {(dutiesPrintRole ? [dutiesPrintRole] : DUTY_ROLES).map((role) => {
+            const list = dutiesFor(role);
+            return (
+              <section className="duties-print-role" key={role}>
+                <h2>{role}</h2>
+                {list.length ? (
+                  <ol>{list.map((d) => <li key={d.id}>{d.duty}</li>)}</ol>
+                ) : (
+                  <p className="duties-print-empty">No duties written yet.</p>
+                )}
+              </section>
+            );
+          })}
+        </div>
+      )}
 
       {/* Print-only sheet of all 7 QR codes (direct child of .hub — shown only
           when body.printing-qr is set, see @media print rules). Branded layout
