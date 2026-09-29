@@ -101,10 +101,10 @@ export async function denyInfoUpdate(id) {
 
 // payload: { weeks: [weekPayload,…], sections, attachments: [{filename,b64}] }.
 // Multiple weeks stack in one email with one PDF attached per week.
-// The company inbox copied on schedule emails (server env SCHEDULE_COPY_EMAIL),
-// fetched when the Publish dialog opens so the address never ships in the
-// bundle. -> { copyEmail: string|null } or { error }.
-export async function fetchScheduleCopyEmail(accessToken) {
+// The company inbox copied on schedule and tip sheet emails (server env
+// COMPANY_COPY_EMAIL, fallback SCHEDULE_COPY_EMAIL), fetched when a send dialog
+// opens so the address never ships in the bundle. -> { copyEmail: string|null }.
+export async function fetchCompanyCopyEmail(accessToken) {
   try {
     const res = await fetch("/api/send-schedule", {
       headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},

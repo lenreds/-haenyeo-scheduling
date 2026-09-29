@@ -6,6 +6,14 @@
 export const GMAIL_CLIENT_ID = process.env.GMAIL_CLIENT_ID || "";
 export const GMAIL_CLIENT_SECRET = process.env.GMAIL_CLIENT_SECRET || "";
 export const GMAIL_INBOX = process.env.GMAIL_INBOX || "";
+
+// Company inbox copied (in Bcc) on every schedule and tip sheet email, real
+// and test. COMPANY_COPY_EMAIL is the name; SCHEDULE_COPY_EMAIL is the old one,
+// still read as a fallback until it's removed from Vercel. Read per call, so a
+// value set in Vercel applies from the next deployment.
+export function companyCopyEmail() {
+  return String(process.env.COMPANY_COPY_EMAIL || process.env.SCHEDULE_COPY_EMAIL || "").trim() || null;
+}
 // Optional: a refresh token supplied directly via env instead of the OAuth flow.
 // The OAuth callback stores one in Supabase; the poller prefers the stored value
 // and falls back to this.

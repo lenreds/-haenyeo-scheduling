@@ -50,6 +50,43 @@ function encodeSubject(s) {
   return `=?UTF-8?B?${Buffer.from(s, "utf8").toString("base64")}?=`;
 }
 
+// ---- Recipients: one message, everyone in Bcc ------------------------------
+// Staff never see each other's personal addresses: every recipient goes in
+// Bcc, and To is the scheduling inbox itself so the message has a valid To.
+//
+// Gmail rejects the WHOLE message (400 invalidArgument) if any address in it is
+// malformed, so each address is checked first and bad ones are left out and
+// reported instead of sinking the send. The pattern also refuses anything that
+// could break out of the header (CR/LF, commas, angle brackets, spaces).
+const EMAIL_RE = /^[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*@(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$/;
+export function isValidEmail(addr) {
+  const a = String(addr || "").trim();
+  return a.length > 0 && a.length <= 254 && EMAIL_RE.test(a);
+}
+// [{ name, email }] -> { valid: [{name,email}] (de-duped, case-insensitive), invalid: [{name,email}] }
+export function splitRecipients(list) {
+  const seen = new Set();
+  const valid = [];
+  const invalid = [];
+  (list || []).forEach((r) => {
+    const email = String(r?.email || "").trim();
+    if (!isValidEmail(email)) { invalid.push({ name: r?.name || "", email }); return; }
+    const key = email.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    valid.push({ name: r?.name || "", email });
+  });
+  return { valid, invalid };
+}
+// To + optional Bcc header lines. Bcc is folded one address per line (RFC 5322
+// folding whitespace) so a long list never approaches the 998-char line limit.
+function addressHeaders(to, bcc) {
+  const lines = [`To: ${to}`];
+  const list = (bcc || []).filter(Boolean);
+  if (list.length) lines.push(`Bcc: ${list.join(",\r\n ")}`);
+  return lines;
+}
+
 function toBase64Url(buf) {
   return buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
@@ -60,8 +97,8 @@ function toBase64Url(buf) {
 // With `attachments` ([{ filename, b64, mime? }]) the text becomes the first
 // part of a multipart/mixed message and each file follows it — the same
 // attachment parts the schedule email uses (see attachmentParts).
-export function buildRawEmail({ to, subject, inReplyTo, body, attachments = [] }) {
-  const headers = [`To: ${to}`, `Subject: ${encodeSubject(subject)}`, "MIME-Version: 1.0"];
+export function buildRawEmail({ to, bcc = [], subject, inReplyTo, body, attachments = [] }) {
+  const headers = [...addressHeaders(to, bcc), `Subject: ${encodeSubject(subject)}`, "MIME-Version: 1.0"];
   if (inReplyTo) {
     headers.push(`In-Reply-To: ${inReplyTo}`);
     headers.push(`References: ${inReplyTo}`);
@@ -116,7 +153,7 @@ function attachmentParts(atts, boundary) {
 // attachments: [{ filename, b64, mime? }] — downloadable files (e.g. PDFs).
 // Structure without attachments: multipart/related( alternative(text,html), images… ).
 // With attachments: multipart/mixed( <that related part>, attachment parts… ).
-export function buildHtmlRawEmail({ to, subject, text, html, images = [], attachments = [] }) {
+export function buildHtmlRawEmail({ to, bcc = [], subject, text, html, images = [], attachments = [] }) {
   const rel = "haenyeo-rel-8f3a1c";
   const alt = "haenyeo-alt-8f3a1c";
   const mixed = "haenyeo-mix-8f3a1c";
@@ -158,7 +195,7 @@ export function buildHtmlRawEmail({ to, subject, text, html, images = [], attach
     imageParts,
     `--${rel}--`,
   ];
-  const headers = [`To: ${to}`, `Subject: ${encodeSubject(subject)}`, "MIME-Version: 1.0"];
+  const headers = [...addressHeaders(to, bcc), `Subject: ${encodeSubject(subject)}`, "MIME-Version: 1.0"];
 
   const atts = (attachments || []).filter((a) => a && a.b64);
   let raw;

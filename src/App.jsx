@@ -18,7 +18,7 @@ import {
   approveInfoUpdate,
   denyInfoUpdate,
   triggerSchedulePublish,
-  fetchScheduleCopyEmail,
+  fetchCompanyCopyEmail,
   triggerTipSheetSend,
   submitManualRail,
   fetchWeeklySchedule,
@@ -755,6 +755,15 @@ function shiftCodeFor(role, label, existingCodes = []) {
   return code;
 }
 
+// Same address check the server applies before a send (api/_lib/reply.js):
+// Gmail rejects a whole message if one address is malformed, so the dialogs
+// grey out a bad address with the reason instead of letting it sink the send.
+const EMAIL_RE = /^[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*@(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$/;
+function isValidEmail(addr) {
+  const a = String(addr || "").trim();
+  return a.length > 0 && a.length <= 254 && EMAIL_RE.test(a);
+}
+
 // Manage Shifts HINT only: does a label read like an off state ("RO", "Req
 // Off", "PTO")? Used to suggest ticking "Counts as off" — never to decide who
 // is working. That is the option's is_off flag alone (see isOffCell).
@@ -1424,6 +1433,11 @@ export default function SchedulingHub({ session, onSignOut }) {
   const [tipSendExcluded, setTipSendExcluded] = useState([]); // names unchecked in the modal
   const [tipSendBusy, setTipSendBusy] = useState(false);
   const [tipSendResult, setTipSendResult] = useState(null); // error string after a failed send
+  // Company inbox line (server env COMPANY_COPY_EMAIL): undefined while loading,
+  // null if not configured; ticked by default. Rides in the same Bcc list.
+  const [tipSendCopyEmail, setTipSendCopyEmail] = useState(undefined);
+  const [tipSendCopyOn, setTipSendCopyOn] = useState(true);
+  const [tipSendTest, setTipSendTest] = useState(null); // { busy } | { ok: text } | { error: text }
   // Save / autosave state (brief item 3): "saved" | "dirty" | "saving" | "error".
   const [tipSaveState, setTipSaveState] = useState("saved");
   const [schedSaveState, setSchedSaveState] = useState("saved");
@@ -2467,8 +2481,13 @@ export default function SchedulingHub({ session, onSignOut }) {
     const out = [];
     const contact = (name) => {
       const staff = staffList.find((st) => st.name === name);
-      const email = staff && staff.registered && staff.personal_email ? staff.personal_email : null;
-      const reason = email ? null : !staff ? "not on the staff list" : !staff.registered ? "not registered" : "no email on file";
+      const onFile = staff && staff.registered && staff.personal_email ? staff.personal_email : null;
+      const email = onFile && isValidEmail(onFile) ? onFile : null;
+      const reason = email ? null
+        : !staff ? "not on the staff list"
+        : !staff.registered ? "not registered"
+        : !onFile ? "no email on file"
+        : `invalid address (${onFile})`;
       return { email, reason };
     };
     finalSlots.forEach((p) => {
@@ -2503,8 +2522,12 @@ export default function SchedulingHub({ session, onSignOut }) {
     setTipSendNotes("");
     setTipSendExcluded([]);
     setTipSendResult(null);
+    setTipSendTest(null);
+    setTipSendCopyOn(true);
+    setTipSendCopyEmail(undefined);
     setTipSendOpen(true);
     refreshGmailStatus(); // so a dead token shows before Confirm, not after
+    fetchCompanyCopyEmail(session?.access_token).then(({ copyEmail }) => setTipSendCopyEmail(copyEmail));
   }
   function toggleTipRecipient(name) {
     setTipSendExcluded((prev) => (prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name]));
@@ -2518,6 +2541,37 @@ export default function SchedulingHub({ session, onSignOut }) {
   // The email is the Save as PDF page attached, with only the manager's notes
   // (then the sign-off) as the body. The PDF is built first: if that fails
   // nothing is emailed, and the error stays in the modal so they can retry.
+  // Test: the identical email to the signed-in manager (+ the company inbox if
+  // ticked), "[TEST]" subject. Never marks the sheet sent, finalized or locked,
+  // and writes nothing to tip_sheets — only confirmSendTipSheet does that.
+  async function sendTipSheetTest() {
+    if (tipSendBusy || tipSendTest?.busy) return;
+    setTipSendTest({ busy: true });
+    let pdfB64;
+    try {
+      pdfB64 = pdfToBase64(await renderTipSheetPdf());
+    } catch (e) {
+      setTipSendTest({ error: `the PDF couldn't be generated (${e.message || e}) — no test was sent.` });
+      return;
+    }
+    const copy = !!(tipSendCopyEmail && tipSendCopyOn);
+    const res = await triggerTipSheetSend({
+      dayDateLabel: tipSendDayLabel,
+      subject: tipSendSubject.trim(),
+      notes: tipSendNotes.trim(),
+      attachment: { filename: tipSheetPdfFilename, b64: pdfB64 },
+      recipients: [],
+      includeCopy: copy,
+      test: true,
+    }, session?.access_token);
+    if (res?.error) {
+      if (res.needsReconnect) refreshGmailStatus();
+      setTipSendTest({ error: `Test didn't go out — ${res.needsReconnect ? "Gmail disconnected" : res.error}` });
+      return;
+    }
+    setTipSendTest({ ok: `Test sent to ${session?.user?.email || "you"}${res?.copied ? ` and the company inbox (${tipSendCopyEmail})` : ""}. The sheet is not marked sent.` });
+  }
+
   async function confirmSendTipSheet() {
     if (tipSendBusy || !tipSendChosen.length) return;
     setTipSendBusy(true);
@@ -2537,6 +2591,7 @@ export default function SchedulingHub({ session, onSignOut }) {
       notes: tipSendNotes.trim(),
       attachment: { filename: tipSheetPdfFilename, b64: pdfB64 },
       recipients: tipSendChosen.map((r) => ({ name: r.name, email: r.email })),
+      includeCopy: !!(tipSendCopyEmail && tipSendCopyOn),
     }, session?.access_token);
     setTipSendBusy(false);
     if (res?.error) {
@@ -2554,8 +2609,8 @@ export default function SchedulingHub({ session, onSignOut }) {
     setTipLocked(true);
     setTipLockedAt(now);
     addLog(
-      `Tip sheet sent — ${tipDateInfo.dateObj.toLocaleDateString(undefined, MONTH_FMT)} — emailed ${res?.sent ?? 0} staff, sheet finalized and locked`,
-      "good"
+      `Tip sheet sent — ${tipDateInfo.dateObj.toLocaleDateString(undefined, MONTH_FMT)} — one email to ${res?.sent ?? 0} recipients${res?.copied ? " (company inbox copied)" : ""}, sheet finalized and locked${res?.invalid?.length ? `; skipped bad addresses: ${res.invalid.map((r) => `${r.name} <${r.email}>`).join(", ")}` : ""}`,
+      res?.invalid?.length ? "warn" : "good"
     );
     try {
       await upsertTipSheet(tipPayload({
@@ -3282,8 +3337,10 @@ export default function SchedulingHub({ session, onSignOut }) {
   // from the DB by id and never trusts one from the page.
   const publishRecipients = useMemo(() => {
     const reachable = staffList.filter((s) => s.id && s.registered && s.active !== false && s.personal_email);
+    // badEmail: listed (so it's visible) but never sent to — see isValidEmail.
     const bySection = (secs) => reachable
       .filter((s) => secs.includes(String(s.section || "FOH").toLowerCase()))
+      .map((s) => ({ ...s, badEmail: !isValidEmail(s.personal_email) }))
       .sort((a, b) => a.name.localeCompare(b.name));
     return { foh: bySection(["foh"]), bk: bySection(["boh", "kitchen"]), mgmt: bySection(["management"]) };
   }, [staffList]);
@@ -3321,11 +3378,11 @@ export default function SchedulingHub({ session, onSignOut }) {
       excluded: [], // "section:staffId" — unticking someone in one email leaves the other alone
       busy: null, error: null, testResult: null,
       sentSections: [], // sections already sent in THIS dialog — a retry won't resend them
-      // Company inbox (server env SCHEDULE_COPY_EMAIL): undefined while loading,
+      // Company inbox (server env COMPANY_COPY_EMAIL): undefined while loading,
       // null if not configured. Ticked by default once known.
       copyEmail: undefined, copyOn: true,
     });
-    fetchScheduleCopyEmail(session?.access_token).then(({ copyEmail }) =>
+    fetchCompanyCopyEmail(session?.access_token).then(({ copyEmail }) =>
       setPublishModal((p) => (p ? { ...p, copyEmail } : p)));
   }
   function togglePublishWeek(iso) {
@@ -3349,7 +3406,7 @@ export default function SchedulingHub({ session, onSignOut }) {
     const pendingAll = m.weeks.filter((w) => pendingPublish[sec.key].includes(w));
     const weeks = m.picked.filter((w) => pendingPublish[sec.key].includes(w)).sort();
     const people = publishPeopleFor(sec.key);
-    const ids = people.filter((r) => !m.excluded.includes(`${sec.key}:${r.id}`)).map((r) => r.id);
+    const ids = people.filter((r) => !r.badEmail && !m.excluded.includes(`${sec.key}:${r.id}`)).map((r) => r.id);
     const copy = !!(m.copyEmail && m.copyOn);
     const sent = m.sentSections.includes(sec.key);
     const unavailable = sent ? null : pendingAll.length === 0
@@ -3405,7 +3462,7 @@ export default function SchedulingHub({ session, onSignOut }) {
       attachments: pdfs[st.key].map(({ filename, b64 }) => ({ filename, b64 })),
       sections: st.serverSections,
       ...shared,
-      ...(test ? { test: true } : { recipientIds: st.ids, includeCopy: st.copy }),
+      ...(test ? { test: true, includeCopy: st.copy } : { recipientIds: st.ids, includeCopy: st.copy }),
     }, token)));
 
     const reconnect = results.some((r) => r?.needsReconnect);
@@ -3419,7 +3476,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         ...p, busy: null,
         error: failed.length ? `Test didn't go out — ${failedText}` : null,
         testResult: failed.length ? null
-          : `Test sent to ${session?.user?.email || "you"} — ${jobs.length} email${jobs.length === 1 ? "" : "s"} (${jobs.map((s) => s.label).join(", ")}). Nothing was marked published.`,
+          : `Test sent to ${session?.user?.email || "you"}${jobs.some((s) => s.copy) ? ` and the company inbox (${m.copyEmail})` : ""} — ${jobs.length} email${jobs.length === 1 ? "" : "s"} (${jobs.map((s) => s.label).join(", ")}). Nothing was marked published.`,
       }));
       return;
     }
@@ -3439,8 +3496,9 @@ export default function SchedulingHub({ session, onSignOut }) {
       });
     }
     const sentCount = results.reduce((n, r) => n + (r?.sent || 0), 0);
+    const badAddresses = results.flatMap((r) => r?.invalid || []).map((r) => `${r.name} <${r.email}>`);
     if (succeeded.length) {
-      addLog(`Published ${succeeded.map((st) => `${st.label} (${st.weeks.map(shortDate).join(", ")})`).join(" and ")} — ${sentCount} emails${recipientMisses.length ? `; not delivered: ${recipientMisses.join("; ")}` : ""}`, recipientMisses.length ? "warn" : "good");
+      addLog(`Published ${succeeded.map((st) => `${st.label} (${st.weeks.map(shortDate).join(", ")})`).join(" and ")} — ${succeeded.length} email${succeeded.length === 1 ? "" : "s"} to ${sentCount} recipients${badAddresses.length ? `; skipped bad addresses: ${[...new Set(badAddresses)].join(", ")}` : ""}${recipientMisses.length ? `; not delivered: ${recipientMisses.join("; ")}` : ""}`, badAddresses.length || recipientMisses.length ? "warn" : "good");
     }
 
     if (failed.length) {
@@ -8071,6 +8129,25 @@ export default function SchedulingHub({ session, onSignOut }) {
               </div>
             )}
 
+            {/* Company inbox: own line, ticked by default, same Bcc list. */}
+            <div className="publish-group-label">Company inbox</div>
+            <div className="send-recipients">
+              <label className={`send-rcpt ${tipSendCopyEmail ? "" : "send-rcpt-noemail"}`}>
+                <input
+                  type="checkbox"
+                  disabled={tipSendBusy || !tipSendCopyEmail}
+                  checked={!!(tipSendCopyEmail && tipSendCopyOn)}
+                  onChange={() => setTipSendCopyOn((v) => !v)}
+                />
+                <span className="send-rcpt-name">Company</span>
+                <span className="send-rcpt-email">
+                  {tipSendCopyEmail === undefined ? "checking…"
+                    : tipSendCopyEmail ? `${tipSendCopyEmail} — test sends included`
+                    : "not set up — add COMPANY_COPY_EMAIL in Vercel to copy the company inbox"}
+                </span>
+              </label>
+            </div>
+
             <label className="manual-field-label" htmlFor="send-subject">Subject line</label>
             <input
               id="send-subject"
@@ -8093,6 +8170,8 @@ export default function SchedulingHub({ session, onSignOut }) {
             />
 
             {tipSendResult && <div className="send-error">Couldn't send: {tipSendResult}</div>}
+            {tipSendTest?.error && <div className="send-error">{tipSendTest.error}</div>}
+            {tipSendTest?.ok && <div className="publish-test-ok"><Check size={12} /> {tipSendTest.ok}</div>}
             {gmailDisconnected && (
               <div className="send-reconnect">
                 <AlertTriangle size={13} />
@@ -8105,6 +8184,13 @@ export default function SchedulingHub({ session, onSignOut }) {
             )}
 
             <div className="send-actions">
+              <button
+                className="nr-btn"
+                disabled={tipSendBusy || !!tipSendTest?.busy}
+                onClick={sendTipSheetTest}
+                title={`Send this email to ${session?.user?.email || "you"}${tipSendCopyEmail && tipSendCopyOn ? " and the company inbox" : ""} only, subject tagged [TEST]. The sheet isn't marked sent.`}
+              >{tipSendTest?.busy ? "Sending test…" : "Send test to me only"}</button>
+              <span style={{ flex: 1 }} />
               <button className="nr-btn" disabled={tipSendBusy} onClick={() => setTipSendOpen(false)}>Cancel</button>
               <button
                 className="publish-btn"
@@ -8166,7 +8252,7 @@ export default function SchedulingHub({ session, onSignOut }) {
               </div>
 
               {/* Company inbox: its own line, ticked by default. The address comes
-                  from the server (env SCHEDULE_COPY_EMAIL), not the bundle. */}
+                  from the server (env COMPANY_COPY_EMAIL), not the bundle. */}
               <div className="publish-group-label">Company inbox</div>
               <div className="send-recipients">
                 <label className={`send-rcpt ${m.copyEmail ? "" : "send-rcpt-noemail"}`}>
@@ -8179,8 +8265,8 @@ export default function SchedulingHub({ session, onSignOut }) {
                   <span className="send-rcpt-name">Company</span>
                   <span className="send-rcpt-email">
                     {m.copyEmail === undefined ? "checking…"
-                      : m.copyEmail ? `${m.copyEmail} — gets whichever schedule emails go out`
-                      : "not set up — add SCHEDULE_COPY_EMAIL in Vercel to copy the company inbox"}
+                      : m.copyEmail ? `${m.copyEmail} — gets whichever schedule emails go out, test sends included`
+                      : "not set up — add COMPANY_COPY_EMAIL in Vercel to copy the company inbox"}
                   </span>
                 </label>
               </div>
@@ -8210,16 +8296,18 @@ export default function SchedulingHub({ session, onSignOut }) {
                     ) : (
                       <div className="send-recipients">
                         {st.people.map((r) => (
-                          <label className="send-rcpt" key={`${st.key}-${r.id}`}>
+                          <label className={`send-rcpt ${r.badEmail ? "send-rcpt-noemail" : ""}`} key={`${st.key}-${r.id}`}>
                             <input
                               type="checkbox"
-                              disabled={disabled}
-                              checked={!m.excluded.includes(`${st.key}:${r.id}`)}
+                              disabled={disabled || r.badEmail}
+                              checked={!r.badEmail && !m.excluded.includes(`${st.key}:${r.id}`)}
                               onChange={() => togglePublishRecipient(st.key, r.id)}
                             />
                             <span className="send-rcpt-name">{r.name}</span>
                             <span className="send-rcpt-email">
-                              {String(r.section || "").toLowerCase() === "management" ? `Manager · ${r.personal_email}` : r.personal_email}
+                              {r.badEmail
+                                ? `invalid address (${r.personal_email}) — will be skipped`
+                                : String(r.section || "").toLowerCase() === "management" ? `Manager · ${r.personal_email}` : r.personal_email}
                             </span>
                           </label>
                         ))}
