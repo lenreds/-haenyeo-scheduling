@@ -50,14 +50,12 @@ function encodeSubject(s) {
   return `=?UTF-8?B?${Buffer.from(s, "utf8").toString("base64")}?=`;
 }
 
-// ---- Recipients: one message, everyone in Bcc ------------------------------
-// Staff never see each other's personal addresses: every recipient goes in
-// Bcc, and To is the scheduling inbox itself so the message has a valid To.
-//
-// Gmail rejects the WHOLE message (400 invalidArgument) if any address in it is
-// malformed, so each address is checked first and bad ones are left out and
-// reported instead of sinking the send. The pattern also refuses anything that
-// could break out of the header (CR/LF, commas, angle brackets, spaces).
+// ---- Recipient addresses -----------------------------------------------------
+// Schedule and tip sheet emails go one message per recipient (_lib/send-each.js).
+// Every address is checked first so a malformed one is shown and skipped, not
+// attempted. The pattern also refuses anything that could break out of the
+// header (CR/LF, commas, angle brackets, spaces). The builders still accept an
+// optional bcc list (addressHeaders), currently unused.
 const EMAIL_RE = /^[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*@(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$/;
 export function isValidEmail(addr) {
   const a = String(addr || "").trim();

@@ -7,8 +7,8 @@ export const GMAIL_CLIENT_ID = process.env.GMAIL_CLIENT_ID || "";
 export const GMAIL_CLIENT_SECRET = process.env.GMAIL_CLIENT_SECRET || "";
 export const GMAIL_INBOX = process.env.GMAIL_INBOX || "";
 
-// Company inbox copied (in Bcc) on every schedule and tip sheet email, real
-// and test. COMPANY_COPY_EMAIL is the name; SCHEDULE_COPY_EMAIL is the old one,
+// Company inbox that gets its own copy of every schedule and tip sheet email,
+// real and test. COMPANY_COPY_EMAIL is the name; SCHEDULE_COPY_EMAIL is the old one,
 // still read as a fallback until it's removed from Vercel. Read per call, so a
 // value set in Vercel applies from the next deployment.
 export function companyCopyEmail() {

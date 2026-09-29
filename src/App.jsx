@@ -2609,8 +2609,8 @@ export default function SchedulingHub({ session, onSignOut }) {
     setTipLocked(true);
     setTipLockedAt(now);
     addLog(
-      `Tip sheet sent — ${tipDateInfo.dateObj.toLocaleDateString(undefined, MONTH_FMT)} — one email to ${res?.sent ?? 0} recipients${res?.copied ? " (company inbox copied)" : ""}, sheet finalized and locked${res?.invalid?.length ? `; skipped bad addresses: ${res.invalid.map((r) => `${r.name} <${r.email}>`).join(", ")}` : ""}`,
-      res?.invalid?.length ? "warn" : "good"
+      `Tip sheet sent — ${tipDateInfo.dateObj.toLocaleDateString(undefined, MONTH_FMT)} — emailed ${res?.sent ?? 0}${res?.copied ? " (company inbox included)" : ""}${res?.failures?.length ? `, failed: ${res.failures.join("; ")}` : ""}, sheet finalized and locked${res?.invalid?.length ? `; skipped bad addresses: ${res.invalid.map((r) => `${r.name} <${r.email}>`).join(", ")}` : ""}`,
+      res?.invalid?.length || res?.failures?.length ? "warn" : "good"
     );
     try {
       await upsertTipSheet(tipPayload({
@@ -3498,7 +3498,7 @@ export default function SchedulingHub({ session, onSignOut }) {
     const sentCount = results.reduce((n, r) => n + (r?.sent || 0), 0);
     const badAddresses = results.flatMap((r) => r?.invalid || []).map((r) => `${r.name} <${r.email}>`);
     if (succeeded.length) {
-      addLog(`Published ${succeeded.map((st) => `${st.label} (${st.weeks.map(shortDate).join(", ")})`).join(" and ")} — ${succeeded.length} email${succeeded.length === 1 ? "" : "s"} to ${sentCount} recipients${badAddresses.length ? `; skipped bad addresses: ${[...new Set(badAddresses)].join(", ")}` : ""}${recipientMisses.length ? `; not delivered: ${recipientMisses.join("; ")}` : ""}`, badAddresses.length || recipientMisses.length ? "warn" : "good");
+      addLog(`Published ${succeeded.map((st) => `${st.label} (${st.weeks.map(shortDate).join(", ")})`).join(" and ")} — ${sentCount} email${sentCount === 1 ? "" : "s"} sent${badAddresses.length ? `; skipped bad addresses: ${[...new Set(badAddresses)].join(", ")}` : ""}${recipientMisses.length ? `; not delivered: ${recipientMisses.join("; ")}` : ""}`, badAddresses.length || recipientMisses.length ? "warn" : "good");
     }
 
     if (failed.length) {

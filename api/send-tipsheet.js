@@ -5,9 +5,9 @@
 // tip math) and passes the subject line and optional notes the manager
 // confirmed on the send screen. The body is just those notes plus the sign-off.
 //
-// ONE message per send: To the scheduling inbox, every recipient in Bcc (see
-// _lib/bcc-send.js), tagged Sent/Tip Sheets. includeCopy adds the company inbox
-// (env COMPANY_COPY_EMAIL, fallback SCHEDULE_COPY_EMAIL) to the same Bcc list.
+// One message per recipient (see _lib/send-each.js), tagged Sent/Tip Sheets.
+// includeCopy gives the company inbox (env COMPANY_COPY_EMAIL, fallback
+// SCHEDULE_COPY_EMAIL) its own copy.
 // test: only the signed-in manager (address from their JWT, never the client)
 // plus the company inbox if includeCopy, subject tagged "[TEST]". This endpoint
 // never marks the sheet sent — the client does that, and only after a real send.
@@ -17,7 +17,7 @@ import { buildRawEmail } from "./_lib/reply.js";
 import { buildTipSheetEmail } from "./_lib/emails.js";
 import { makeLabeler, LABELS } from "./_lib/labels.js";
 import { isManager, managerEmail } from "./_lib/store.js";
-import { sendOneBcc } from "./_lib/bcc-send.js";
+import { sendToEach } from "./_lib/send-each.js";
 import { companyCopyEmail } from "./_lib/config.js";
 
 function readBody(req) {
@@ -62,19 +62,18 @@ export default async function handler(req, res) {
 
     const built = buildTipSheetEmail({ dayDateLabel: b.dayDateLabel, subject: b.subject, notes: b.notes });
     const subject = test ? `[TEST] ${built.subject.replace(/^\s*\[TEST\]\s*/i, "")}` : built.subject;
-    const result = await sendOneBcc({
+    const result = await sendToEach({
       accessToken, recipients, labelId,
-      buildRaw: ({ to, bcc }) => buildRawEmail({ to, bcc, subject, body: built.body, attachments }),
+      buildRaw: (to) => buildRawEmail({ to, subject, body: built.body, attachments }),
     });
     if (result.invalid.length) {
       console.warn(`[send-tipsheet] skipped malformed addresses: ${result.invalid.map((r) => `${r.name} <${r.email}>`).join(", ")}`);
     }
-    if (!result.messages) {
-      return res.status(200).json({ sent: 0, error: "no valid email addresses to send to", invalid: result.invalid, test });
-    }
+    if (result.failures.length) console.warn(`[send-tipsheet] failed: ${result.failures.join("; ")}`);
     return res.status(200).json({
-      sent: result.sent, messages: 1, recipients: recipients.length,
-      copied: !!copy, invalid: result.invalid, failures: [], test,
+      sent: result.sent, recipients: result.attempted, copied: !!copy,
+      invalid: result.invalid, failures: result.failures, test,
+      ...(result.error ? { error: result.error } : {}),
     });
   } catch (e) {
     console.error(`[send-tipsheet] ${e.message}`);

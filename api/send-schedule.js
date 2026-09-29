@@ -1,6 +1,6 @@
 // POST /api/send-schedule — emails one or more weeks' schedule to registered staff.
 // GET (manager JWT) -> { copyEmail } = env COMPANY_COPY_EMAIL (fallback
-// SCHEDULE_COPY_EMAIL), the company inbox added to the Bcc list — real sends
+// SCHEDULE_COPY_EMAIL), the company inbox added as one more recipient — real sends
 // and tests — when the POST carries includeCopy: true.
 // Manager-JWT auth. Body: { weeks:[weekPayload,…], sections?:["FOH"|"BOH"|"Kitchen"|"Management"],
 // attachments?:[{filename,b64}] } where each weekPayload is
@@ -10,10 +10,10 @@
 // work. 2+ weeks stack in one email; `attachments` are PDF files (one per week).
 // `sections` restricts recipients by staff.section (case-insensitive); omitted =
 // all registered. Sends the branded HTML sheet (plain-text alternative + the
-// real icon as an inline CID image). ONE message per call, To the scheduling
-// inbox with every recipient in Bcc (see _lib/bcc-send.js); tagged Sent/Schedules.
+// real icon as an inline CID image). One message per recipient (see
+// _lib/send-each.js); tagged Sent/Schedules.
 
-import { sendOneBcc } from "./_lib/bcc-send.js";
+import { sendToEach } from "./_lib/send-each.js";
 import { companyCopyEmail } from "./_lib/config.js";
 import { gmailAccessToken, gmailErrorFields } from "./_lib/gmail-auth.js";
 import { buildHtmlRawEmail } from "./_lib/reply.js";
@@ -78,7 +78,7 @@ export default async function handler(req, res) {
     // Who gets it, as [{ name, email }]. test: the signed-in manager (address
     // from their JWT, never the client). Real: registered staff by section and
     // by the ids ticked in the dialog (addresses from the DB). Either way the
-    // company inbox rides in the same Bcc list when its line was ticked — on a
+    // company inbox gets its own copy when its line was ticked — on a
     // test too, so the setup can be checked without emailing staff.
     let recipients;
     if (test) {
@@ -111,11 +111,11 @@ export default async function handler(req, res) {
     let labelId = null;
     try { labelId = await labeler.ensure(LABELS.sentSchedules); } catch { /* non-fatal */ }
 
-    // ONE message for the whole section: To the scheduling inbox, everyone in Bcc.
-    const result = await sendOneBcc({
+    // One message per recipient (the company inbox is simply one of them).
+    const result = await sendToEach({
       accessToken, recipients, labelId,
-      buildRaw: ({ to, bcc }) => buildHtmlRawEmail({
-        to, bcc, subject, text, html,
+      buildRaw: (to) => buildHtmlRawEmail({
+        to, subject, text, html,
         images: [{ cid: "haenyeo-icon", b64: HAENYEO_ICON_B64 }],
         attachments: pdfAttachments,
       }),
@@ -123,12 +123,11 @@ export default async function handler(req, res) {
     if (result.invalid.length) {
       console.warn(`[send-schedule] skipped malformed addresses: ${result.invalid.map((r) => `${r.name} <${r.email}>`).join(", ")}`);
     }
-    if (!result.messages) {
-      return res.status(200).json({ sent: 0, error: "no valid email addresses to send to", invalid: result.invalid, test });
-    }
+    if (result.failures.length) console.warn(`[send-schedule] failed: ${result.failures.join("; ")}`);
     return res.status(200).json({
-      sent: result.sent, messages: 1, recipients: recipients.length,
-      copied: !!copy, invalid: result.invalid, failures: [], test,
+      sent: result.sent, recipients: result.attempted, copied: !!copy,
+      invalid: result.invalid, failures: result.failures, test,
+      ...(result.error ? { error: result.error } : {}),
     });
   } catch (e) {
     console.error(`[send-schedule] ${e.message}`);
