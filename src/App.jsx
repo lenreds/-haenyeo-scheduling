@@ -67,6 +67,19 @@ import {
   setRailCleared as persistRailCleared,
   RAIL_LISTS,
 } from "./lib/data.js";
+import {
+  BAR_TIP_OUT_RATE,
+  EXPO_AS_BUSSER_PTS,
+  applyExpoMode,
+  barTipOutEffective,
+  barTipOutReason,
+  closingSumDiffCents,
+  closingSumEffective,
+  isFrozen,
+  rulesFromRow,
+  rulesPayload,
+  truncCents,
+} from "./lib/tipRules.js";
 import QRCode from "qrcode";
 
 // "" / undefined -> null so numeric columns don't choke; otherwise Number().
@@ -1422,7 +1435,14 @@ export default function SchedulingHub({ session, onSignOut }) {
   const [tipTimes, setTipTimes] = useState({}); // slotId -> { in, out }
   const [customMode, setCustomMode] = useState(false);
   // Per-date: slow bar nights skip the 10% bar tip-out (bar keeps it all).
+  // barTipOutOn is the stored / by-hand value; with mode "auto" the sheet
+  // charges by the over-$60 rule instead (see src/lib/tipRules.js).
   const [barTipOutOn, setBarTipOutOn] = useState(true);
+  const [barTipOutMode, setBarTipOutMode] = useState("auto"); // auto | manual | legacy
+  // Closing Sum follows the Closing column total until something is typed.
+  const [closingSumAuto, setClosingSumAuto] = useState(true);
+  // Per-date: the Expo slot ran as a 3rd Busser/Runner (0.6 pts, not 0.3).
+  const [expoAsBusser, setExpoAsBusser] = useState(false);
   const [slotOverrides, setSlotOverrides] = useState({}); // slotId -> { name, pts }
   const [tipSent, setTipSent] = useState(false);
   // When the emails actually went out, for the "Sent ✓ 11:42 PM" button label
@@ -2248,7 +2268,13 @@ export default function SchedulingHub({ session, onSignOut }) {
     const all = staffWorkingOn(tipDateIso);
     return { ...all, working: all.working.filter(onTipSheet) };
   }, [tipDateIso, fohRoster, patterns, weeklyPatterns, placeholderPatterns, weeklyPlaceholders, groupRosters, overrides, railOffByDate, staffList, offCodes]);
-  const autoSlots = useMemo(() => autoAssignSlots(tipWorking.working), [tipWorking]);
+  // Expo running as a 3rd Busser/Runner is a pay decision for this date only:
+  // the schedule and Glance still say Expo. Same slot id, so the person
+  // scheduled on Expo fills it and keeps their clock times.
+  const autoSlots = useMemo(
+    () => applyExpoMode(autoAssignSlots(tipWorking.working), expoAsBusser),
+    [tipWorking, expoAsBusser]
+  );
   // Ties the app settled by roster order that change someone's points. A tie
   // is the manager's call, so it's surfaced, not silently resolved. Custom
   // Schedule is the manager choosing by hand, so no note there.
@@ -2272,6 +2298,16 @@ export default function SchedulingHub({ session, onSignOut }) {
       setSlotOverrides(seed);
     }
     setCustomMode((m) => !m);
+  }
+  // Custom Schedule holds its own points per slot, so the switch updates the
+  // Expo slot's entry too — otherwise it would keep paying Expo's 0.3.
+  function toggleExpoAsBusser() {
+    const next = !expoAsBusser;
+    setExpoAsBusser(next);
+    if (customMode && slotOverrides.expo) {
+      const pts = next ? EXPO_AS_BUSSER_PTS : SLOTS.find((s) => s.id === "expo").defaultPts;
+      setSlotOverrides((o) => ({ ...o, expo: { ...o.expo, pts } }));
+    }
   }
   function setSlotName(slotId, value) {
     setSlotOverrides((o) => ({ ...o, [slotId]: { ...o[slotId], name: value } }));
@@ -2411,10 +2447,29 @@ export default function SchedulingHub({ session, onSignOut }) {
   const closingBankTotal = denomTotal(closingCounts);
   const payoutsTotal = payoutItems.reduce((s, it) => s + (parseFloat(it.amount) || 0), 0);
 
-  // Off → $0 tip-out, so barShareEach is 0 and the bar keeps its full pool.
-  const barTipOutTotal = barTipOutOn ? barPool * 0.1 : 0;
+  // Sent, locked or finalized: the record of what was paid. Automatic rules
+  // never re-run on it — it shows what its row stored.
+  const tipFrozen = isFrozen({ sent: tipSent, locked: tipLocked, finalized: tipFinalized });
 
-  const totalCashSumPayouts = (parseFloat(closingSum) || 0) + payoutsTotal;
+  // Off → $0 tip-out, so barShareEach is 0 and the bar keeps its full pool.
+  const barTipOutCharged = barTipOutEffective({ mode: barTipOutMode, storedOn: barTipOutOn, barPool, frozen: tipFrozen });
+  const barTipOutWhy = barTipOutReason({ mode: barTipOutMode, storedOn: barTipOutOn, barPool, frozen: tipFrozen, money });
+  const barTipOutTotal = barTipOutCharged ? barPool * BAR_TIP_OUT_RATE : 0;
+  function toggleBarTipOut() {
+    setBarTipOutMode("manual");
+    setBarTipOutOn(!barTipOutCharged);
+  }
+
+  const closingRule = { auto: closingSumAuto, typed: closingSum, countTotal: closingBankTotal, frozen: tipFrozen };
+  const closingSumValue = closingSumEffective(closingRule);
+  const closingSumDiff = closingSumDiffCents(closingRule);
+  const closingSumShowsCount = !tipFrozen && closingSumAuto;
+  function editClosingSum(value) {
+    setClosingSum(value);
+    setClosingSumAuto(value === "");
+  }
+
+  const totalCashSumPayouts = closingSumValue + payoutsTotal;
   const minusCashSales = totalCashSumPayouts - (parseFloat(cashSales) || 0);
   const cashTipsEarned = minusCashSales - openingBankTotal;
 
@@ -2482,10 +2537,17 @@ export default function SchedulingHub({ session, onSignOut }) {
       closing_counts: closingCounts,
       payouts: payoutItems,
       cash_sales: numOrNull(cashSales),
-      closing_sum: numOrNull(closingSum),
       slot_overrides: customMode ? slotOverrides : {},
       time_entries: tipTimes,
-      bar_tip_out: barTipOutOn,
+      // The values the sheet is actually using, not just what was typed, so a
+      // sheet that is sent or locked later already holds what it showed.
+      ...rulesPayload({
+        expoAsBusser,
+        barMode: barTipOutMode,
+        barOn: barTipOutCharged,
+        closingAuto: closingSumAuto,
+        closingSum: closingSumShowsCount ? (truncCents(closingBankTotal) ? closingSumValue : null) : numOrNull(closingSum),
+      }),
       ...extra,
     };
   }
@@ -2502,9 +2564,11 @@ export default function SchedulingHub({ session, onSignOut }) {
       floorCash, floorCredit, barCash, barCredit, covers,
       openingCounts, closingCounts, closingSum, payoutItems, cashSales,
       customMode ? slotOverrides : {}, tipTimes, barTipOutOn,
+      barTipOutMode, closingSumAuto, expoAsBusser,
     ]),
     [floorCash, floorCredit, barCash, barCredit, covers, openingCounts, closingCounts,
-     closingSum, payoutItems, cashSales, customMode, slotOverrides, tipTimes, barTipOutOn]
+     closingSum, payoutItems, cashSales, customMode, slotOverrides, tipTimes, barTipOutOn,
+     barTipOutMode, closingSumAuto, expoAsBusser]
   );
   const tipBaselineRef = useRef(null);   // tipFormKey as last written / last loaded
   const tipBaselineSeqRef = useRef(-1);  // which tipLoadSeq that baseline belongs to
@@ -2733,6 +2797,13 @@ export default function SchedulingHub({ session, onSignOut }) {
       return;
     }
     const now = new Date().toISOString();
+    // Built before anything changes state: the values the emailed PDF showed.
+    const sentPayload = tipPayload({
+      sent: true, sent_at: now,
+      finalized: true, finalized_at: now,
+      locked: true, locked_at: now,
+    });
+    pinTipRuleValues();
     setTipSendOpen(false);
     setTipSent(true);
     setTipSentAt(now);
@@ -2745,14 +2816,10 @@ export default function SchedulingHub({ session, onSignOut }) {
       res?.invalid?.length || res?.failures?.length ? "warn" : "good"
     );
     try {
-      await upsertTipSheet(tipPayload({
-        sent: true, sent_at: now,
-        finalized: true, finalized_at: now,
-        locked: true, locked_at: now,
-      }));
+      await upsertTipSheet(sentPayload);
     } catch (e) {
       console.error("Save tip sheet failed:", e);
-      addLog("Emails went out but the sheet's sent/locked state didn't save — run migration 0015?", "warn");
+      addLog(`Emails went out but the sheet's sent/locked state didn't save — ${e.message || "run migration 0015?"}`, "warn");
     }
   }
 
@@ -2761,6 +2828,15 @@ export default function SchedulingHub({ session, onSignOut }) {
   // sending is what sets finalized now, so a reopened sheet has to be genuinely
   // editable again rather than finalized-but-unlocked. Optimistic, rolled back
   // if the write fails so the button can't show a lock that didn't save.
+  // A sheet is about to freeze (sent or locked): hold the tip-out and Closing
+  // Sum it is showing right now as its stored values, so the frozen sheet on
+  // screen matches the row just written. The auto/by-hand flags are kept —
+  // they record how each value was decided.
+  function pinTipRuleValues() {
+    setBarTipOutOn(barTipOutCharged);
+    if (closingSumShowsCount) setClosingSum(truncCents(closingBankTotal) ? closingSumValue.toFixed(2) : "");
+  }
+
   async function toggleTipLock() {
     if (tipLockBusy) return;
     const next = !tipLocked;
@@ -2770,14 +2846,16 @@ export default function SchedulingHub({ session, onSignOut }) {
     const prevFinalized = tipFinalized;
     const prevFinalizedAt = tipFinalizedAt;
     setTipLockBusy(true);
+    const payload = tipPayload(
+      next ? { locked: true, locked_at: at }
+           : { locked: false, locked_at: null, finalized: false, finalized_at: null }
+    );
+    if (next) pinTipRuleValues();
     setTipLocked(next);
     setTipLockedAt(at);
     if (!next) { setTipFinalized(false); setTipFinalizedAt(null); }
     try {
-      await upsertTipSheet(tipPayload(
-        next ? { locked: true, locked_at: at }
-             : { locked: false, locked_at: null, finalized: false, finalized_at: null }
-      ));
+      await upsertTipSheet(payload);
       addLog(`Tip sheet ${next ? "locked" : "unlocked"} — ${shortDate(tipDateIso)}`, next ? "warn" : "good");
     } catch (e) {
       console.error("Tip lock save failed:", e);
@@ -2785,7 +2863,7 @@ export default function SchedulingHub({ session, onSignOut }) {
       setTipLockedAt(next ? null : tipLockedAt);
       setTipFinalized(prevFinalized);
       setTipFinalizedAt(prevFinalizedAt);
-      addLog(`Couldn't ${next ? "lock" : "unlock"} the tip sheet — run migration 0013?`, "warn");
+      addLog(`Couldn't ${next ? "lock" : "unlock"} the tip sheet — ${e.message || "run migration 0013?"}`, "warn");
     }
     setTipLockBusy(false);
   }
@@ -3711,7 +3789,11 @@ export default function SchedulingHub({ session, onSignOut }) {
         setCashSales(s(row?.cash_sales));
         setSlotOverrides(row?.slot_overrides || {});
         setTipTimes(row?.time_entries || {});
-        setBarTipOutOn(row?.bar_tip_out !== false); // null / no row → on
+        const rules = rulesFromRow(row);
+        setBarTipOutOn(rules.barStoredOn); // null / no row → on
+        setBarTipOutMode(rules.barMode);
+        setClosingSumAuto(rules.closingAuto);
+        setExpoAsBusser(rules.expoAsBusser);
         setCustomMode(row?.slot_overrides && Object.keys(row.slot_overrides).length > 0);
         setTipSent(!!row?.sent);
         setTipSentAt(row?.sent_at || null);
@@ -4795,6 +4877,16 @@ export default function SchedulingHub({ session, onSignOut }) {
         .tip-out-toggle:disabled { cursor: not-allowed; opacity: 0.5; }
         /* Same red as a coverage gap on Today at a Glance; bold because it is small text on the dark card. */
         .tip-out-na { color: #B23A2F; font-weight: 700; }
+        /* Why the tip-out is on/off, and the Closing Sum vs count note. */
+        .tip-out-why, .closing-sum-note { font-family: 'Space Mono', monospace; font-size: 9.5px; color: #8a8270; margin-top: 3px; line-height: 1.35; }
+        /* Out of the row's flow so the five pool fields keep one baseline; the
+           row gets room for it on screen only (the line never prints). */
+        .tip-out-field { position: relative; }
+        .tip-out-why { position: absolute; top: 100%; left: 0; white-space: nowrap; }
+        @media screen { .tip-pool-row { margin-bottom: 20px !important; } }
+        .closing-sum-note { margin: -2px 0 6px; text-align: right; }
+        .closing-sum-note.mismatch { color: #8a5a20; background: #FBF0DE; border: 1px solid #C98A3E; border-radius: 5px; padding: 4px 6px; text-align: left; display: flex; gap: 5px; align-items: flex-start; flex-wrap: wrap; }
+        .closing-sum-reset { margin-left: 6px; font-family: 'Space Mono', monospace; font-size: 9px; background: none; border: 1px solid currentColor; color: inherit; border-radius: 4px; padding: 0 5px; cursor: pointer; }
         .payout-empty { font-size: 10.5px; color: #c7bfa9; font-style: italic; padding: 2px 0 4px; }
         .payout-row { display: flex; gap: 5px; margin-bottom: 5px; align-items: center; }
         .payout-row input[type="text"] { flex: 1; min-width: 0; font-size: 11px; padding: 4px 6px; border: 1px solid rgba(43,42,37,0.15); border-radius: 3px; background: #FFFDF7; color: #2B2A25; }
@@ -5327,6 +5419,8 @@ export default function SchedulingHub({ session, onSignOut }) {
         .tip-finalized-banner { background: rgba(90,138,106,0.14); border-color: #5a8a6a; color: #8fce9f; }
         .tip-locked-banner { background: rgba(178,58,47,0.16); border-color: #B23A2F; color: #e79289; }
         .tip-off-note { background: rgba(200,149,108,0.14); border-color: var(--accent); color: var(--accent); }
+        .tip-out-why, .closing-sum-note { color: var(--txt2); }
+        .closing-sum-note.mismatch { background: rgba(200,149,108,0.14); border-color: var(--accent); color: var(--accent); }
         .tip-locked-banner .tip-finalized-sub { color: var(--txt2); }
         .tip-finalized-sub { color: var(--txt2); }
         .tip-locked input, .tip-locked .add-payout-btn, .tip-locked .custom-toggle { background: var(--line) !important; }
@@ -7259,10 +7353,33 @@ export default function SchedulingHub({ session, onSignOut }) {
                     </div>
                   </div>
 
+                  {/* Fills from the Closing total until something is typed;
+                      clearing the box goes back to the count. A typed figure
+                      that disagrees with the count is kept, never hidden. */}
                   <div className="recon-row">
                     <label>Closing Sum</label>
-                    <input type="number" value={closingSum} onChange={(e) => setClosingSum(e.target.value)} placeholder="0.00" />
+                    <input
+                      type="number"
+                      value={closingSumShowsCount ? (truncCents(closingBankTotal) ? closingSumValue.toFixed(2) : "") : closingSum}
+                      onChange={(e) => editClosingSum(e.target.value)}
+                      placeholder="0.00"
+                    />
                   </div>
+                  {closingSumShowsCount && truncCents(closingBankTotal) > 0 && (
+                    <div className="closing-sum-note screen-only">auto: from the Closing count</div>
+                  )}
+                  {closingSumDiff !== null && (
+                    <div className="closing-sum-note mismatch screen-only">
+                      <AlertTriangle size={11} />
+                      {closingSum === ""
+                        ? <>Closing Sum was left blank; the count says ${money(truncCents(closingBankTotal) / 100)}.</>
+                        : <>Count says ${money(truncCents(closingBankTotal) / 100)} — entered figure is
+                          {" "}${money(Math.abs(closingSumDiff) / 100)} {closingSumDiff > 0 ? "over" : "under"} the count.</>}
+                      {!tipFrozen && (
+                        <button className="closing-sum-reset" onClick={() => editClosingSum("")}>Use count</button>
+                      )}
+                    </div>
+                  )}
 
                   <div className="payouts-block">
                     <div className="payouts-header">
@@ -7375,26 +7492,33 @@ export default function SchedulingHub({ session, onSignOut }) {
                   </div>
                 )}
 
-                <div className="tip-inputs" style={{ marginBottom: 6, marginTop: 10 }}>
+                <div className="tip-inputs tip-pool-row" style={{ marginBottom: 6, marginTop: 10 }}>
                   <div className="tip-field"><label>Floor Pool</label><div className="tip-stat">${money(floorPool)}</div></div>
                   <div className="tip-field"><label>Total Points</label><div className="tip-stat">{totalPoints.toFixed(2)}</div></div>
                   <div className="tip-field"><label>$ / Point</label><div className="tip-stat"><b>${money(perPoint)}</b></div></div>
-                  <div className="tip-field">
+                  <div className="tip-field tip-out-field">
                     <label>
-                      {barTipOutOn ? "Bar Tip-Out (10%)" : <>Bar Tip-Out <span className="tip-out-na">— N/A</span></>}
-                      {/* Control is screen-only; the N/A outcome prints. */}
+                      {barTipOutCharged ? "Bar Tip-Out (10%)" : <>Bar Tip-Out <span className="tip-out-na">— N/A</span></>}
+                      {/* Control is screen-only; the N/A outcome prints. Pressing
+                          it overrides the automatic rule either way. */}
                       <button
-                        className={`tip-out-toggle screen-only ${barTipOutOn ? "on" : ""}`}
+                        className={`tip-out-toggle screen-only ${barTipOutCharged ? "on" : ""}`}
                         disabled={tipFinalized || tipLocked}
-                        onClick={() => setBarTipOutOn((v) => !v)}
+                        onClick={toggleBarTipOut}
                         title={tipFinalized || tipLocked ? "This date is locked — unlock it to change the bar tip-out"
-                          : barTipOutOn ? "Turn off the bar tip-out for this date (bar keeps its full tips)"
-                          : "Turn the 10% bar tip-out back on for this date"}
-                        aria-pressed={barTipOutOn}
-                      >{barTipOutOn ? "On" : "Off"}</button>
+                          : barTipOutCharged ? "Turn off the bar tip-out for this date (bar keeps its full tips)"
+                          : "Turn the 10% bar tip-out on for this date"}
+                        aria-pressed={barTipOutCharged}
+                      >{barTipOutCharged ? "On" : "Off"}</button>
                     </label>
                     {/* An em dash, not $0.00 — "doesn't apply", not "charged zero". */}
-                    <div className="tip-stat">{barTipOutOn ? `$${money(barTipOutTotal)}` : "—"}</div>
+                    <div className="tip-stat">{barTipOutCharged ? `$${money(barTipOutTotal)}` : "—"}</div>
+                    <div className="tip-out-why screen-only">
+                      {barTipOutWhy}
+                      {barTipOutMode !== "auto" && !tipFrozen && (
+                        <button className="closing-sum-reset" onClick={() => setBarTipOutMode("auto")}>Use auto</button>
+                      )}
+                    </div>
                   </div>
                   <div className="tip-field"><label>Each Recipient Gets</label><div className="tip-stat"><b>${money(barShareEach)}</b></div></div>
                 </div>
@@ -7503,12 +7627,32 @@ export default function SchedulingHub({ session, onSignOut }) {
                         : !tipDayOfAllowed ? "This date is locked — unlock it to add staff"
                         : `Add someone to ${shortDate(tipDateIso)}`}
                     >+ Add staff</button>
+                    <button
+                      className={`custom-toggle screen-only ${expoAsBusser ? "on" : ""}`}
+                      disabled={tipFinalized || tipLocked}
+                      onClick={toggleExpoAsBusser}
+                      aria-pressed={expoAsBusser}
+                      title={tipFinalized || tipLocked ? "This date is locked — unlock it to change the Expo slot"
+                        : expoAsBusser ? "Back to Expo (0.30 pts) for this date"
+                        : "No expo tonight: pay the Expo person as a 3rd Busser/Runner (0.60 pts)"}
+                    >{expoAsBusser ? "✓ 3rd Busser/Runner" : "Expo → 3rd Busser/Runner"}</button>
                     <button className={`custom-toggle ${customMode ? "on" : ""}`} onClick={toggleCustomMode}>
                       {customMode ? "✓ Custom Schedule" : "Custom Schedule"}
                     </button>
                   </div>
                 </div>
 
+                {expoAsBusser && (() => {
+                  const who = finalSlots.find((p) => p.id === "expo")?.name;
+                  return (
+                    <div className="tip-off-note screen-only">
+                      <AlertTriangle size={12} />
+                      {who
+                        ? <>Ran as 3rd Busser/Runner, not Expo: {who} is paid in a third Busser/Runner slot at 0.60 points instead of Expo's 0.30, so total points and every $/point differ from a normal night. The schedule still shows Expo.</>
+                        : <>Set to run as 3rd Busser/Runner, but nobody is scheduled on Expo for this date, so the slot is empty.</>}
+                    </div>
+                  );
+                })()}
                 {/* Never drop someone from the sheet silently — payroll needs to
                     know why a name it expected isn't there. */}
                 {tipSlotTies.map((t) => {

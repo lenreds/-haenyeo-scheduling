@@ -1119,9 +1119,15 @@ export async function upsertTipSheet(payload) {
   // Until migration 0017 runs, bar_tip_out doesn't exist. With the tip-out on
   // (the column's default) nothing is lost by dropping it; with it off the
   // save must fail visibly rather than silently record a tip-out.
-  if (error && /bar_tip_out/.test(error.message || "") && payload.bar_tip_out !== false) {
+  if (error && /bar_tip_out(?!_)/.test(error.message || "") && payload.bar_tip_out !== false) {
     const { bar_tip_out, ...rest } = payload;
     ({ data, error } = await write(rest));
+  }
+  // 0022's columns carry pay decisions (Expo as 3rd Busser/Runner, how the
+  // tip-out and Closing Sum were decided). Dropping them would let the sheet
+  // reopen with different numbers, so the save fails visibly instead.
+  if (error && /expo_as_busser|bar_tip_out_auto|closing_sum_auto/.test(error.message || "")) {
+    throw new Error(`Run migration 0022 in Supabase, then save again (${error.message})`);
   }
   if (error) throw error;
   return data;
