@@ -80,6 +80,7 @@ import {
   rulesPayload,
   truncCents,
 } from "./lib/tipRules.js";
+import { upcomingTimeOff } from "./lib/upcomingOff.js";
 import QRCode from "qrcode";
 
 // "" / undefined -> null so numeric columns don't choke; otherwise Number().
@@ -3024,6 +3025,21 @@ export default function SchedulingHub({ session, onSignOut }) {
     () => (railCleared.auto_log ? log.filter((e) => !e.at || e.at > railCleared.auto_log) : log),
     [log, railCleared.auto_log]
   );
+  // Approved Request Off / Time Off in the next 30 days, under the Auto-Action
+  // Log (see src/lib/upcomingOff.js for which days count). A rolling 30 days
+  // rather than the calendar month, so the box isn't near-empty at month end.
+  const upcomingOff = useMemo(
+    () => upcomingTimeOff({
+      resolved: resolvedReqs,
+      overrides,
+      todayIso: TODAY_ISO,
+      days: 30,
+      parseDates: (s) => parseRailDates(s),
+      timeOffRange: (s) => timeOffDates(s).dates,
+      isOff: isOffCell,
+    }),
+    [resolvedReqs, overrides, offCodes]
+  );
   const visibleResolved = useMemo(
     () => (railCleared.resolved ? resolvedReqs.filter((r) => !r.created_at || r.created_at > railCleared.resolved) : resolvedReqs),
     [resolvedReqs, railCleared.resolved]
@@ -5601,6 +5617,12 @@ export default function SchedulingHub({ session, onSignOut }) {
         .rs-log { max-height: 240px; overflow-y: auto; }
         .rs-log-empty { font-size: 11px; color: var(--muted); font-style: italic; }
         .rs-log .nr-log-row { font-size: 11px; }
+        /* Upcoming Time Off: date · name · kind, one row per request. */
+        .rs-up-row { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+        .rs-up-date { font-family: 'Space Mono', monospace; font-size: 10.5px; color: var(--txt); min-width: 92px; }
+        .rs-up-name { flex: 1; min-width: 0; color: var(--txt2); }
+        .rs-up-kind { font-family: 'Space Mono', monospace; font-size: 9px; letter-spacing: 0.5px; text-transform: uppercase; border: 1px solid; border-radius: 4px; padding: 0 5px; }
+        .rs-up-flag { flex-basis: 100%; display: flex; align-items: center; gap: 4px; font-size: 10px; color: var(--accent); }
         /* Notes box (brief item 2): taller, full-size text, no dates, and edited
            in place. The list scrolls; the add-field is pinned under it. */
         /* Fixed, comfortable height rather than growing down the whole column
@@ -6466,6 +6488,34 @@ export default function SchedulingHub({ session, onSignOut }) {
                         {entry.text}<span className="nr-log-time">{entry.time}</span>
                       </div>
                     ))
+                  )}
+                </div>
+
+                {/* Already decided, don't forget. Approved only — pending
+                    requests stay in Pending Decisions. */}
+                <div className="nr-label rs-log-label">
+                  <CalendarDays size={13} /> Upcoming Time Off
+                  {upcomingOff.length > 0 && <span className="nr-count">{upcomingOff.length}</span>}
+                </div>
+                <div className="nr-panel rs-log rs-upcoming">
+                  {upcomingOff.length === 0 ? (
+                    <div className="rs-log-empty">No approved time off in the next 30 days</div>
+                  ) : (
+                    upcomingOff.map((u) => {
+                      const style = TYPE_STYLES[u.type] || { badge: "#7B93A3", label: u.type };
+                      return (
+                        <div className="nr-log-row rs-up-row" key={u.id}>
+                          <span className="rs-up-date">{u.label}</span>
+                          <span className="rs-up-name">{u.name}</span>
+                          <span className="rs-up-kind" style={{ color: style.badge, borderColor: style.badge }}>{style.label}</span>
+                          {u.notOnSchedule && (
+                            <span className="rs-up-flag" title="Approved, but these days never reached the schedule — the dates shown are the full request. Check them and set the days manually.">
+                              <AlertTriangle size={10} /> not on the schedule
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })
                   )}
                 </div>
               </div>
