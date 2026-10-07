@@ -76,6 +76,8 @@ import {
   closingSumDiffCents,
   closingSumEffective,
   isFrozen,
+  pinnedSlot,
+  rosterSnapshotOf,
   rulesFromRow,
   rulesPayload,
   truncCents,
@@ -1445,6 +1447,9 @@ export default function SchedulingHub({ session, onSignOut }) {
   // Per-date: the Expo slot ran as a 3rd Busser/Runner (0.6 pts, not 0.3).
   const [expoAsBusser, setExpoAsBusser] = useState(false);
   const [slotOverrides, setSlotOverrides] = useState({}); // slotId -> { name, pts }
+  // Names and points pinned when the sheet was sent or locked (migration 0023);
+  // null = not pinned, so the slots follow the schedule.
+  const [rosterSnapshot, setRosterSnapshot] = useState(null);
   const [tipSent, setTipSent] = useState(false);
   // When the emails actually went out, for the "Sent ✓ 11:42 PM" button label
   // (migration 0015). Null on sheets sent before that column existed.
@@ -2279,7 +2284,12 @@ export default function SchedulingHub({ session, onSignOut }) {
   // Ties the app settled by roster order that change someone's points. A tie
   // is the manager's call, so it's surfaced, not silently resolved. Custom
   // Schedule is the manager choosing by hand, so no note there.
-  const tipSlotTies = useMemo(() => (customMode ? [] : slotTies(tipWorking.working)), [tipWorking, customMode]);
+  // A pinned frozen sheet isn't filled from the schedule, so no ties either.
+  const tipSlotsPinned = !!rosterSnapshot && isFrozen({ sent: tipSent, locked: tipLocked, finalized: tipFinalized });
+  const tipSlotTies = useMemo(
+    () => (customMode || tipSlotsPinned ? [] : slotTies(tipWorking.working)),
+    [tipWorking, customMode, tipSlotsPinned]
+  );
   // Manager On for this date — Send Tip Sheet RECIPIENTS ONLY. They receive the
   // sheet; they are never on it: this list feeds tipSendRoster and nothing
   // else — not autoSlots, displaySlots, finalSlots or any total. Same gate as
@@ -2342,8 +2352,20 @@ export default function SchedulingHub({ session, onSignOut }) {
     return !tipWorkingNames.has(name);
   }
 
+  // A sent / locked sheet with a pinned roster shows exactly who it paid, so
+  // nothing the schedule says now (swaps, template edits, Rail requests, the
+  // off check above) reaches it. Frozen before pinning existed: no snapshot,
+  // so it still follows the schedule as it always has.
+  const tipPinnedRoster = tipSlotsPinned ? rosterSnapshot : null;
+
   const slotsExcludedOff = [];
   const displaySlots = autoSlots.map((slot) => {
+    const t = getTimes(slot.id);
+    const hours = hoursBetween(t.in, t.out);
+    if (tipPinnedRoster) {
+      const pin = pinnedSlot(tipPinnedRoster, slot.id) || { name: "", pts: null };
+      return { ...slot, name: pin.name, pts: pin.pts, hours };
+    }
     const ov = slotOverrides[slot.id];
     let name = customMode && ov?.name !== undefined ? ov.name : slot.autoName;
     if (offForTipDate(name)) {
@@ -2355,8 +2377,6 @@ export default function SchedulingHub({ session, onSignOut }) {
       pts = slot.role === "Host" ? (coversNum > 80 ? slot.defaultPts : 0) : slot.defaultPts;
       if (customMode && ov?.pts !== undefined) pts = ov.pts;
     }
-    const t = getTimes(slot.id);
-    const hours = hoursBetween(t.in, t.out);
     return { ...slot, name, pts, hours };
   });
 
@@ -2540,6 +2560,7 @@ export default function SchedulingHub({ session, onSignOut }) {
       cash_sales: numOrNull(cashSales),
       slot_overrides: customMode ? slotOverrides : {},
       time_entries: tipTimes,
+      roster_snapshot: rosterSnapshot,
       // The values the sheet is actually using, not just what was typed, so a
       // sheet that is sent or locked later already holds what it showed.
       ...rulesPayload({
@@ -2565,11 +2586,11 @@ export default function SchedulingHub({ session, onSignOut }) {
       floorCash, floorCredit, barCash, barCredit, covers,
       openingCounts, closingCounts, closingSum, payoutItems, cashSales,
       customMode ? slotOverrides : {}, tipTimes, barTipOutOn,
-      barTipOutMode, closingSumAuto, expoAsBusser,
+      barTipOutMode, closingSumAuto, expoAsBusser, rosterSnapshot,
     ]),
     [floorCash, floorCredit, barCash, barCredit, covers, openingCounts, closingCounts,
      closingSum, payoutItems, cashSales, customMode, slotOverrides, tipTimes, barTipOutOn,
-     barTipOutMode, closingSumAuto, expoAsBusser]
+     barTipOutMode, closingSumAuto, expoAsBusser, rosterSnapshot]
   );
   const tipBaselineRef = useRef(null);   // tipFormKey as last written / last loaded
   const tipBaselineSeqRef = useRef(-1);  // which tipLoadSeq that baseline belongs to
@@ -2803,6 +2824,7 @@ export default function SchedulingHub({ session, onSignOut }) {
       sent: true, sent_at: now,
       finalized: true, finalized_at: now,
       locked: true, locked_at: now,
+      roster_snapshot: pinnedRosterNow(),
     });
     pinTipRuleValues();
     setTipSendOpen(false);
@@ -2833,9 +2855,15 @@ export default function SchedulingHub({ session, onSignOut }) {
   // Sum it is showing right now as its stored values, so the frozen sheet on
   // screen matches the row just written. The auto/by-hand flags are kept —
   // they record how each value was decided.
+  // The roster goes with them: who is on the sheet and their points, as shown.
+  // Already pinned (a sent sheet locked again) keeps the original pin.
+  function pinnedRosterNow() {
+    return rosterSnapshot || rosterSnapshotOf(displaySlots);
+  }
   function pinTipRuleValues() {
     setBarTipOutOn(barTipOutCharged);
     if (closingSumShowsCount) setClosingSum(truncCents(closingBankTotal) ? closingSumValue.toFixed(2) : "");
+    setRosterSnapshot(pinnedRosterNow());
   }
 
   async function toggleTipLock() {
@@ -2847,11 +2875,14 @@ export default function SchedulingHub({ session, onSignOut }) {
     const prevFinalized = tipFinalized;
     const prevFinalizedAt = tipFinalizedAt;
     setTipLockBusy(true);
+    const prevSnapshot = rosterSnapshot;
+    // Unlocking un-pins the roster: an editable sheet follows the schedule again.
     const payload = tipPayload(
-      next ? { locked: true, locked_at: at }
-           : { locked: false, locked_at: null, finalized: false, finalized_at: null }
+      next ? { locked: true, locked_at: at, roster_snapshot: pinnedRosterNow() }
+           : { locked: false, locked_at: null, finalized: false, finalized_at: null, roster_snapshot: null }
     );
     if (next) pinTipRuleValues();
+    else setRosterSnapshot(null);
     setTipLocked(next);
     setTipLockedAt(at);
     if (!next) { setTipFinalized(false); setTipFinalizedAt(null); }
@@ -2862,6 +2893,7 @@ export default function SchedulingHub({ session, onSignOut }) {
       console.error("Tip lock save failed:", e);
       setTipLocked(!next);
       setTipLockedAt(next ? null : tipLockedAt);
+      setRosterSnapshot(prevSnapshot);
       setTipFinalized(prevFinalized);
       setTipFinalizedAt(prevFinalizedAt);
       addLog(`Couldn't ${next ? "lock" : "unlock"} the tip sheet — ${e.message || "run migration 0013?"}`, "warn");
@@ -3805,6 +3837,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         setCashSales(s(row?.cash_sales));
         setSlotOverrides(row?.slot_overrides || {});
         setTipTimes(row?.time_entries || {});
+        setRosterSnapshot(row?.roster_snapshot || null);
         const rules = rulesFromRow(row);
         setBarTipOutOn(rules.barStoredOn); // null / no row → on
         setBarTipOutMode(rules.barMode);

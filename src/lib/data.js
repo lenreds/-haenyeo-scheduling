@@ -1123,6 +1123,14 @@ export async function upsertTipSheet(payload) {
     const { bar_tip_out, ...rest } = payload;
     ({ data, error } = await write(rest));
   }
+  // Until migration 0023 runs, roster_snapshot doesn't exist. Dropping it
+  // leaves a frozen sheet following the schedule, as it did before 0023 —
+  // better than a send whose sent / locked state fails to save.
+  if (error && /roster_snapshot/.test(error.message || "")) {
+    console.warn("tip_sheets.roster_snapshot missing — run migration 0023 to pin frozen rosters.");
+    const { roster_snapshot, ...rest } = payload;
+    ({ data, error } = await write(rest));
+  }
   // 0022's columns carry pay decisions (Expo as 3rd Busser/Runner, how the
   // tip-out and Closing Sum were decided). Dropping them would let the sheet
   // reopen with different numbers, so the save fails visibly instead.

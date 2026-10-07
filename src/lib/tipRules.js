@@ -100,3 +100,23 @@ export function rulesPayload({ expoAsBusser, barMode, barOn, closingAuto, closin
     closing_sum_auto: !!closingAuto,
   };
 }
+
+// The roster a frozen sheet paid: slot id -> { name, pts }, taken from the
+// slots exactly as shown when it was sent or locked. Without it a frozen sheet
+// rebuilds its names and points from the schedule each time it opens, so a
+// later swap, template edit or approved Rail request for that date would
+// change a sheet that was already emailed.
+export function rosterSnapshotOf(slots) {
+  const snap = {};
+  slots.forEach((s) => { snap[s.id] = { name: s.name || "", pts: s.name ? s.pts : null }; });
+  return snap;
+}
+
+// Pinned name and points for a slot, or null when the sheet has no snapshot
+// (not frozen, or frozen before snapshots existed) or the slot isn't in it.
+export function pinnedSlot(snapshot, slotId) {
+  if (!snapshot || typeof snapshot !== "object") return null;
+  const p = snapshot[slotId];
+  if (!p) return null;
+  return { name: p.name || "", pts: p.name ? (Number(p.pts) || 0) : null };
+}
