@@ -984,9 +984,10 @@ function hoursBetween(inStr, outStr) {
   return (outM - inM) / 60;
 }
 
-// truncates to the cent instead of rounding — 215.4405 stays 215.44, never 215.45
+// truncates to the cent instead of rounding — 215.4405 stays 215.44, never 215.45.
+// truncCents carries the float epsilon, so 4.35 (434.99999… cents) stays 4.35.
 function money(n) {
-  return (Math.floor((n || 0) * 100) / 100).toFixed(2);
+  return (truncCents(n) / 100).toFixed(2);
 }
 
 // one-off exceptions layered on top of each person's recurring pattern — this is
