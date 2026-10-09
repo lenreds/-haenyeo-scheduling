@@ -83,6 +83,8 @@ import {
   truncCents,
 } from "./lib/tipRules.js";
 import { upcomingTimeOff } from "./lib/upcomingOff.js";
+import { hoursBetween, settledTime } from "./lib/tipTimes.js";
+import { ackEntry, tipSheetProblems, zeroesAllAcked } from "./lib/tipGuard.js";
 import QRCode from "qrcode";
 
 // "" / undefined -> null so numeric columns don't choke; otherwise Number().
@@ -957,32 +959,8 @@ function dateInfoFromIso(isoStr) {
   return { iso: isoStr, weekday: dateObj.getDay(), day: d, dateObj };
 }
 
-// payroll rounding: round any clock punch to the nearest 15 minutes,
-// with the classic 7/8-minute cutoff (<=7 rounds down, >=8 rounds up)
-function parseTimeInput(str) {
-  if (!str) return null;
-  const m = str.trim().toLowerCase().match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/);
-  if (!m) return null;
-  let hour = parseInt(m[1], 10);
-  const minute = m[2] ? parseInt(m[2], 10) : 0;
-  const meridiem = m[3];
-  if (meridiem === "pm" && hour !== 12) hour += 12;
-  if (meridiem === "am" && hour === 12) hour = 0;
-  if (!meridiem && hour >= 1 && hour <= 11) hour += 12; // no am/pm typed — assume PM (dinner shift default)
-  return hour * 60 + minute;
-}
-function roundToQuarter(mins) {
-  if (mins == null) return null;
-  const rem = mins % 15;
-  return rem <= 7 ? mins - rem : mins + (15 - rem);
-}
-function hoursBetween(inStr, outStr) {
-  const inM = roundToQuarter(parseTimeInput(inStr));
-  let outM = roundToQuarter(parseTimeInput(outStr));
-  if (inM == null || outM == null) return 0;
-  if (outM < inM) outM += 24 * 60; // shift crosses midnight
-  return (outM - inM) / 60;
-}
+// Clock-time parsing (parseTimeInput, hoursBetween) lives in lib/tipTimes.js
+// with its tests. It decides what every saved sheet paid, so it is frozen.
 
 // truncates to the cent instead of rounding — 215.4405 stays 215.44, never 215.45.
 // truncCents carries the float epsilon, so 4.35 (434.99999… cents) stays 4.35.
@@ -1451,6 +1429,13 @@ export default function SchedulingHub({ session, onSignOut }) {
   // Names and points pinned when the sheet was sent or locked (migration 0023);
   // null = not pinned, so the slots follow the schedule.
   const [rosterSnapshot, setRosterSnapshot] = useState(null);
+  // Every "$0.00 checked" tick given before a Lock or Send on this date — who,
+  // when, which action (migration 0024). Append-only, never shown on the sheet.
+  const [zeroTipAcks, setZeroTipAcks] = useState([]);
+  // The Lock / Send stop: { action: "lock" | "send", blocks, zeroes, ticked }.
+  const [tipGuard, setTipGuard] = useState(null);
+  // Ticks given on the way into the Send screen, written when the send lands.
+  const [tipSendAcks, setTipSendAcks] = useState([]);
   const [tipSent, setTipSent] = useState(false);
   // When the emails actually went out, for the "Sent ✓ 11:42 PM" button label
   // (migration 0015). Null on sheets sent before that column existed.
@@ -2331,7 +2316,17 @@ export default function SchedulingHub({ session, onSignOut }) {
     return tipTimes[slotId] || { in: "", out: "" };
   }
   function setSlotTime(slotId, field, value) {
-    setTipTimes((tt) => ({ ...tt, [slotId]: { ...getTimes(slotId), [field]: value } }));
+    // From the latest state, not this render's: two quick writes to one row
+    // (leaving TIME IN straight into TIME OUT) must not undo each other.
+    setTipTimes((tt) => ({ ...tt, [slotId]: { ...(tt[slotId] || { in: "", out: "" }), [field]: value } }));
+  }
+  // On leaving a time cell, store what was typed unambiguously: TIME OUT
+  // "1" -> "1:00 AM" (not 1pm, which made a 5pm start read as 20 hours),
+  // "545" -> "5:45 PM" (not silently 0 HRS). Text it can't read is left as
+  // typed for the Lock / Send stop to name. Never on a sent / locked sheet.
+  function settleSlotTime(slotId, field) {
+    const clean = settledTime(getTimes(slotId)[field], field, tipFrozen);
+    if (clean) setSlotTime(slotId, field, clean);
   }
 
   // Nobody marked off for this date may occupy a tip slot. autoAssignSlots
@@ -2562,6 +2557,8 @@ export default function SchedulingHub({ session, onSignOut }) {
       slot_overrides: customMode ? slotOverrides : {},
       time_entries: tipTimes,
       roster_snapshot: rosterSnapshot,
+      // Only once there is one, so sheets save as before until migration 0024.
+      ...(zeroTipAcks.length ? { zero_tip_acks: zeroTipAcks } : {}),
       // The values the sheet is actually using, not just what was typed, so a
       // sheet that is sent or locked later already holds what it showed.
       ...rulesPayload({
@@ -2733,10 +2730,43 @@ export default function SchedulingHub({ session, onSignOut }) {
 
   // A sheet that already went out asks before opening the screen again, so a
   // stray click on "Sent ✓" can't start a second round of emails (brief item 1).
-  function openTipSendModal() {
-    if (tipSent && !window.confirm(
+  // ---- Lock / Send stop -----------------------------------------------------
+  // Opens the stop and returns true when the sheet has a hole: a missing or
+  // unreadable time, a shift over 14 hours (both no override), or someone with
+  // points on $0.00 (each name ticked as checked first). See lib/tipGuard.js.
+  function stopForTipProblems(action) {
+    const { blocks, zeroes } = tipSheetProblems(finalSlots, tipTimes);
+    if (!blocks.length && !zeroes.length) return false;
+    setTipGuard({ action, blocks, zeroes, ticked: [] });
+    return true;
+  }
+  function toggleTipGuardTick(slotId) {
+    setTipGuard((g) => g && ({
+      ...g, ticked: g.ticked.includes(slotId) ? g.ticked.filter((x) => x !== slotId) : [...g.ticked, slotId],
+    }));
+  }
+  function proceedPastTipGuard() {
+    const g = tipGuard;
+    if (!g || g.blocks.length || g.ticked.length < g.zeroes.length) return;
+    // Re-read the sheet: the stop shows what it found when it opened.
+    const now = tipSheetProblems(finalSlots, tipTimes);
+    const at = new Date().toISOString();
+    const acks = g.zeroes.map((z) => ackEntry(z, { action: g.action, by: session?.user?.email, at }));
+    if (now.blocks.length || !zeroesAllAcked(now.zeroes, acks)) {
+      setTipGuard({ action: g.action, blocks: now.blocks, zeroes: now.zeroes, ticked: [] });
+      return;
+    }
+    setTipGuard(null);
+    if (g.action === "lock") toggleTipLock(acks);
+    else openTipSendModal(acks);
+  }
+
+  function openTipSendModal(acks = null) {
+    if (acks === null && tipSent && !window.confirm(
       `This tip sheet was already sent${tipSentAtLabel ? ` at ${tipSentAtLabel}` : ""}. Send it again?`
     )) return;
+    if (acks === null && stopForTipProblems("send")) return;
+    setTipSendAcks(acks || []);
     setTipSendSubject(`Tip sheet ${tipSendShortDate}`);
     setTipSendNotes("");
     setTipSendExcluded([]);
@@ -2793,6 +2823,14 @@ export default function SchedulingHub({ session, onSignOut }) {
 
   async function confirmSendTipSheet() {
     if (tipSendBusy || !tipSendChosen.length) return;
+    // Checked again here: the sheet behind the Send screen could have changed
+    // since the stop was cleared.
+    const problems = tipSheetProblems(finalSlots, tipTimes);
+    if (problems.blocks.length || !zeroesAllAcked(problems.zeroes, tipSendAcks)) {
+      setTipSendOpen(false);
+      stopForTipProblems("send");
+      return;
+    }
     setTipSendBusy(true);
     setTipSendResult(null);
     let pdfB64;
@@ -2820,13 +2858,17 @@ export default function SchedulingHub({ session, onSignOut }) {
       return;
     }
     const now = new Date().toISOString();
+    const acks = [...zeroTipAcks, ...tipSendAcks];
     // Built before anything changes state: the values the emailed PDF showed.
     const sentPayload = tipPayload({
       sent: true, sent_at: now,
       finalized: true, finalized_at: now,
       locked: true, locked_at: now,
       roster_snapshot: pinnedRosterNow(),
+      ...(acks.length ? { zero_tip_acks: acks } : {}),
     });
+    setZeroTipAcks(acks);
+    setTipSendAcks([]);
     pinTipRuleValues();
     setTipSendOpen(false);
     setTipSent(true);
@@ -2840,7 +2882,8 @@ export default function SchedulingHub({ session, onSignOut }) {
       res?.invalid?.length || res?.failures?.length ? "warn" : "good"
     );
     try {
-      await upsertTipSheet(sentPayload);
+      const saved = await upsertTipSheet(sentPayload);
+      if (saved?.acksNotSaved) addLog("Sheet sent, but the $0.00 acknowledgements weren't kept — run migration 0024", "warn");
     } catch (e) {
       console.error("Save tip sheet failed:", e);
       addLog(`Emails went out but the sheet's sent/locked state didn't save — ${e.message || "run migration 0015?"}`, "warn");
@@ -2867,34 +2910,43 @@ export default function SchedulingHub({ session, onSignOut }) {
     setRosterSnapshot(pinnedRosterNow());
   }
 
-  async function toggleTipLock() {
+  // `acks`: the "$0.00 checked" ticks from the stop, when Lock came through it.
+  async function toggleTipLock(acks = null) {
     if (tipLockBusy) return;
     const next = !tipLocked;
     if (!next && tipFinalized &&
         !window.confirm("Unlock this tip sheet for edits? It stops counting as finalized. Emails already sent are not recalled.")) return;
+    if (next && acks === null && stopForTipProblems("lock")) return;
     const at = next ? new Date().toISOString() : null;
     const prevFinalized = tipFinalized;
     const prevFinalizedAt = tipFinalizedAt;
     setTipLockBusy(true);
     const prevSnapshot = rosterSnapshot;
+    const prevAcks = zeroTipAcks;
+    const allAcks = next && acks?.length ? [...zeroTipAcks, ...acks] : zeroTipAcks;
     // Unlocking un-pins the roster: an editable sheet follows the schedule again.
-    const payload = tipPayload(
-      next ? { locked: true, locked_at: at, roster_snapshot: pinnedRosterNow() }
-           : { locked: false, locked_at: null, finalized: false, finalized_at: null, roster_snapshot: null }
-    );
+    // The ticks are kept either way — they're the record of what was checked.
+    const payload = tipPayload({
+      ...(next ? { locked: true, locked_at: at, roster_snapshot: pinnedRosterNow() }
+               : { locked: false, locked_at: null, finalized: false, finalized_at: null, roster_snapshot: null }),
+      ...(allAcks.length ? { zero_tip_acks: allAcks } : {}),
+    });
+    setZeroTipAcks(allAcks);
     if (next) pinTipRuleValues();
     else setRosterSnapshot(null);
     setTipLocked(next);
     setTipLockedAt(at);
     if (!next) { setTipFinalized(false); setTipFinalizedAt(null); }
     try {
-      await upsertTipSheet(payload);
+      const saved = await upsertTipSheet(payload);
       addLog(`Tip sheet ${next ? "locked" : "unlocked"} — ${shortDate(tipDateIso)}`, next ? "warn" : "good");
+      if (saved?.acksNotSaved) addLog("The $0.00 acknowledgements weren't kept — run migration 0024", "warn");
     } catch (e) {
       console.error("Tip lock save failed:", e);
       setTipLocked(!next);
       setTipLockedAt(next ? null : tipLockedAt);
       setRosterSnapshot(prevSnapshot);
+      setZeroTipAcks(prevAcks);
       setTipFinalized(prevFinalized);
       setTipFinalizedAt(prevFinalizedAt);
       addLog(`Couldn't ${next ? "lock" : "unlock"} the tip sheet — ${e.message || "run migration 0013?"}`, "warn");
@@ -3839,6 +3891,8 @@ export default function SchedulingHub({ session, onSignOut }) {
         setSlotOverrides(row?.slot_overrides || {});
         setTipTimes(row?.time_entries || {});
         setRosterSnapshot(row?.roster_snapshot || null);
+        setZeroTipAcks(Array.isArray(row?.zero_tip_acks) ? row.zero_tip_acks : []);
+        setTipGuard(null);
         const rules = rulesFromRow(row);
         setBarTipOutOn(rules.barStoredOn); // null / no row → on
         setBarTipOutMode(rules.barMode);
@@ -5260,6 +5314,9 @@ export default function SchedulingHub({ session, onSignOut }) {
         .delete-modal-body { font-size: 13.5px; color: #4a473d; line-height: 1.5; }
         .delete-modal-warn { font-size: 12.5px; color: #B23A2F; background: #FBEDEA; border: 1px solid #e6c3bc; border-radius: 7px; padding: 8px 11px; margin: 12px 0 4px; line-height: 1.45; }
         .delete-modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
+        .tip-guard-modal { width: min(460px, 92vw); }
+        .tip-guard-tick { display: flex; align-items: center; gap: 10px; min-height: 44px; font-size: 13.5px; color: inherit; cursor: pointer; }
+        .tip-guard-tick input { width: 20px; height: 20px; flex: none; }
         .manual-add-btn { margin-left: auto; font-family: 'Plus Jakarta Sans', sans-serif; font-weight: 700; font-size: 11.5px; padding: 5px 12px; border-radius: 8px; border: 1px solid rgba(47,52,50,0.15); background: #2F3432; color: #F5F0E3; cursor: pointer; text-transform: none; letter-spacing: 0; }
         .manual-field-label { display: block; font-family: 'Space Mono', monospace; font-size: 10.5px; letter-spacing: 0.6px; text-transform: uppercase; color: #85897F; margin: 12px 0 4px; }
         .manual-field { width: 100%; box-sizing: border-box; font-family: 'Plus Jakarta Sans', sans-serif; font-size: 13px; color: #2B2A25; background: #FDFBF4; border: 1px solid #d8d2c2; border-radius: 7px; padding: 8px 10px; }
@@ -7666,8 +7723,8 @@ export default function SchedulingHub({ session, onSignOut }) {
                                 </span>
                               )}
                             </td>
-                            <td className="shift-cell"><input type="text" className="tip-time-input" placeholder="4:00 PM" value={t.in} onChange={(e) => setSlotTime(p.id, "in", e.target.value)} disabled={!p.name} /></td>
-                            <td className="shift-cell"><input type="text" className="tip-time-input" placeholder="9:00 PM" value={t.out} onChange={(e) => setSlotTime(p.id, "out", e.target.value)} disabled={!p.name} /></td>
+                            <td className="shift-cell"><input type="text" className="tip-time-input" placeholder="4:00 PM" value={t.in} onChange={(e) => setSlotTime(p.id, "in", e.target.value)} onBlur={() => settleSlotTime(p.id, "in")} disabled={!p.name} /></td>
+                            <td className="shift-cell"><input type="text" className="tip-time-input" placeholder="9:00 PM" value={t.out} onChange={(e) => setSlotTime(p.id, "out", e.target.value)} onBlur={() => settleSlotTime(p.id, "out")} disabled={!p.name} /></td>
                             <td className="shift-cell">{p.name ? p.hours.toFixed(2) : ""}</td>
                             <td className="shift-cell">
                               {!p.name ? (
@@ -7786,7 +7843,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                   <button
                     className={`print-btn ${tipLocked ? "lock-active" : ""}`}
                     disabled={tipLockBusy}
-                    onClick={toggleTipLock}
+                    onClick={() => toggleTipLock()}
                     title={tipLocked ? `Unlock ${shortDate(tipDateIso)} for edits` : `Lock ${shortDate(tipDateIso)} — makes this date's inputs read-only`}
                   >
                     {tipLocked ? <Unlock size={13} /> : <Lock size={13} />}{" "}
@@ -7796,7 +7853,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                       Confirm & Send there, which also finalizes and locks. */}
                   <button
                     className={`publish-btn ${tipSent ? "publish-btn-sent" : ""}`}
-                    onClick={openTipSendModal}
+                    onClick={() => openTipSendModal()}
                     title={tipSent ? "Already sent — you'll be asked to confirm before it goes out again" : "Review recipients and subject, then send"}
                   >
                     {tipSent ? (
@@ -8539,6 +8596,51 @@ export default function SchedulingHub({ session, onSignOut }) {
                 <button className="delete-confirm-btn" disabled={dayOfBusy || !ready} onClick={confirmDayOf}>
                   {dayOfBusy ? "Saving…" : isAdd ? (dayOfForm.name ? `Add ${dayOfForm.name}` : "Add") : `Remove ${name}`}
                 </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Lock / Send stop (lib/tipGuard.js). Blocks have no way past — fix the
+          sheet. $0.00 names each need a tick, recorded with the sheet. */}
+      {tipGuard && (() => {
+        const { action, blocks, zeroes, ticked } = tipGuard;
+        const verb = action === "lock" ? "Lock" : "Send";
+        const canGo = !blocks.length && ticked.length >= zeroes.length;
+        return (
+          <div className="day-popup-backdrop screen-only">
+            <div className="delete-modal tip-guard-modal" role="alertdialog" aria-labelledby="tip-guard-title">
+              <div className="delete-modal-title" id="tip-guard-title">
+                {blocks.length ? `Can't ${verb.toLowerCase()} ${shortDate(tipDateIso)} yet` : `Check before you ${verb.toLowerCase()}`}
+              </div>
+              {blocks.length > 0 && (
+                <>
+                  <div className="delete-modal-warn">
+                    {blocks.map((b) => <div key={b.slotId}>{b.message}</div>)}
+                  </div>
+                  <div className="delete-modal-body">Fix {blocks.length === 1 ? "this time" : "these times"} on the sheet, then {verb.toLowerCase()} again.</div>
+                </>
+              )}
+              {zeroes.length > 0 && (
+                <>
+                  <div className="delete-modal-body" style={{ marginTop: blocks.length ? 12 : 0 }}>
+                    {zeroes.length === 1 ? "This person carries points and is paid nothing." : "These people carry points and are paid nothing."}
+                    {!blocks.length && ` Tick each one you've checked to ${verb.toLowerCase()}.`}
+                  </div>
+                  {zeroes.map((z) => (
+                    <label key={z.slotId} className="tip-guard-tick">
+                      <input type="checkbox" disabled={blocks.length > 0} checked={ticked.includes(z.slotId)} onChange={() => toggleTipGuardTick(z.slotId)} />
+                      <span>{z.message}</span>
+                    </label>
+                  ))}
+                </>
+              )}
+              <div className="delete-modal-actions">
+                <button className="nr-btn nr-btn-deny" onClick={() => setTipGuard(null)}>Back to the sheet</button>
+                {!blocks.length && (
+                  <button className="delete-confirm-btn" disabled={!canGo} onClick={proceedPastTipGuard}>{verb}</button>
+                )}
               </div>
             </div>
           </div>

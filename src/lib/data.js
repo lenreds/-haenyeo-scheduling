@@ -1115,22 +1115,38 @@ export async function fetchTipSheet(dateIso) {
 // payload keys mirror the tip_sheets columns.
 export async function upsertTipSheet(payload) {
   const write = (p) => supabase.from("tip_sheets").upsert(p, { onConflict: "date" }).select().maybeSingle();
-  let { data, error } = await write(payload);
+  // Each retry drops one more missing column from what was last sent.
+  let cur = payload;
+  let { data, error } = await write(cur);
   // Until migration 0017 runs, bar_tip_out doesn't exist. With the tip-out on
   // (the column's default) nothing is lost by dropping it; with it off the
   // save must fail visibly rather than silently record a tip-out.
   if (error && /bar_tip_out(?!_)/.test(error.message || "") && payload.bar_tip_out !== false) {
-    const { bar_tip_out, ...rest } = payload;
-    ({ data, error } = await write(rest));
+    const { bar_tip_out, ...rest } = cur;
+    cur = rest;
+    ({ data, error } = await write(cur));
   }
   // Until migration 0023 runs, roster_snapshot doesn't exist. Dropping it
   // leaves a frozen sheet following the schedule, as it did before 0023 —
   // better than a send whose sent / locked state fails to save.
-  if (error && /roster_snapshot/.test(error.message || "")) {
-    console.warn("tip_sheets.roster_snapshot missing — run migration 0023 to pin frozen rosters.");
-    const { roster_snapshot, ...rest } = payload;
-    ({ data, error } = await write(rest));
+  // Until migration 0024 runs, zero_tip_acks doesn't exist. The lock or send
+  // still saves (emails may already be out); the caller is told the "$0.00
+  // checked" ticks weren't kept so it can say so.
+  let acksNotSaved = false;
+  for (let i = 0; i < 2 && error; i++) {
+    if (/roster_snapshot/.test(error.message || "") && "roster_snapshot" in cur) {
+      console.warn("tip_sheets.roster_snapshot missing — run migration 0023 to pin frozen rosters.");
+      const { roster_snapshot, ...rest } = cur;
+      cur = rest;
+    } else if (/zero_tip_acks/.test(error.message || "") && "zero_tip_acks" in cur) {
+      console.warn("tip_sheets.zero_tip_acks missing — run migration 0024 to keep $0.00 acknowledgements.");
+      const { zero_tip_acks, ...rest } = cur;
+      cur = rest;
+      acksNotSaved = true;
+    } else break;
+    ({ data, error } = await write(cur));
   }
+  if (!error && acksNotSaved) return { ...(data || {}), acksNotSaved: true };
   // 0022's columns carry pay decisions (Expo as 3rd Busser/Runner, how the
   // tip-out and Closing Sum were decided). Dropping them would let the sheet
   // reopen with different numbers, so the save fails visibly instead.
