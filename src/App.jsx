@@ -83,8 +83,10 @@ import {
   truncCents,
 } from "./lib/tipRules.js";
 import { upcomingTimeOff } from "./lib/upcomingOff.js";
-import { hoursBetween, settledTime } from "./lib/tipTimes.js";
+import { hoursBetween } from "./lib/tipTimes.js";
 import { ackEntry, tipSheetProblems, zeroesAllAcked } from "./lib/tipGuard.js";
+import { pickerMayOpen, scheduledStartMins } from "./lib/tipPickers.js";
+import { CashPickerBody, PickerPanel, TimePickerBody } from "./components/TipPickers.jsx";
 import QRCode from "qrcode";
 
 // "" / undefined -> null so numeric columns don't choke; otherwise Number().
@@ -1434,6 +1436,9 @@ export default function SchedulingHub({ session, onSignOut }) {
   const [zeroTipAcks, setZeroTipAcks] = useState([]);
   // The Lock / Send stop: { action: "lock" | "send", blocks, zeroes, ticked }.
   const [tipGuard, setTipGuard] = useState(null);
+  // The one open tap panel: { kind: "time", slotId, field, name, scheduled,
+  // anchor } or { kind: "cash", which, denom, anchor }. null = none.
+  const [tipPicker, setTipPicker] = useState(null);
   // Ticks given on the way into the Send screen, written when the send lands.
   const [tipSendAcks, setTipSendAcks] = useState([]);
   const [tipSent, setTipSent] = useState(false);
@@ -2324,9 +2329,26 @@ export default function SchedulingHub({ session, onSignOut }) {
   // "1" -> "1:00 AM" (not 1pm, which made a 5pm start read as 20 hours),
   // "545" -> "5:45 PM" (not silently 0 HRS). Text it can't read is left as
   // typed for the Lock / Send stop to name. Never on a sent / locked sheet.
-  function settleSlotTime(slotId, field) {
-    const clean = settledTime(getTimes(slotId)[field], field, tipFrozen);
-    if (clean) setSlotTime(slotId, field, clean);
+  // ---- Tap panels (components/TipPickers.jsx) ------------------------------
+  // The time and cash cells are tap-only: they open a panel instead of the
+  // keyboard, so a time can only be stored in the unambiguous form the panel
+  // writes. Refused in code while the sheet is locked or finalized — not just
+  // by the .tip-locked style — and on an empty slot. A sent sheet that has
+  // been unlocked opens normally, so it can be corrected and re-sent.
+  const tipPickerAllowed = pickerMayOpen({ locked: tipLocked, finalized: tipFinalized });
+  function openTimePicker(e, p, field) {
+    if (!pickerMayOpen({ locked: tipLocked, finalized: tipFinalized, hasPerson: !!p.name })) return;
+    const w = tipWorking.working.find((x) => x.name === p.name);
+    const scheduled = w ? scheduledStartMins(normalizeShiftCode(w.code, w.role)) : null;
+    setTipPicker({ kind: "time", slotId: p.id, field, name: p.name, scheduled, anchor: e.currentTarget });
+  }
+  function openCashPicker(e, which, denom) {
+    if (!tipPickerAllowed) return;
+    setTipPicker({ kind: "cash", which, denom, anchor: e.currentTarget });
+  }
+  // Enter / Space on a focused cell opens it too (keyboard on desktop).
+  function pickerKey(e, open) {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
   }
 
   // Nobody marked off for this date may occupy a tip slot. autoAssignSlots
@@ -3502,6 +3524,7 @@ export default function SchedulingHub({ session, onSignOut }) {
   // saved page. It throws on failure — the send path must not email without it.
   const tipSheetPdfFilename = `Haenyeo-TipSheet-${tipDateIso}.pdf`;
   async function renderTipSheetPdf() {
+    setTipPicker(null); // never in the capture (it sits outside the card anyway)
     const card = tipCardRef.current;
     if (!card) throw new Error("the Tip Sheet isn't on screen");
     const origW = card.style.width;
@@ -3893,6 +3916,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         setRosterSnapshot(row?.roster_snapshot || null);
         setZeroTipAcks(Array.isArray(row?.zero_tip_acks) ? row.zero_tip_acks : []);
         setTipGuard(null);
+        setTipPicker(null);
         const rules = rulesFromRow(row);
         setBarTipOutOn(rules.barStoredOn); // null / no row → on
         setBarTipOutMode(rules.barMode);
@@ -5317,6 +5341,30 @@ export default function SchedulingHub({ session, onSignOut }) {
         .tip-guard-modal { width: min(460px, 92vw); }
         .tip-guard-tick { display: flex; align-items: center; gap: 10px; min-height: 44px; font-size: 13.5px; color: inherit; cursor: pointer; }
         .tip-guard-tick input { width: 20px; height: 20px; flex: none; }
+        /* Tip Sheet tap panels (components/TipPickers.jsx). Panel only — the
+           sheet's own cells keep their size. Every target is >= 44px tall. */
+        .tip-picker { position: fixed; z-index: 200; width: min(440px, calc(100vw - 16px)); box-sizing: border-box; padding: 12px; border-radius: 12px; background: var(--s2, #141414); border: 1px solid var(--line2, #2a2a2a); color: var(--txt, #fff); box-shadow: 0 16px 40px rgba(0,0,0,0.55); font-family: 'Manrope', sans-serif; }
+        .tip-picker .tp-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+        .tip-picker .tp-title { font-family: 'Space Mono', monospace; font-weight: 700; font-size: 12px; letter-spacing: 0.6px; text-transform: uppercase; color: var(--txt2, #aaa); }
+        .tip-picker .tp-delta { font-size: 12.5px; color: var(--accent, #c8956c); white-space: nowrap; }
+        .tip-picker .tp-row { display: flex; align-items: center; gap: 6px; }
+        .tip-picker .tp-row + .tp-row { margin-top: 10px; }
+        .tip-picker .tp-chips { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; flex: 1; min-width: 0; }
+        .tip-picker .tp-chip { min-height: 44px; min-width: 0; padding: 0 2px; border-radius: 8px; border: 1.5px solid var(--line2, #333); background: transparent; color: inherit; font-family: inherit; font-size: 13px; font-weight: 600; white-space: nowrap; cursor: pointer; }
+        .tip-picker .tp-chip.sched { border-style: dashed; border-color: var(--accent, #c8956c); }
+        .tip-picker .tp-chip.on { background: var(--accent, #c8956c); border-color: var(--accent, #c8956c); color: #111; }
+        .tip-picker .tp-arrow { width: 44px; height: 44px; flex: none; display: inline-flex; align-items: center; justify-content: center; border-radius: 8px; border: 1px solid var(--line2, #333); background: transparent; color: inherit; cursor: pointer; }
+        .tip-picker .tp-arrow:disabled { opacity: 0.3; cursor: default; }
+        /* 16px stops iOS zooming the page when the field is focused. */
+        .tip-picker .tp-type input { flex: 1; min-width: 0; height: 44px; box-sizing: border-box; padding: 0 12px; border-radius: 8px; border: 1px solid var(--line2, #333); background: var(--bg, #0c0c0c); color: inherit; font-family: inherit; font-size: 16px; }
+        .tip-picker .tp-type input:focus { outline: none; border-color: var(--accent, #c8956c); }
+        .tip-picker .tp-btn { min-height: 44px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--line2, #333); background: transparent; color: inherit; font-family: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
+        .tip-picker .tp-btn-main { background: var(--accent, #c8956c); border-color: var(--accent, #c8956c); color: #111; }
+        .tip-picker .tp-btn-quiet { color: var(--txt2, #aaa); margin-left: auto; }
+        .tip-picker .tp-btn:disabled { opacity: 0.35; cursor: default; }
+        .tip-picker .tp-note { margin-top: 8px; font-size: 12px; color: var(--txt2, #aaa); line-height: 1.4; }
+        .tip-picker .tp-warn { color: #e7b36a; }
+        .tip-picker .tp-foot { margin-top: 10px; }
         .manual-add-btn { margin-left: auto; font-family: 'Plus Jakarta Sans', sans-serif; font-weight: 700; font-size: 11.5px; padding: 5px 12px; border-radius: 8px; border: 1px solid rgba(47,52,50,0.15); background: #2F3432; color: #F5F0E3; cursor: pointer; text-transform: none; letter-spacing: 0; }
         .manual-field-label { display: block; font-family: 'Space Mono', monospace; font-size: 10.5px; letter-spacing: 0.6px; text-transform: uppercase; color: #85897F; margin: 12px 0 4px; }
         .manual-field { width: 100%; box-sizing: border-box; font-family: 'Plus Jakarta Sans', sans-serif; font-size: 13px; color: #2B2A25; background: #FDFBF4; border: 1px solid #d8d2c2; border-radius: 7px; padding: 8px 10px; }
@@ -7483,8 +7531,8 @@ export default function SchedulingHub({ session, onSignOut }) {
                     {DENOMS.map((d) => (
                       <div className="denom-row" key={d}>
                         <span className="denom-label">{denomLabel(d)}</span>
-                        <input type="number" value={openingCounts[d] || ""} onChange={(e) => setCount("open", d, e.target.value)} placeholder="0.00" />
-                        <input type="number" value={closingCounts[d] || ""} onChange={(e) => setCount("close", d, e.target.value)} placeholder="0.00" />
+                        <input type="number" value={openingCounts[d] || ""} readOnly inputMode="none" onClick={(e) => openCashPicker(e, "open", d)} onKeyDown={(e) => pickerKey(e, () => openCashPicker(e, "open", d))} placeholder="0.00" />
+                        <input type="number" value={closingCounts[d] || ""} readOnly inputMode="none" onClick={(e) => openCashPicker(e, "close", d)} onKeyDown={(e) => pickerKey(e, () => openCashPicker(e, "close", d))} placeholder="0.00" />
                       </div>
                     ))}
                     <div className="denom-row totals">
@@ -7723,8 +7771,8 @@ export default function SchedulingHub({ session, onSignOut }) {
                                 </span>
                               )}
                             </td>
-                            <td className="shift-cell"><input type="text" className="tip-time-input" placeholder="4:00 PM" value={t.in} onChange={(e) => setSlotTime(p.id, "in", e.target.value)} onBlur={() => settleSlotTime(p.id, "in")} disabled={!p.name} /></td>
-                            <td className="shift-cell"><input type="text" className="tip-time-input" placeholder="9:00 PM" value={t.out} onChange={(e) => setSlotTime(p.id, "out", e.target.value)} onBlur={() => settleSlotTime(p.id, "out")} disabled={!p.name} /></td>
+                            <td className="shift-cell"><input type="text" className="tip-time-input" placeholder="4:00 PM" value={t.in} readOnly inputMode="none" onClick={(e) => openTimePicker(e, p, "in")} onKeyDown={(e) => pickerKey(e, () => openTimePicker(e, p, "in"))} disabled={!p.name} /></td>
+                            <td className="shift-cell"><input type="text" className="tip-time-input" placeholder="9:00 PM" value={t.out} readOnly inputMode="none" onClick={(e) => openTimePicker(e, p, "out")} onKeyDown={(e) => pickerKey(e, () => openTimePicker(e, p, "out"))} disabled={!p.name} /></td>
                             <td className="shift-cell">{p.name ? p.hours.toFixed(2) : ""}</td>
                             <td className="shift-cell">
                               {!p.name ? (
@@ -8601,6 +8649,35 @@ export default function SchedulingHub({ session, onSignOut }) {
           </div>
         );
       })()}
+
+      {/* The open tap panel, floating over the sheet. Outside the card, so the
+          PDF never captures it; .screen-only keeps it off paper. Gone if the
+          cell left the screen (another tab) or the sheet was locked. */}
+      {tipPicker && tipPicker.anchor.isConnected && tipPickerAllowed && (
+        tipPicker.kind === "time" ? (
+          <PickerPanel anchor={tipPicker.anchor} onClose={() => setTipPicker(null)} label={`${tipPicker.name} ${tipPicker.field === "in" ? "time in" : "time out"}`}>
+            <TimePickerBody
+              key={`${tipPicker.slotId}-${tipPicker.field}`}
+              field={tipPicker.field}
+              value={getTimes(tipPicker.slotId)[tipPicker.field]}
+              scheduled={tipPicker.scheduled}
+              personName={tipPicker.name}
+              onSet={(text) => { setSlotTime(tipPicker.slotId, tipPicker.field, text); setTipPicker(null); }}
+            />
+          </PickerPanel>
+        ) : (
+          <PickerPanel anchor={tipPicker.anchor} onClose={() => setTipPicker(null)} label={`${denomLabel(tipPicker.denom)} ${tipPicker.which === "open" ? "opening" : "closing"}`}>
+            <CashPickerBody
+              key={`${tipPicker.which}-${tipPicker.denom}`}
+              denom={tipPicker.denom}
+              denomLabel={denomLabel(tipPicker.denom)}
+              columnLabel={tipPicker.which === "open" ? "Opening" : "Closing"}
+              value={String((tipPicker.which === "open" ? openingCounts : closingCounts)[tipPicker.denom] ?? "")}
+              onSet={(text) => { setCount(tipPicker.which, tipPicker.denom, text); setTipPicker(null); }}
+            />
+          </PickerPanel>
+        )
+      )}
 
       {/* Lock / Send stop (lib/tipGuard.js). Blocks have no way past — fix the
           sheet. $0.00 names each need a tick, recorded with the sheet. */}

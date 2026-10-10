@@ -87,6 +87,10 @@ export function normalizeTimeEntry(text, field) {
   return mins == null ? null : formatTime(mins);
 }
 
+// TEST-ONLY — not wired into the app. It was the leave-a-cell cleanup while
+// time cells were typeable; the cells are tap-only now and the panel is the
+// only writer, so nothing rewrites stored text behind the manager. Kept
+// because the invariant tests use it to define "rescued" (see tipTimes.test.js).
 // The text to store when a time cell is left, or null to leave it alone.
 // `frozen` = sent, locked or finalized: the stored text of a sheet that went
 // out is never rewritten, even when both forms would pay the same.
