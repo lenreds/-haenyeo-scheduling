@@ -15,16 +15,18 @@
 import { sendMessage, modifyMessage } from "./google.js";
 import { splitRecipients } from "./reply.js";
 
-// recipients: [{ name, email }]. buildRaw(to) returns the base64url message for
-// one recipient. Returns { sent, attempted, invalid: [{name,email}],
-// failures: ["Name: reason"] } — and error when nothing at all went out.
+// recipients: [{ name, email, …extra }]. buildRaw(to, recipient) returns the
+// base64url message for one recipient (the second argument carries any extra
+// fields, e.g. the staff id a personalised body needs). Returns { sent,
+// attempted, invalid: [{name,email}], failures: ["Name: reason"] } — and error
+// when nothing at all went out.
 export async function sendToEach({ accessToken, recipients, buildRaw, labelId = null }) {
   const { valid, invalid } = splitRecipients(recipients);
   let sent = 0;
   const failures = [];
   for (const r of valid) {
     try {
-      const msg = await sendMessage(accessToken, { raw: buildRaw(r.email) });
+      const msg = await sendMessage(accessToken, { raw: buildRaw(r.email, r) });
       sent++;
       if (msg?.id) {
         await modifyMessage(accessToken, msg.id, {

@@ -318,9 +318,13 @@ export function buildMultiWeekScheduleHtml({ weeks, sectionLabel }, opts = {}) {
 }
 
 // The schedule email as sent from Publish: the PDFs carry the schedule, so the
-// body is one line naming the span plus the manager's message, nothing else —
-// no inline tables, header band, footer or icon. weeks: the week payloads in
-// order (only weekLabel, "Oct 26 – Nov 1", is read). Returns { subject, text, html }.
+// body is one line naming the span plus the manager's message — no inline
+// tables, header band, footer or icon. weeks: the week payloads in order (only
+// weekLabel, "Oct 26 – Nov 1", is read).
+// opts.personal: this recipient's own shift lines (FOH, from personalLinesFor),
+//   right under the first line so a phone preview shows them; omitted = none.
+// opts.check: the sender's copy only — "Personal lines: 18 of 18 matched.", last.
+// Returns { subject, text, html }.
 export function buildScheduleAttachedEmail({ weeks }, opts = {}) {
   const list = weeks || [];
   const first = String(list[0]?.weekLabel || "");
@@ -328,10 +332,13 @@ export function buildScheduleAttachedEmail({ weeks }, opts = {}) {
   const range = `${first.split(" – ")[0]} – ${last.split(" – ")[1] || last}`;
   const line = `Schedule for ${range} attached.`;
   const notes = String(opts.notes || "").trim();
+  const personal = (Array.isArray(opts.personal) ? opts.personal : []).filter(Boolean).join("\n");
+  const check = String(opts.check || "").trim();
   const subject = String(opts.subject || "").trim() || `Haenyeo Schedule — ${range}`;
-  const text = notes ? `${line}\n\n${notes}` : line;
+  const blocks = [line, personal, notes, check].filter(Boolean);
+  const text = blocks.join("\n\n");
   const p = (s) => `<p style="margin:0 0 12px;font-family:${EMAIL_SANS};font-size:14px;line-height:1.5;color:#222222;">${escHtml(s).replace(/\n/g, "<br>")}</p>`;
-  const html = `<div>${p(line)}${notes ? p(notes) : ""}</div>`;
+  const html = `<div>${blocks.map(p).join("")}</div>`;
   return { subject, text, html };
 }
 

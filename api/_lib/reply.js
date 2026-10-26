@@ -72,7 +72,7 @@ export function splitRecipients(list) {
     const key = email.toLowerCase();
     if (seen.has(key)) return;
     seen.add(key);
-    valid.push({ name: r?.name || "", email });
+    valid.push({ ...r, name: r?.name || "", email }); // extra fields (id, sender…) ride along
   });
   return { valid, invalid };
 }

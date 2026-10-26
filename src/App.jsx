@@ -1506,7 +1506,7 @@ export default function SchedulingHub({ session, onSignOut }) {
     () =>
       staffList
         .filter((s) => s.active !== false && (s.section || "FOH") === "FOH")
-        .map((s) => ({ name: s.name, role: (staffRolesMap[s.name] || [])[0] || s.role }))
+        .map((s) => ({ id: s.id, name: s.name, role: (staffRolesMap[s.name] || [])[0] || s.role }))
         .filter((p) => ROLES.includes(p.role) || (staffRolesMap[p.name] || []).length > 0),
     [staffList, staffRolesMap]
   );
@@ -3711,7 +3711,7 @@ export default function SchedulingHub({ session, onSignOut }) {
   // (publish state is per section — see setWeekPublished). Managers get both
   // emails, so they're listed under each section and can be unticked per email.
   const PUBLISH_SECTIONS = [
-    { key: "foh", label: "Front of House", serverSections: ["FOH", "Management"], payloadFor: buildSchedulePayload, sheet: "FOH", fileTag: "FOH" },
+    { key: "foh", label: "Front of House", serverSections: ["FOH", "Management"], payloadFor: buildSchedulePayload, sheet: "FOH", fileTag: "FOH", personalLines: true },
     { key: "bk", label: "BOH & Kitchen", serverSections: ["BOH", "Kitchen", "Management"], payloadFor: buildBohKitchenPayload, sheet: "BOHKITCHEN", fileTag: "BOH-Kitchen" },
   ];
   const publishPeopleFor = (key) => [...(key === "foh" ? publishRecipients.foh : publishRecipients.bk), ...publishRecipients.mgmt];
@@ -3823,7 +3823,11 @@ export default function SchedulingHub({ session, onSignOut }) {
       attachments: pdfs[st.key].map(({ filename, b64 }) => ({ filename, b64 })),
       sections: st.serverSections,
       ...shared,
-      ...(test ? { test: true, includeCopy: st.copy } : { recipientIds: st.ids, includeCopy: st.copy }),
+      // FOH only: each person's own shifts in their email, the count in yours.
+      ...(st.personalLines ? { personalLines: true } : {}),
+      // A test still sends the ticked ids — the server emails only you, and
+      // uses them just for the "Personal lines: N of M matched" count.
+      ...(test ? { test: true, includeCopy: st.copy, recipientIds: st.ids } : { recipientIds: st.ids, includeCopy: st.copy }),
     }, token);
     // A section failed if ITS request failed or ITS Gmail call needs a
     // reconnect — never because of the other section's result.
@@ -3834,11 +3838,13 @@ export default function SchedulingHub({ session, onSignOut }) {
       const results = await Promise.all(jobs.map(sendOne));
       if (results.some((r) => r?.needsReconnect)) refreshGmailStatus();
       const failed = jobs.map((st, i) => ({ st, r: results[i] })).filter(({ r }) => sectionFailed(r));
+      const pl = results.find((r) => r?.personal)?.personal;
+      const plText = pl ? ` Personal lines: ${pl.matched} of ${pl.total} matched${pl.unmatched?.length ? ` (plain version for: ${pl.unmatched.join(", ")})` : ""}.` : "";
       setPublishModal((p) => ({
         ...p, busy: null,
         error: failed.length ? `Test didn't go out — ${failedTextOf(failed)}` : null,
         testResult: failed.length ? null
-          : `Test sent to ${session?.user?.email || "you"}${jobs.some((s) => s.copy) ? ` and the company inbox (${m.copyEmail})` : ""} — ${jobs.length} email${jobs.length === 1 ? "" : "s"} (${jobs.map((s) => s.label).join(", ")}). Nothing was marked published.`,
+          : `Test sent to ${session?.user?.email || "you"}${jobs.some((s) => s.copy) ? ` and the company inbox (${m.copyEmail})` : ""} — ${jobs.length} email${jobs.length === 1 ? "" : "s"} (${jobs.map((s) => s.label).join(", ")}). Nothing was marked published.${plText}`,
       }));
       return;
     }
@@ -3867,7 +3873,11 @@ export default function SchedulingHub({ session, onSignOut }) {
       const misses = r?.failures || [];
       const sentCount = r?.sent || 0;
       const mine = r?.senderCopy ? `, copy to you (${r.senderCopy})` : "; NO copy to you";
-      addLog(`Published ${st.label} (${st.weeks.map(shortDate).join(", ")}) — ${sentCount} email${sentCount === 1 ? "" : "s"} sent${mine}${badAddresses.length ? `; skipped bad addresses: ${[...new Set(badAddresses)].join(", ")}` : ""}${misses.length ? `; not delivered: ${misses.join("; ")}` : ""}`, badAddresses.length || misses.length || !r?.senderCopy ? "warn" : "good");
+      const pl = r?.personal;
+      const personalNote = !pl ? "" : pl.unmatched?.length
+        ? `; personal lines ${pl.matched} of ${pl.total} — plain version for: ${pl.unmatched.join(", ")}`
+        : `; personal lines ${pl.matched} of ${pl.total}`;
+      addLog(`Published ${st.label} (${st.weeks.map(shortDate).join(", ")}) — ${sentCount} email${sentCount === 1 ? "" : "s"} sent${mine}${personalNote}${badAddresses.length ? `; skipped bad addresses: ${[...new Set(badAddresses)].join(", ")}` : ""}${misses.length ? `; not delivered: ${misses.join("; ")}` : ""}`, badAddresses.length || misses.length || !r?.senderCopy || pl?.unmatched?.length ? "warn" : "good");
       return { st, r, ok: true };
     }));
 
@@ -4704,12 +4714,15 @@ export default function SchedulingHub({ session, onSignOut }) {
         }),
     }));
   }
-  // FOH schedule-email payload: 7 day headers + per-person shifts. `rows` stays
+  // FOH schedule-email payload: 7 day headers + per-person shifts (with staff id). `rows` stays
   // flat for the preview modal; `groups`/`managerOn`/`todayIdx`/`days` feed the
   // redesigned HTML email (older payloads without them still render).
   function buildSchedulePayload(week) {
     const wp = patternsForWeekStart(week?.[0]?.iso);
+    // id: the staff record each row is — the server uses it (never the name)
+    // to give each FOH recipient their own shifts in the email body.
     const rows = fohRoster.map((p) => ({
+      id: p.id,
       name: p.name,
       shifts: week.map((d) => shiftLabelForType(personShiftFor(p.name, d, wp, overrides).type)),
     }));

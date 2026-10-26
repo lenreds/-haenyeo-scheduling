@@ -6,8 +6,8 @@
 //   ticked in the dialog (addresses always from the DB), + the company inbox
 //   when ticked, + ALWAYS a copy to the manager who pressed Send — whoever
 //   sends a section sees exactly what went out, whether or not they're on that
-//   section's roster. If their address is already on the list they get one
-//   email, not two (sendToEach / splitRecipients dedupes by address).
+//   section's roster. If their address is already on the list, that entry is
+//   flagged as theirs instead of adding a second email.
 //
 // A real send with no staff and no company inbox is refused rather than sent
 // to the sender alone: it would mark the section published when nobody on it
@@ -15,11 +15,12 @@
 //
 // staff: [{ id, name, personal_email, section }]. me: the sender's address
 // (from their JWT) or null. copy: the company inbox address or null.
-// Returns { recipients: [{name,email}], senderCopy: email|null } or { error }.
+// Returns { recipients: [{ name, email, id?, section?, sender? }], senderCopy }
+// or { error }. sender: true marks the entry that is the sender's own copy.
 export function scheduleRecipients({ test, me, staff = [], sections, recipientIds, copy = null }) {
   if (test) {
     if (!me) return { error: "couldn't find your sign-in email for the test" };
-    const recipients = [{ name: "Test (you)", email: me }];
+    const recipients = [{ name: "Test (you)", email: me, sender: true }];
     if (copy) recipients.push({ name: "Company inbox", email: copy });
     return { recipients, senderCopy: null };
   }
@@ -32,11 +33,16 @@ export function scheduleRecipients({ test, me, staff = [], sections, recipientId
     const ids = new Set(recipientIds.map(String));
     list = list.filter((r) => ids.has(String(r.id)));
   }
-  const recipients = list.map((r) => ({ name: r.name, email: r.personal_email }));
+  const recipients = list.map((r) => ({ name: r.name, email: r.personal_email, id: r.id, section: r.section }));
   if (copy) recipients.push({ name: "Company inbox", email: copy });
   if (!recipients.length) {
     return { error: "nobody is ticked for this schedule, so nothing was sent — a publish has to reach at least one person on it. To see the email yourself, use Send test to me only" };
   }
-  if (me) recipients.push({ name: "You (sender copy)", email: me });
+  if (me) {
+    const key = String(me).trim().toLowerCase();
+    const mine = recipients.find((r) => String(r.email || "").trim().toLowerCase() === key);
+    if (mine) mine.sender = true;
+    else recipients.push({ name: "You (sender copy)", email: me, sender: true });
+  }
   return { recipients, senderCopy: me || null };
 }
