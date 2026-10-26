@@ -68,7 +68,6 @@ import {
   RAIL_LISTS,
 } from "./lib/data.js";
 import {
-  BAR_TIP_OUT_RATE,
   EXPO_AS_BUSSER_PTS,
   applyExpoMode,
   barTipOutEffective,
@@ -84,9 +83,11 @@ import {
 } from "./lib/tipRules.js";
 import { upcomingTimeOff } from "./lib/upcomingOff.js";
 import { hoursBetween } from "./lib/tipTimes.js";
+import { calcTips, rowCalcVersion } from "./lib/tipMath.js";
 import { ackEntry, tipSheetProblems, zeroesAllAcked } from "./lib/tipGuard.js";
 import { pickerMayOpen, scheduledStartMins } from "./lib/tipPickers.js";
 import { CashPickerBody, PickerPanel, TimePickerBody } from "./components/TipPickers.jsx";
+import UpdateBanner from "./components/UpdateBanner.jsx";
 import QRCode from "qrcode";
 
 // "" / undefined -> null so numeric columns don't choke; otherwise Number().
@@ -1455,6 +1456,10 @@ export default function SchedulingHub({ session, onSignOut }) {
   // Names and points pinned when the sheet was sent or locked (migration 0023);
   // null = not pinned, so the slots follow the schedule.
   const [rosterSnapshot, setRosterSnapshot] = useState(null);
+  // The calculation method the open sheet was paid under (tip_sheets.
+  // calc_version; none = method 1). null = the sheet didn't load, so nothing
+  // is known about it and it is blocked like an unknown method.
+  const [tipCalcVersion, setTipCalcVersion] = useState(1);
   // Every "$0.00 checked" tick given before a Lock or Send on this date — who,
   // when, which action (migration 0024). Append-only, never shown on the sheet.
   const [zeroTipAcks, setZeroTipAcks] = useState([]);
@@ -2517,7 +2522,6 @@ export default function SchedulingHub({ session, onSignOut }) {
   // Off → $0 tip-out, so barShareEach is 0 and the bar keeps its full pool.
   const barTipOutCharged = barTipOutEffective({ mode: barTipOutMode, storedOn: barTipOutOn, barPool, frozen: tipFrozen });
   const barTipOutWhy = barTipOutReason({ mode: barTipOutMode, storedOn: barTipOutOn, barPool, frozen: tipFrozen, money });
-  const barTipOutTotal = barTipOutCharged ? barPool * BAR_TIP_OUT_RATE : 0;
   function toggleBarTipOut() {
     setBarTipOutMode("manual");
     setBarTipOutOn(!barTipOutCharged);
@@ -2536,48 +2540,32 @@ export default function SchedulingHub({ session, onSignOut }) {
   const minusCashSales = totalCashSumPayouts - (parseFloat(cashSales) || 0);
   const cashTipsEarned = minusCashSales - openingBankTotal;
 
-  const totalPoints = displaySlots.reduce((s, p) => s + (p.pts || 0), 0);
-  const perPoint = totalPoints > 0 ? floorPool / totalPoints : 0;
-  const withRaw = displaySlots.map((p) => ({ ...p, raw: (p.pts || 0) * perPoint }));
-
-  const bussers = withRaw.filter((p) => p.role === "Busser/Runner" && p.name);
-  const expoSlot = withRaw.find((p) => p.role.startsWith("Expo") && p.name);
-  const barTipOutRecipients = bussers.length + (expoSlot ? 1 : 0);
-  const barShareEach = barTipOutRecipients > 0 ? barTipOutTotal / barTipOutRecipients : 0;
-
-  const servers = withRaw.filter((p) => p.role === "Servers" && p.name);
-  const serverPoolSum = servers.reduce((s, p) => s + p.raw, 0);
-  const serverHoursSum = servers.reduce((s, p) => s + p.hours, 0);
-  const serverRate = serverHoursSum > 0 ? serverPoolSum / serverHoursSum : 0;
-
-  const bussersPoolSum = bussers.reduce((s, p) => s + p.raw + barShareEach, 0);
-  const bussersHoursSum = bussers.reduce((s, p) => s + p.hours, 0);
-  const bussersRate = bussersHoursSum > 0 ? bussersPoolSum / bussersHoursSum : 0;
-
-  const barStaff = withRaw.filter((p) => p.role === "Bar" && p.name);
-  const barPoolSum = barStaff.reduce((s, p) => s + p.raw, 0) + barPool - barTipOutTotal;
-  const barHoursSum = barStaff.reduce((s, p) => s + p.hours, 0);
-  const barRate = barHoursSum > 0 ? barPoolSum / barHoursSum : 0;
-
-  const finalSlots = withRaw.map((p) => {
-    if (!p.name) return { ...p, barShare: null, final: null };
-    if (p.role === "Servers") return { ...p, barShare: 0, final: serverRate * p.hours };
-    if (p.role === "Busser/Runner") return { ...p, barShare: barShareEach, final: bussersRate * p.hours };
-    if (p.role === "Bar") return { ...p, barShare: 0, final: barRate * p.hours };
-    if (p.role.startsWith("Expo")) return { ...p, barShare: barShareEach, final: p.raw + barShareEach };
-    return { ...p, barShare: 0, final: p.raw }; // Host — flat, only earns if covers > 80
-  });
-  const totalDistributed = finalSlots.reduce((s, p) => s + (p.final || 0), 0);
-  // Floor check: only money that ORIGINATED from the floor pool. Busser/Runner
-  // and Expo bar-tip-out slices are subtracted (that money came from bar), and
-  // bartenders count only their floor-pool point share — bar's own cash/CC tips
-  // never enter this calculation. Should equal floor cash + CC within ~10¢.
-  const floorCheckTotal = finalSlots.reduce((s, p) => {
-    if (!p.name) return s;
-    if (p.role === "Bar") return s + (p.raw || 0);
-    return s + ((p.final || 0) - (p.barShare || 0));
-  }, 0);
-  const floorCheckMatches = Math.abs(floorCheckTotal - floorPool) < 0.1;
+  // The arithmetic is the method this sheet was paid under (src/lib/tipMath.js).
+  // A method this build doesn't implement gives no figures at all: the sheet
+  // is replaced by a "reload" notice and nothing about it is written.
+  const tipCalc = calcTips(tipCalcVersion, { displaySlots, floorPool, barPool, barTipOutCharged });
+  const tipCalcBlocked = !tipCalc;
+  const tipCalcBlockedRef = useRef(false);
+  tipCalcBlockedRef.current = tipCalcBlocked;
+  const {
+    barTipOutTotal, totalPoints, perPoint, barShareEach,
+    serverRate, bussersRate, barRate,
+    finalSlots, totalDistributed, floorCheckTotal, floorCheckMatches,
+  } = tipCalc || {
+    // Never shown — the blocked sheet isn't rendered. Present only so the
+    // code that reads these doesn't crash.
+    barTipOutTotal: 0, totalPoints: 0, perPoint: 0, barShareEach: 0,
+    serverRate: 0, bussersRate: 0, barRate: 0,
+    finalSlots: displaySlots.map((p) => ({ ...p, barShare: null, final: null })),
+    totalDistributed: 0, floorCheckTotal: 0, floorCheckMatches: false,
+  };
+  // Every Tip Sheet write goes through here: a blocked sheet is never written.
+  function writeTipSheetRow(payload) {
+    if (tipCalcBlockedRef.current) {
+      return Promise.reject(new Error("This tip sheet can't be saved by this version of the app — reload."));
+    }
+    return upsertTipSheet(payload);
+  }
 
   function shiftTipDate(delta) {
     const d = new Date(tipDateInfo.dateObj);
@@ -2646,7 +2634,7 @@ export default function SchedulingHub({ session, onSignOut }) {
   async function flushTipSheet(snapshot, key) {
     setTipSaveState("saving");
     try {
-      await upsertTipSheet(snapshot);
+      await writeTipSheetRow(snapshot);
       tipBaselineRef.current = key;
       setTipSaveState(key === tipFormKeyRef.current ? "saved" : "dirty");
       return true;
@@ -2928,7 +2916,7 @@ export default function SchedulingHub({ session, onSignOut }) {
       res?.invalid?.length || res?.failures?.length ? "warn" : "good"
     );
     try {
-      const saved = await upsertTipSheet(sentPayload);
+      const saved = await writeTipSheetRow(sentPayload);
       if (saved?.acksNotSaved) addLog("Sheet sent, but the $0.00 acknowledgements weren't kept — run migration 0024", "warn");
     } catch (e) {
       console.error("Save tip sheet failed:", e);
@@ -2984,7 +2972,7 @@ export default function SchedulingHub({ session, onSignOut }) {
     setTipLockedAt(at);
     if (!next) { setTipFinalized(false); setTipFinalizedAt(null); }
     try {
-      const saved = await upsertTipSheet(payload);
+      const saved = await writeTipSheetRow(payload);
       addLog(`Tip sheet ${next ? "locked" : "unlocked"} — ${shortDate(tipDateIso)}`, next ? "warn" : "good");
       if (saved?.acksNotSaved) addLog("The $0.00 acknowledgements weren't kept — run migration 0024", "warn");
     } catch (e) {
@@ -3971,6 +3959,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         setSlotOverrides(row?.slot_overrides || {});
         setTipTimes(row?.time_entries || {});
         setRosterSnapshot(row?.roster_snapshot || null);
+        setTipCalcVersion(rowCalcVersion(row));
         setZeroTipAcks(Array.isArray(row?.zero_tip_acks) ? row.zero_tip_acks : []);
         setTipGuard(null);
         setTipPicker(null);
@@ -3990,7 +3979,11 @@ export default function SchedulingHub({ session, onSignOut }) {
         // baseline is re-taken from the values that just landed.
         setTipLoadSeq((n) => n + 1);
       })
-      .catch((e) => console.error("Tip sheet load failed:", e));
+      .catch((e) => {
+        console.error("Tip sheet load failed:", e);
+        // Don't go on showing (or saving over) the previous date's figures.
+        if (!cancelled) setTipCalcVersion(null);
+      });
     return () => { cancelled = true; };
   }, [tipDateIso]);
   // BOH / Kitchen dropdown cells write straight through; Management keeps the
@@ -6100,6 +6093,11 @@ export default function SchedulingHub({ session, onSignOut }) {
         .publish-section-title { font-weight: 700; font-size: 13px; color: var(--txt); }
         .publish-section-meta { margin-left: auto; font-size: 11px; color: var(--txt2); }
         .publish-section-reason { font-size: 11.5px; color: var(--txt2); font-style: italic; padding: 2px 0 0 24px; }
+        .update-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 10px 16px; margin-bottom: 12px; border: 1px solid rgba(224,168,92,0.55); background: rgba(224,168,92,0.12); color: #e0a85c; border-radius: 10px; font-size: 13px; }
+        @media print { .update-banner { display: none !important; } }
+        .tip-calc-blocked { display: flex; flex-direction: column; gap: 16px; align-items: flex-start; }
+        .tip-blocked-nav { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+        .tip-blocked-msg { display: flex; gap: 10px; align-items: flex-start; color: #e0a85c; font-size: 14px; line-height: 1.5; max-width: 640px; }
         .publish-section-warn { color: #e0a85c; font-style: normal; font-weight: 600; }
         .publish-past-toggle { background: none; border: none; padding: 6px 0 2px; color: var(--muted); font-family: 'Space Mono', monospace; font-size: 9.5px; letter-spacing: 1px; text-transform: uppercase; cursor: pointer; text-align: left; }
         .publish-past-toggle:hover { color: var(--txt2); }
@@ -6197,6 +6195,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         }
       `}</style>
 
+      <UpdateBanner />
       <div className="hub-header">
         <div className="hub-brand">
           <img src={HAENYEO_ICON} alt="Haenyeo" className="hub-icon" />
@@ -7607,7 +7606,29 @@ export default function SchedulingHub({ session, onSignOut }) {
         </div>
       )}
 
-      {tab === "tips" && (
+      {tab === "tips" && tipCalcBlocked && (
+        <div className="cal-wrap tip-wrap" key="tips-blocked">
+          <div className="cal-card tip-calc-blocked">
+            <div className="tip-blocked-nav">
+              <button className="nr-btn" onClick={() => shiftTipDate(-1)}>‹ Previous day</button>
+              <b>{tipSheetDateLabel}</b>
+              <button className="nr-btn" onClick={() => shiftTipDate(1)}>Next day ›</button>
+            </div>
+            <div className="tip-blocked-msg">
+              <AlertTriangle size={16} />
+              <div>
+                {tipCalcVersion == null ? (
+                  <><b>This tip sheet didn't load.</b> No figures are shown and nothing will be saved, so the previous date's numbers can't be mistaken for these. Reload to try again.</>
+                ) : (
+                  <><b>This sheet was saved by a newer version of the app</b> (calculation method {tipCalcVersion}). This tab is running an older version that doesn't know that method, so it won't show figures it can't vouch for, and won't save anything. Reload to see the sheet.</>
+                )}
+              </div>
+            </div>
+            <button className="publish-btn" onClick={() => window.location.reload()}>Reload</button>
+          </div>
+        </div>
+      )}
+      {tab === "tips" && !tipCalcBlocked && (
         <div className="cal-wrap tip-wrap" key="tips">
           <div className="cal-card" ref={tipCardRef}>
             {tipFinalized && (
