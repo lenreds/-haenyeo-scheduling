@@ -323,7 +323,7 @@ export function buildMultiWeekScheduleHtml({ weeks, sectionLabel }, opts = {}) {
 // weekLabel, "Oct 26 – Nov 1", is read).
 // opts.personal: this recipient's own shift lines (FOH, from personalLinesFor),
 //   right under the first line so a phone preview shows them; omitted = none.
-// opts.check: the sender's copy only — "Personal lines: 18 of 18 matched.", last.
+// opts.check: the sender's copy only — "Personal lines: 18 of 18 staff (managers: plain).", last.
 // Returns { subject, text, html }.
 export function buildScheduleAttachedEmail({ weeks }, opts = {}) {
   const list = weeks || [];

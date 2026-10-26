@@ -3826,7 +3826,7 @@ export default function SchedulingHub({ session, onSignOut }) {
       // FOH only: each person's own shifts in their email, the count in yours.
       ...(st.personalLines ? { personalLines: true } : {}),
       // A test still sends the ticked ids — the server emails only you, and
-      // uses them just for the "Personal lines: N of M matched" count.
+      // uses them just for the "Personal lines: N of M staff (managers: plain)" count.
       ...(test ? { test: true, includeCopy: st.copy, recipientIds: st.ids } : { recipientIds: st.ids, includeCopy: st.copy }),
     }, token);
     // A section failed if ITS request failed or ITS Gmail call needs a
@@ -3839,7 +3839,7 @@ export default function SchedulingHub({ session, onSignOut }) {
       if (results.some((r) => r?.needsReconnect)) refreshGmailStatus();
       const failed = jobs.map((st, i) => ({ st, r: results[i] })).filter(({ r }) => sectionFailed(r));
       const pl = results.find((r) => r?.personal)?.personal;
-      const plText = pl ? ` Personal lines: ${pl.matched} of ${pl.total} matched${pl.unmatched?.length ? ` (plain version for: ${pl.unmatched.join(", ")})` : ""}.` : "";
+      const plText = pl ? ` Personal lines: ${pl.matched} of ${pl.total} staff (managers: plain)${pl.unmatched?.length ? ` (plain version for: ${pl.unmatched.join(", ")})` : ""}.` : "";
       setPublishModal((p) => ({
         ...p, busy: null,
         error: failed.length ? `Test didn't go out — ${failedTextOf(failed)}` : null,
@@ -3875,8 +3875,8 @@ export default function SchedulingHub({ session, onSignOut }) {
       const mine = r?.senderCopy ? `, copy to you (${r.senderCopy})` : "; NO copy to you";
       const pl = r?.personal;
       const personalNote = !pl ? "" : pl.unmatched?.length
-        ? `; personal lines ${pl.matched} of ${pl.total} — plain version for: ${pl.unmatched.join(", ")}`
-        : `; personal lines ${pl.matched} of ${pl.total}`;
+        ? `; personal lines ${pl.matched} of ${pl.total} staff (managers: plain) — plain version for: ${pl.unmatched.join(", ")}`
+        : `; personal lines ${pl.matched} of ${pl.total} staff (managers: plain)`;
       addLog(`Published ${st.label} (${st.weeks.map(shortDate).join(", ")}) — ${sentCount} email${sentCount === 1 ? "" : "s"} sent${mine}${personalNote}${badAddresses.length ? `; skipped bad addresses: ${[...new Set(badAddresses)].join(", ")}` : ""}${misses.length ? `; not delivered: ${misses.join("; ")}` : ""}`, badAddresses.length || misses.length || !r?.senderCopy || pl?.unmatched?.length ? "warn" : "good");
       return { st, r, ok: true };
     }));

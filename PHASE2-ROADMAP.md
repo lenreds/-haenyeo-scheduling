@@ -83,6 +83,14 @@ sent — what's being protected is that it was emailed, not that it was locked.
 - Consider storing times against the person as well as the slot, so a moved name can't
   carry someone else's hours.
 
+**Same root cause as item 9 — scope them as one job.** Here, clock times are stored
+against a Tip Sheet **slot** (`bar1`) and the person in it is re-derived from the
+schedule. In item 9, BOH & Kitchen shifts are stored against a roster **slot** and the
+person in it is known only by a name string. Both store data against a position and
+work out who holds it after the fact. The fix is the same shape in both: record the
+staff id on the slot when the data is written, and read the person from that id.
+Whoever scopes either one should read both.
+
 **Until then:** don't unlock a sent sheet to correct it. A single-field fix is a
 targeted SQL update to that sheet's `time_entries` that leaves `roster_snapshot`,
 `sent`, `locked` and `finalized` untouched.
@@ -216,6 +224,13 @@ fuzzy matching, no stripping name suffixes to force a match.
 Kitchen row as FOH does, then reuse `personalLinesFor` with one change: merge the rows
 that share an id (Freddy) instead of refusing them. Managers stay plain until the
 Manager On row carries ids too. The sender's count covers it automatically.
+
+**Same root cause as item 4 — scope them as one job.** Item 4 is the Tip Sheet storing
+clock times against a slot (`bar1`) and re-deriving the person from the schedule, so
+an unlock can move one person's hours onto another's name. This item is BOH & Kitchen
+shifts stored against a roster slot with the person known only by name. Both store
+data against a position and work out who holds it afterwards. The fix in both is a
+staff id recorded on the slot. Whoever scopes either one should read both.
 
 ---
 

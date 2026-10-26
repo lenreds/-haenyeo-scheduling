@@ -39,10 +39,12 @@ export function personalLinesFor(weeks, staffId) {
 
 // The sender's check on the above: how many of this send's FOH recipients got a
 // personal line. audience: [{ id, name, section }] — staff recipients only.
-// Returns { matched, total, unmatched: [names], line: "Personal lines: N of M matched." }.
+// Returns { matched, total, unmatched: [names], line: "Personal lines: N of M staff (managers: plain)." }.
+// Managers get the FOH email but are never counted (their days are on the
+// Manager On row, not a grid row), and the line says so.
 export function personalLineReport(weeks, audience) {
   const foh = (audience || []).filter((r) => r?.id != null && String(r.section || "").toLowerCase() === "foh");
   const unmatched = foh.filter((r) => !personalLinesFor(weeks, r.id)).map((r) => r.name);
   const matched = foh.length - unmatched.length;
-  return { matched, total: foh.length, unmatched, line: `Personal lines: ${matched} of ${foh.length} matched.` };
+  return { matched, total: foh.length, unmatched, line: `Personal lines: ${matched} of ${foh.length} staff (managers: plain).` };
 }
