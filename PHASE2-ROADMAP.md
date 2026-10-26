@@ -176,6 +176,47 @@ any size. Constraint: the PDF still comes from the same layout as the print. Pri
 PDF must not drift into two designs, so the work is one sheet description that both
 render from, not a second hand-built PDF layout.
 
+## 9. Personal shift lines for BOH & Kitchen
+
+**Where it stands:** the Front of House schedule email carries each person's own
+shifts in plain text under the first line ("Your week: Mon 4pm-FC, Wed 5pm-CL."),
+and the sender's copy carries "Personal lines: N of M matched." (built 2026-10-25,
+`api/_lib/personal-lines.js`). BOH & Kitchen was left on the plain version on purpose:
+eight people on near-fixed patterns get little from it, and it's the side where a
+match can't be made for certain today.
+
+**The rule (owner, 2026-10-25), carried over unchanged:** a wrong line is worse than no
+line. Anyone who can't be matched for certain gets the plain version and the PDF. No
+fuzzy matching, no stripping name suffixes to force a match.
+
+**Why BOH & Kitchen isn't safe yet:**
+- **No staff id on the rows.** FOH rows come from the staff list (`fohRoster` in
+  `src/App.jsx`), so each carries the staff record's id. BOH & Kitchen rows come from
+  `groupRosters` (`buildGroupRows`): a list of **names** per group, with shifts stored
+  by slot index in the placeholder grid (`placeholder_schedule` /
+  `weekly_placeholder_schedules`). The only link from a slot to a staff record (and so
+  to an email address) is the name string.
+- **Names may not match the staff table.** Migration 0002 warns the live BOH / Kitchen
+  rows may carry decorations ("Jenny — Head Chef" rather than "Jenny") and has to be
+  renamed before its name joins work. Any name difference = no match, which under the
+  rule is correct but silent until the count shows it.
+- **People on two rosters.** Freddy is on Kitchen *and* BOH, so he has two rows in the
+  same email. His line must merge both rows per day, and a day worked in both must
+  show both. Jon is on Kitchen (slot 5, migration 0006) *and* Management. His Kitchen
+  days are in the BOH & Kitchen payload, his FM days are not.
+- **Managers' days come from somewhere else.** A manager's shifts are the Management
+  sub-tab / the Manager On row (`buildManagerOn`), not a grid row. So a manager's line,
+  in either email, needs its own source.
+- **Display labels are a UI rule.** For Jenny and Ajuma, KITCHEN shows as "Yes"
+  (`placeholderShiftLabel`). A line built from the payload shows "Yes", the same as
+  the sheet. It should probably say the real hours instead; decide before building.
+
+**Approach when picked up:** give each roster slot a staff id at the source (the slot
+→ staff record link stored, not derived from the name), put that id on each BOH /
+Kitchen row as FOH does, then reuse `personalLinesFor` with one change: merge the rows
+that share an id (Freddy) instead of refusing them. Managers stay plain until the
+Manager On row carries ids too. The sender's count covers it automatically.
+
 ---
 
 ## Related hardening already in place (not Phase 2 work)
