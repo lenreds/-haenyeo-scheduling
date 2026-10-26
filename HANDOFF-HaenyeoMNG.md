@@ -4,6 +4,8 @@
 
 **How to resume:** Paste or upload this file (and the main `scheduling-hub-prototype.jsx` if you have it) at the start of a new conversation and say you want to keep building HaenyeoMNG. Claude doesn't auto-recognize the phrase across separate chats — this doc *is* the mechanism, not a magic trigger word.
 
+> **Out of date (noted 2026-10-26):** most of this doc was written on 12 July 2026, when the app was still a prototype. It now runs live on Vercel + Supabase from `src/` (App.jsx, `src/lib/`, `api/`), so "Known Limitations", "Files on Hand" and "Live Deployment Progress" below no longer describe it. Current open work is in `PHASE2-ROADMAP.md` and the git log. The **Tip Sheet calculation methods** section below is current.
+
 ---
 
 ## Current State: Four Tabs, All Live
@@ -74,6 +76,24 @@ This is the most complex piece — matches Haenyeo's actual paper tip-out sheet 
 **Floor cross-check:** sums everyone's (Final Tip − Bar Share) and compares to the Floor Pool — green box if it matches (small tolerance for truncation drift), amber if off by more than a dime.
 
 **Print button** here too.
+
+### Tip Sheet calculation methods (current as of 2026-10-26)
+
+**The rule:** the arithmetic a sheet was paid with is part of its record. Sheets recalculate from their stored inputs every time they open, so changing the maths would change every sheet ever sent. Each sheet therefore carries the **method** it was paid under, and keeps it for good.
+
+- `src/lib/tipMath.js` holds the methods. **Method 1** (`calcTipsV1`, truncate once at display) is the arithmetic every sheet up to Oct 2026 was paid with. It was moved verbatim out of `App.jsx` at commit `c96ec05` and is **frozen: never edit it**. A new method is a new function with a new number.
+- `tip_sheets.calc_version` (migration 0025) stores the method. Empty = method 1. A trigger lets it be set only when a sheet is created, never changed. Only a date with no saved sheet can get a newer method, and every sheet that existed when 0025 ran stays method 1, drafts included (a printed, paid, never-locked sheet is still a record).
+- **Version guard:** code that opens a sheet stamped with a method it doesn't implement, or a sheet that failed to load, shows a "reload" notice instead of figures and saves nothing. `src/components/UpdateBanner.jsx` tells a long-open tab when a newer deploy is live.
+- Same discipline as the frozen clock-time parser in `src/lib/tipTimes.js` and the frozen roster (`roster_snapshot`, migration 0023).
+
+**Proving method 1 hasn't moved — `tools/tipcheck/`** (run it after any change near the Tip Sheet maths):
+1. In the Supabase SQL editor, run `supabase/queries/tip_sheets_frozen_export.sql` (read-only). Export → Download CSV, and save it **outside the repo**. It's real payroll data; `.gitignore` refuses `*.csv` as a backstop.
+2. `npm run tipcheck -- "<path to the CSV>"`
+3. Pass = `ZERO DIFFERENCES`: every printed figure on every sent / locked / finalized sheet is identical between method 1 and the arithmetic as it ran at `c96ec05`, which the script reads straight from git rather than a hand copy. `CONTROL=1 npm run tipcheck -- "<path>"` nudges the new side by a billionth of a dollar and must fail every sheet, which proves the check can see a change.
+
+The check only reads that file and git. It can't touch the database or the app. First run, 2026-10-26: 30 sheets (Jul 1 – Oct 25), zero differences. Sheets frozen before migration 0023 have no stored roster, so their filled slots are worked out from the clock times and marked "worked out". The permanent repo test `src/lib/tipMath.test.js` (part of `npm test`) pins method 1 to the same reference on synthetic and random sheets.
+
+**Method 2** (deploy B, pending): truncate at every printed step and compute each step from the printed figure above it, so the sheet can be checked by hand with a calculator. Every method-2 sheet shows "Left behind: $X.XX", even at $0.00.
 
 ---
 

@@ -6,3 +6,11 @@ dist/
 .vercel
 .env*
 .pgconn
+
+# Data exports (real payroll and staff data) never belong in the repo — e.g.
+# the CSV from supabase/queries/tip_sheets_frozen_export.sql that
+# tools/tipcheck reads. Keep them outside the repo; this is the backstop.
+*.csv
+*.tsv
+*export*.json
+Supabase Snippet*
