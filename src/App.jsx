@@ -141,6 +141,12 @@ async function captureNodeForPdf(node, { header, strip = [] } = {}) {
           // denomination writing-rules depend on this.
           span.className = `${inp.className} pdf-field`.trim();
           span.textContent = liveInputs[i] ? String(liveInputs[i].value || "") : "";
+          // An empty Tip Sheet clock time prints the em dash empty slots use
+          // (never its "4:00 PM" placeholder), same as @media print.
+          if (inp.classList.contains("tip-time-input") && !span.textContent) {
+            span.textContent = "—";
+            span.style.cssText = "font-family:'Space Mono',monospace;font-size:12px;color:#c7bfa9;";
+          }
           inp.replaceWith(span);
         });
         if (header) {
@@ -4646,6 +4652,15 @@ export default function SchedulingHub({ session, onSignOut }) {
     if (!type || type === "OFF") return "Off";
     return SHIFT_META[type]?.label || optionLabels[type] || type;
   }
+  // The label a schedule SHEET prints for a cell: everything that renders from
+  // the sheet rows — Print, Save as PDF, the publish PDFs, the Management print
+  // and the FOH personal lines in the email — goes through here or
+  // placeholderShiftLabel. A "Counts as off" cell (role_shift_options.is_off,
+  // e.g. an RO option) is Off: em dash on paper, absent from a personal line.
+  // The on-screen grid keeps showing the option's own label.
+  function sheetShiftLabel(type) {
+    return isOffCell(type) ? "Off" : shiftLabelForType(type);
+  }
   function weekDayHeaders(week) {
     return week.map((d) => `${JS_WEEKDAY_NAMES[d.weekday]} ${d.date.getMonth() + 1}/${d.date.getDate()}`);
   }
@@ -4708,7 +4723,7 @@ export default function SchedulingHub({ session, onSignOut }) {
           return {
             name: p.name,
             primaryRole: p.role,
-            shifts: types.map(shiftLabelForType),
+            shifts: types.map(sheetShiftLabel),
             roles: types.map((t) => roleForCell(t, p.role)),
           };
         }),
@@ -4724,7 +4739,7 @@ export default function SchedulingHub({ session, onSignOut }) {
     const rows = fohRoster.map((p) => ({
       id: p.id,
       name: p.name,
-      shifts: week.map((d) => shiftLabelForType(personShiftFor(p.name, d, wp, overrides).type)),
+      shifts: week.map((d) => sheetShiftLabel(personShiftFor(p.name, d, wp, overrides).type)),
     }));
     return {
       weekLabel: weekRangeLabel(week),
@@ -4736,10 +4751,11 @@ export default function SchedulingHub({ session, onSignOut }) {
       managerOn: buildManagerOn(week),
     };
   }
-  // Display label for a placeholder (BOH/Kitchen) shift code, incl. the Jenny/
-  // Ajuma "Yes" rule used on the grid.
+  // Sheet label for a placeholder (BOH/Kitchen/Management) shift code, incl. the
+  // Jenny/Ajuma "Yes" rule used on the grid. "Counts as off" codes are Off, as
+  // in sheetShiftLabel.
   function placeholderShiftLabel(gk, personName, code) {
-    if (!code || code === "OFF") return "Off";
+    if (isOffCell(code)) return "Off";
     if (gk === "kitchen" && code === "KITCHEN" && (personName.startsWith("Jenny") || personName.startsWith("Ajuma"))) return "Yes";
     return SHIFT_META[code]?.label || optionLabels[code] || code;
   }
@@ -5142,6 +5158,12 @@ export default function SchedulingHub({ session, onSignOut }) {
           .tip-field input, .tip-table-input, .recon-row input, .denom-row input,
           .payout-row input[type="text"], .payout-row input[type="number"],
           .tip-time-input { background: #fff !important; color: #2B2A25 !important; border-color: rgba(43,42,37,0.2) !important; }
+          /* An empty TIME IN / TIME OUT would print its grey "4:00 PM" / "9:00 PM"
+             placeholder, which reads on paper as a real shift. Print the em dash
+             the empty-slot cells use instead. CSS only — the cell itself (the tap
+             panel's input) is untouched. */
+          .tip-time-input:placeholder-shown { display: none !important; }
+          .shift-cell:has(> .tip-time-input:placeholder-shown)::after { content: "—"; color: #c7bfa9; font-family: 'Space Mono', monospace; }
           .role-header { color: #8a5a20 !important; }
           .recon-row.final span { color: #8a5a20 !important; }
           .tabs, .hub-header, .print-btn, .custom-toggle, .publish-btn, .published-badge, .back-btn, .subject-preview,
