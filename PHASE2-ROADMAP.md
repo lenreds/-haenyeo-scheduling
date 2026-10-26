@@ -55,7 +55,39 @@ registration/welcome email footer.
   delete already cascades to roles, patterns, overrides, and rail requests).
 - That scheduling email is processed automatically by the Gmail integration.
 
-## 4. A sent / locked Tip Sheet is only protected by CSS
+## 4. Unlocking a sent Tip Sheet throws away its frozen roster
+
+**Why:** `roster_snapshot` (migration 0023) exists so a sheet that was emailed can never
+be rewritten by a later schedule change. But Unlock (`toggleTipLock` in `src/App.jsx`)
+writes `roster_snapshot: null`, so the unlocked sheet rebuilds its names from whatever
+the schedule says *now*. Clock times are stored per **slot** (`time_entries`:
+`{ bar1: { in, out } }`), not per person, so the times stay where they were while the
+names under them can move. Unlocking any sent sheet can silently reattach one person's
+hours to another person's name.
+
+**Seen:** 2026-10-10, testing the tap panels in dev against a stand-in sent sheet for
+8 Oct with Bernie on `bar1`: after Unlock the bar slot came back as Isabella (the dev
+schedule differs), holding Bernie's TIME IN.
+
+**The trap:** if the names come back wrong and the sheet is re-locked to undo it, Lock
+pins whatever is on screen (`pinnedRosterNow()`), so the wrong roster becomes the frozen
+one and the correct snapshot is gone. There is no undo.
+
+**Fix wanted (owner, 2026-10-10):** the freeze survives the unlock when the sheet was
+sent — what's being protected is that it was emailed, not that it was locked.
+- Unlock on a sheet that was never sent: clears the snapshot and rebuilds freely, as today.
+- Unlock on a sent sheet: keeps `roster_snapshot`; names and points stay pinned while
+  times and cash are corrected; re-lock / re-send keep the same snapshot.
+- Decide how a genuine roster correction on a sent sheet is made, if ever (an explicit,
+  logged "re-pin from schedule" action rather than a side effect of Unlock).
+- Consider storing times against the person as well as the slot, so a moved name can't
+  carry someone else's hours.
+
+**Until then:** don't unlock a sent sheet to correct it. A single-field fix is a
+targeted SQL update to that sheet's `time_entries` that leaves `roster_snapshot`,
+`sent`, `locked` and `finalized` untouched.
+
+## 5. A sent / locked Tip Sheet is only protected by CSS
 
 **Why:** Sent sheets are the payroll record. What makes a sent or locked sheet read-only
 today is the `.tip-locked` style (`pointer-events: none` on its inputs) in `src/App.jsx`.
@@ -83,6 +115,66 @@ to open on a frozen sheet; that covers the new input path only.
   so the rule holds no matter what client writes.
 - Decide whether Unlock on a *sent* sheet should keep the emailed figures somewhere
   (a copy of the row at send time) before it becomes editable again.
+
+## 6. Publish attempts leave no record anywhere
+
+**Why:** There is no record that a publish was ever attempted. The Auto-Action Log is
+in-memory only, rebuilt from Rail requests on every load (`setLog` in the initial load,
+`src/App.jsx`), so a publish entry, success or failure, is gone on reload. A failure only
+ever appears in the Publish dialog's red box; close the dialog or lose the page and it
+is gone. A failed publish mark (`setWeekPublished`) goes only to the browser console
+while the screen shows the week as sent. And Vercel's free-plan function logs roll off
+within hours. So a publish that half-fails looks the same on screen as one that worked,
+and afterwards the evening has to be pieced together from the Sent folder.
+
+**Found:** 2026-10-20, investigating why the FOH schedule email never arrives (BOH &
+Kitchen sent 19 Oct 9:27pm, still showing pending the next morning).
+
+**Fix wanted (owner, 2026-10-20), once the FOH cause is known:** write each publish
+attempt to the database. A small append-only table, one row per section per attempt:
+- week(s), section (FOH / BOHKITCHEN), real or test, timestamp;
+- result: sent count, recipients attempted, or failed;
+- the error text when there is one (server error, HTTP status such as 413/504, a
+  failed publish mark);
+- append-only: insert only, no update or delete policy for the client.
+Open a row, not the Sent folder.
+
+## 7. Migration 0016 silently clears publish state and says it's safe to re-run
+
+**Why:** `0016_fresh_start_clear_test_history.sql` sets `published = false,
+published_at = null` on every `schedule_weeks` row and says "safe to run more than once".
+That was right on 2026-09-22 (clearing test sends before real use). Any later run quietly
+marks every genuinely-emailed week as never sent, so the Publish dialog offers them
+again, ticked, and a Confirm would re-email staff for weeks they already have (or have
+already worked). It leaves no trace except `updated_at`.
+
+**Found:** 2026-10-20 — the most likely reason Sep 21 / Sep 28 / Oct 5 still show as
+pending (to confirm with `supabase/queries/publish_state_audit.sql`).
+
+**Fix wanted:** make 0016 refuse to run a second time. For example, have it check for a
+marker (a row it writes on first run) and `raise exception` if it is already there, or
+retire it out of `supabase/migrations/` into an archive folder with a do-not-run header.
+Rule for the future: a migration that resets sent / published state is never
+"safe to re-run".
+
+## 8. Schedule PDFs are photographs of a web page, not text
+
+**Applies if:** the FOH publish failure turns out to be size (the 1-week vs 5-week test
+sends, 2026-10-20, with BOH & Kitchen at 5 weeks as the control). If it isn't size, this
+stays a note.
+
+**Why:** `renderSheetNodeToPdf` (`src/App.jsx`) captures the sheet with html2canvas at
+scale 2 and embeds that PNG in the PDF. Every schedule PDF is a picture, so its size
+grows with the sheet's height (FOH has far more rows than BOH & Kitchen), and the
+base64 upload to `/api/send-schedule` adds about a third on top, against Vercel's 4.5 MB
+request limit. Lossless compression already shipped (7661222, 2026-09-24).
+
+**The real answer (owner, 2026-10-20):** more compression is not the fix. Draw the PDF
+as text and vector shapes (real text, lines and fills), so a week costs kilobytes
+instead of megabytes, the text is selectable and searchable, and it prints sharp at
+any size. Constraint: the PDF still comes from the same layout as the print. Print and
+PDF must not drift into two designs, so the work is one sheet description that both
+render from, not a second hand-built PDF layout.
 
 ---
 
