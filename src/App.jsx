@@ -1177,6 +1177,21 @@ function mondayOf(d) {
   return m;
 }
 
+// Publish dialog: split week starts ("YYYY-MM-DD" Mondays) into weeks that
+// haven't ended and weeks whose Sunday is before today. A week ending today is
+// still upcoming.
+function splitPublishWeeks(weekStarts, today = new Date()) {
+  const todayIso = iso(today);
+  const upcoming = [];
+  const past = [];
+  weekStarts.forEach((w) => {
+    const end = new Date(`${w}T00:00:00`);
+    end.setDate(end.getDate() + 6);
+    (iso(end) < todayIso ? past : upcoming).push(w);
+  });
+  return { upcoming, past };
+}
+
 // The Mon–Sun week `offset` weeks from the week containing today. Any integer
 // offset — positive or negative — produces a valid week, so week navigation has
 // no upper or lower bound and never runs off the end of a fixed array.
@@ -3662,8 +3677,8 @@ export default function SchedulingHub({ session, onSignOut }) {
   // a confirmation instead of sending: the weeks, an editable subject, a
   // message, every recipient as a checkbox, a test send to yourself, then
   // Confirm & Send. One email per section (FOH; BOH & Kitchen) carries every
-  // selected week — the inline table for phones plus one PDF per week from the
-  // same sheet builder as Print.
+  // selected week — a one-line body plus one PDF per week from the same sheet
+  // builder as Print. The sender always gets a copy of each section sent.
   const [publishModal, setPublishModal] = useState(null);
 
   // Everyone a real send can reach, split the way the server splits them.
@@ -3696,18 +3711,25 @@ export default function SchedulingHub({ session, onSignOut }) {
   // (publish state is per section — see setWeekPublished). Managers get both
   // emails, so they're listed under each section and can be unticked per email.
   const PUBLISH_SECTIONS = [
-    { key: "foh", label: "Front of House", serverSections: ["FOH", "Management"], payloadFor: buildSchedulePayload, sheet: "FOH" },
-    { key: "bk", label: "BOH & Kitchen", serverSections: ["BOH", "Kitchen", "Management"], payloadFor: buildBohKitchenPayload, sheet: "BOHKITCHEN" },
+    { key: "foh", label: "Front of House", serverSections: ["FOH", "Management"], payloadFor: buildSchedulePayload, sheet: "FOH", fileTag: "FOH" },
+    { key: "bk", label: "BOH & Kitchen", serverSections: ["BOH", "Kitchen", "Management"], payloadFor: buildBohKitchenPayload, sheet: "BOHKITCHEN", fileTag: "BOH-Kitchen" },
   ];
   const publishPeopleFor = (key) => [...(key === "foh" ? publishRecipients.foh : publishRecipients.bk), ...publishRecipients.mgmt];
 
   function openPublishDialog() {
-    const weeks = [...unpublishedFinalizedWeeks].sort();
-    if (!weeks.length) { addLog("No finalized weeks waiting to be published", "warn"); return; }
+    const all = [...unpublishedFinalizedWeeks].sort();
+    if (!all.length) { addLog("No finalized weeks waiting to be published", "warn"); return; }
+    // A week whose Sunday is already behind us isn't offered with the rest —
+    // it sits under "Past, never sent", collapsed and unticked. Only this
+    // week and next week start ticked; anything further out is a deliberate tick.
+    const { upcoming: weeks, past } = splitPublishWeeks(all);
+    const thisMon = iso(mondayOf(new Date()));
+    const nextMonD = mondayOf(new Date()); nextMonD.setDate(nextMonD.getDate() + 7);
+    const picked = weeks.filter((w) => w === thisMon || w === iso(nextMonD));
     setPublishModal({
-      weeks, picked: weeks,
+      weeks, past, showPast: false, picked,
       include: { foh: true, bk: true },
-      subject: publishSubjectFor(weeks), subjectEdited: false,
+      subject: publishSubjectFor(picked), subjectEdited: false,
       notes: "",
       excluded: [], // "section:staffId" — unticking someone in one email leaves the other alone
       busy: null, error: null, testResult: null,
@@ -3737,7 +3759,7 @@ export default function SchedulingHub({ session, onSignOut }) {
   // now: which weeks it would send (ticked AND still pending for it), who it
   // goes to, whether it's going at all, and why not if it can't.
   function publishSectionState(m, sec) {
-    const pendingAll = m.weeks.filter((w) => pendingPublish[sec.key].includes(w));
+    const pendingAll = [...m.weeks, ...m.past].filter((w) => pendingPublish[sec.key].includes(w));
     const weeks = m.picked.filter((w) => pendingPublish[sec.key].includes(w)).sort();
     const people = publishPeopleFor(sec.key);
     const ids = people.filter((r) => !r.badEmail && !m.excluded.includes(`${sec.key}:${r.id}`)).map((r) => r.id);
@@ -3748,8 +3770,12 @@ export default function SchedulingHub({ session, onSignOut }) {
       : weeks.length === 0 && !sent
       ? `None of the ticked weeks are pending for ${sec.label}.`
       : null;
-    const going = !sent && !unavailable && !!m.include[sec.key] && (ids.length > 0 || copy);
-    return { ...sec, weeks, people, ids, copy, sent, unavailable, going };
+    // nobody: included, has weeks, but no one ticked and no company inbox — it
+    // will NOT be sent (the server refuses a send to the sender alone), and the
+    // dialog says so instead of quietly leaving it out.
+    const nobody = !sent && !unavailable && !!m.include[sec.key] && ids.length === 0 && !copy;
+    const going = !sent && !unavailable && !!m.include[sec.key] && !nobody;
+    return { ...sec, weeks, people, ids, copy, sent, unavailable, nobody, going };
   }
 
   // Render every PDF the send needs up front. If any fails, nothing is sent (A5).
@@ -3759,10 +3785,11 @@ export default function SchedulingHub({ session, onSignOut }) {
       out[st.key] = [];
       for (const iso of st.weeks) {
         const week = buildWeekByOffset(weekOffsetFor(new Date(`${iso}T00:00:00`)));
-        // Named by the week's Monday so they sort correctly in a folder.
+        // Named by section and the week's Monday, so they sort correctly in a
+        // folder and the FOH and BOH & Kitchen copies can be told apart.
         const b64 = await sheetNodePdfBase64(scheduleSheetNodeFor(st.sheet, week));
         if (!String(b64 || "").startsWith("JVBERi0")) throw new Error(`${st.label} ${iso} didn't render`);
-        out[st.key].push({ filename: `Haenyeo-Schedule-${iso}.pdf`, b64, week });
+        out[st.key].push({ filename: `Haenyeo-Schedule-${st.fileTag}-${iso}.pdf`, b64, week });
       }
     }
     return out;
@@ -3791,55 +3818,66 @@ export default function SchedulingHub({ session, onSignOut }) {
     }
 
     const shared = { subject: m.subject.trim(), notes: m.notes.trim() };
-    const results = await Promise.all(jobs.map((st) => triggerSchedulePublish({
+    const sendOne = (st) => triggerSchedulePublish({
       weeks: pdfs[st.key].map((p) => st.payloadFor(p.week)),
       attachments: pdfs[st.key].map(({ filename, b64 }) => ({ filename, b64 })),
       sections: st.serverSections,
       ...shared,
       ...(test ? { test: true, includeCopy: st.copy } : { recipientIds: st.ids, includeCopy: st.copy }),
-    }, token)));
-
-    const reconnect = results.some((r) => r?.needsReconnect);
-    if (reconnect) refreshGmailStatus();
-    const failed = jobs.filter((_, i) => results[i]?.error || reconnect);
-    const failedText = failed.map((st) => `${st.label}: ${results[jobs.indexOf(st)]?.error || "Gmail disconnected"}`).join("; ");
-    const recipientMisses = results.flatMap((r) => r?.failures || []);
+    }, token);
+    // A section failed if ITS request failed or ITS Gmail call needs a
+    // reconnect — never because of the other section's result.
+    const sectionFailed = (r) => !!(r?.error || r?.needsReconnect);
+    const failedTextOf = (outs) => outs.map(({ st, r }) => `${st.label}: ${r?.error || "Gmail disconnected"}`).join("; ");
 
     if (test) {
+      const results = await Promise.all(jobs.map(sendOne));
+      if (results.some((r) => r?.needsReconnect)) refreshGmailStatus();
+      const failed = jobs.map((st, i) => ({ st, r: results[i] })).filter(({ r }) => sectionFailed(r));
       setPublishModal((p) => ({
         ...p, busy: null,
-        error: failed.length ? `Test didn't go out — ${failedText}` : null,
+        error: failed.length ? `Test didn't go out — ${failedTextOf(failed)}` : null,
         testResult: failed.length ? null
           : `Test sent to ${session?.user?.email || "you"}${jobs.some((s) => s.copy) ? ` and the company inbox (${m.copyEmail})` : ""} — ${jobs.length} email${jobs.length === 1 ? "" : "s"} (${jobs.map((s) => s.label).join(", ")}). Nothing was marked published.`,
       }));
       return;
     }
 
-    // Each section that went out is marked published for ITS weeks only — the
-    // other section's marks are never written here, sent or not.
-    const succeeded = jobs.filter((st) => !failed.includes(st));
-    const publishedAt = new Date().toISOString();
-    await Promise.all(succeeded.flatMap((st) => st.weeks.map((w) => setWeekPublished(w, st.key).catch((e) => {
-      console.error(`Mark ${st.key} ${w} published failed:`, e);
-    }))));
-    if (succeeded.length) {
+    // The two sections are independent emails to different people with
+    // different PDFs, so each is marked published for ITS weeks the moment ITS
+    // own send succeeds — never waiting on the other. FOH failing, or still in
+    // flight when the page closes, leaves BOH & Kitchen's mark already written
+    // (and vice versa). The other section's marks are never written here.
+    const outcomes = await Promise.all(jobs.map(async (st) => {
+      const r = await sendOne(st);
+      if (r?.needsReconnect) refreshGmailStatus();
+      if (sectionFailed(r)) return { st, r, ok: false };
+      const publishedAt = new Date().toISOString();
+      await Promise.all(st.weeks.map((w) => setWeekPublished(w, st.key).catch((e) => {
+        console.error(`Mark ${st.key} ${w} published failed:`, e);
+      })));
       setPublishedBySection((prev) => {
         const next = { foh: { ...prev.foh }, bk: { ...prev.bk } };
-        succeeded.forEach((st) => st.weeks.forEach((w) => { next[st.key][w] = publishedAt; }));
+        st.weeks.forEach((w) => { next[st.key][w] = publishedAt; });
         return next;
       });
-    }
-    const sentCount = results.reduce((n, r) => n + (r?.sent || 0), 0);
-    const badAddresses = results.flatMap((r) => r?.invalid || []).map((r) => `${r.name} <${r.email}>`);
-    if (succeeded.length) {
-      addLog(`Published ${succeeded.map((st) => `${st.label} (${st.weeks.map(shortDate).join(", ")})`).join(" and ")} — ${sentCount} email${sentCount === 1 ? "" : "s"} sent${badAddresses.length ? `; skipped bad addresses: ${[...new Set(badAddresses)].join(", ")}` : ""}${recipientMisses.length ? `; not delivered: ${recipientMisses.join("; ")}` : ""}`, badAddresses.length || recipientMisses.length ? "warn" : "good");
-    }
+      // Recorded on the dialog at once, so a retry never resends this section.
+      setPublishModal((p) => (p ? { ...p, sentSections: [...p.sentSections, st.key] } : p));
+      const badAddresses = (r?.invalid || []).map((x) => `${x.name} <${x.email}>`);
+      const misses = r?.failures || [];
+      const sentCount = r?.sent || 0;
+      const mine = r?.senderCopy ? `, copy to you (${r.senderCopy})` : "; NO copy to you";
+      addLog(`Published ${st.label} (${st.weeks.map(shortDate).join(", ")}) — ${sentCount} email${sentCount === 1 ? "" : "s"} sent${mine}${badAddresses.length ? `; skipped bad addresses: ${[...new Set(badAddresses)].join(", ")}` : ""}${misses.length ? `; not delivered: ${misses.join("; ")}` : ""}`, badAddresses.length || misses.length || !r?.senderCopy ? "warn" : "good");
+      return { st, r, ok: true };
+    }));
 
+    const failed = outcomes.filter((o) => !o.ok);
     if (failed.length) {
       // Keep the dialog open; Confirm retries only the section(s) that failed.
+      const succeeded = outcomes.filter((o) => o.ok).map((o) => o.st);
       setPublishModal((p) => ({
-        ...p, busy: null, sentSections: [...p.sentSections, ...succeeded.map((st) => st.key)],
-        error: `Couldn't send ${failedText}.${succeeded.length ? ` ${succeeded.map((st) => st.label).join(" and ")} went out and ${succeeded.length === 1 ? "is" : "are"} marked published.` : ""} ${failed.map((st) => st.label).join(" and ")} ${failed.length === 1 ? "is" : "are"} still pending — press Confirm & Send to retry.`,
+        ...p, busy: null,
+        error: `Couldn't send ${failedTextOf(failed)}.${succeeded.length ? ` ${succeeded.map((st) => st.label).join(" and ")} went out and ${succeeded.length === 1 ? "is" : "are"} marked published.` : ""} ${failed.map(({ st }) => st.label).join(" and ")} ${failed.length === 1 ? "is" : "are"} still pending — press Confirm & Send to retry.`,
       }));
       return;
     }
@@ -4740,6 +4778,12 @@ export default function SchedulingHub({ session, onSignOut }) {
   const unpublishedFinalizedWeeks = useMemo(
     () => [...new Set([...pendingPublish.foh, ...pendingPublish.bk])].sort(),
     [pendingPublish]
+  );
+  // What the Publish button counts: weeks that haven't ended. Past ones are
+  // still reachable in the dialog, under "Past, never sent".
+  const upcomingPublishCount = useMemo(
+    () => splitPublishWeeks(unpublishedFinalizedWeeks).upcoming.length,
+    [unpublishedFinalizedWeeks]
   );
 
   return (
@@ -6000,6 +6044,10 @@ export default function SchedulingHub({ session, onSignOut }) {
         .publish-section-title { font-weight: 700; font-size: 13px; color: var(--txt); }
         .publish-section-meta { margin-left: auto; font-size: 11px; color: var(--txt2); }
         .publish-section-reason { font-size: 11.5px; color: var(--txt2); font-style: italic; padding: 2px 0 0 24px; }
+        .publish-section-warn { color: #e0a85c; font-style: normal; font-weight: 600; }
+        .publish-past-toggle { background: none; border: none; padding: 6px 0 2px; color: var(--muted); font-family: 'Space Mono', monospace; font-size: 9.5px; letter-spacing: 1px; text-transform: uppercase; cursor: pointer; text-align: left; }
+        .publish-past-toggle:hover { color: var(--txt2); }
+        .publish-past { opacity: 0.8; }
         .published-partial { opacity: 0.85; }
         .publish-test-ok { display: flex; align-items: center; gap: 6px; margin-top: 12px; font-size: 12px; color: #7fb392; }
 
@@ -7141,10 +7189,10 @@ export default function SchedulingHub({ session, onSignOut }) {
                           ? "Finalize this week before publishing"
                           : unpublishedFinalizedWeeks.length === 0
                           ? "Every finalized week has already been published"
-                          : `Send schedule emails for ${unpublishedFinalizedWeeks.length} finalized week${unpublishedFinalizedWeeks.length === 1 ? "" : "s"}`
+                          : `Send schedule emails for ${upcomingPublishCount} upcoming finalized week${upcomingPublishCount === 1 ? "" : "s"}${unpublishedFinalizedWeeks.length > upcomingPublishCount ? ` (+${unpublishedFinalizedWeeks.length - upcomingPublishCount} past, never sent)` : ""}`
                       }
                     >
-                      {`Publish (${unpublishedFinalizedWeeks.length})`}
+                      {`Publish (${upcomingPublishCount})`}
                     </button>
                     </>
                   )
@@ -8862,7 +8910,16 @@ export default function SchedulingHub({ session, onSignOut }) {
           : sameWeeks
           ? `Sending ${going.map((st) => st.label).join(" and ")} — ${weekWord(going[0].weeks.length)} to ${who}.`
           : `Sending ${going.map((st) => `${st.label} (${weekWord(st.weeks.length)})`).join(" and ")} to ${who}.`;
+        // Whoever presses Confirm gets their own copy of each section that goes.
+        const mine = going.length ? ` You get a copy of ${going.length === 1 ? "it" : "each"}${session?.user?.email ? ` (${session.user.email})` : ""}.` : "";
         const close = () => { if (!busy) setPublishModal(null); };
+        const weekRow = (w) => (
+          <label className="send-rcpt" key={w}>
+            <input type="checkbox" disabled={busy} checked={m.picked.includes(w)} onChange={() => togglePublishWeek(w)} />
+            <span className="send-rcpt-name">{weekRangeLabel(buildWeekByOffset(weekOffsetFor(new Date(`${w}T00:00:00`))))}</span>
+            <span className="send-rcpt-email">{weekStatus(w)}</span>
+          </label>
+        );
         const weekStatus = (w) => PUBLISH_SECTIONS.map((sec) =>
           `${sec.key === "foh" ? "FOH" : "BOH & Kitchen"} ${pendingPublish[sec.key].includes(w) ? "pending" : "sent"}`).join(" · ");
         return (
@@ -8874,20 +8931,30 @@ export default function SchedulingHub({ session, onSignOut }) {
               </div>
 
               {/* The blast radius in one line, before anything else. */}
-              <div className={`publish-summary ${going.length === 0 ? "publish-summary-none" : ""}`}>{summary}</div>
+              <div className={`publish-summary ${going.length === 0 ? "publish-summary-none" : ""}`}>{summary}{mine}</div>
 
               <div className="send-section-label">
                 {m.weeks.length === 1 ? "Week" : "Weeks"} <span className="nr-count">{m.picked.length}</span>
               </div>
               <div className="send-recipients">
-                {m.weeks.map((w) => (
-                  <label className="send-rcpt" key={w}>
-                    <input type="checkbox" disabled={busy} checked={m.picked.includes(w)} onChange={() => togglePublishWeek(w)} />
-                    <span className="send-rcpt-name">{weekRangeLabel(buildWeekByOffset(weekOffsetFor(new Date(`${w}T00:00:00`))))}</span>
-                    <span className="send-rcpt-email">{weekStatus(w)}</span>
-                  </label>
-                ))}
+                {m.weeks.length === 0 && <div className="notes-empty">No upcoming weeks waiting to be sent.</div>}
+                {m.weeks.map(weekRow)}
               </div>
+              {/* Weeks that have already ended: collapsed, unticked, never offered
+                  with the rest. Ticking one here is the only way it's sent. */}
+              {m.past.length > 0 && (
+                <>
+                  <button
+                    type="button"
+                    className="publish-past-toggle"
+                    disabled={busy}
+                    onClick={() => setPublishModal((p) => ({ ...p, showPast: !p.showPast }))}
+                  >
+                    {m.showPast ? "▾" : "▸"} Past, never sent ({m.past.length})
+                  </button>
+                  {m.showPast && <div className="send-recipients publish-past">{m.past.map(weekRow)}</div>}
+                </>
+              )}
 
               {/* Company inbox: its own line, ticked by default. The address comes
                   from the server (env COMPANY_COPY_EMAIL), not the bundle. */}
@@ -8922,9 +8989,12 @@ export default function SchedulingHub({ session, onSignOut }) {
                       />
                       <span className="publish-section-title">{st.label}</span>
                       <span className="publish-section-meta">
-                        {st.sent ? "✓ sent" : st.unavailable ? "" : `${weekWord(st.weeks.length)} · ${st.ids.length} of ${st.people.length} people`}
+                        {st.sent ? "✓ sent" : st.unavailable ? "" : st.nobody ? "won't be sent" : `${weekWord(st.weeks.length)} · ${st.ids.length} of ${st.people.length} people`}
                       </span>
                     </label>
+                    {st.nobody && (
+                      <div className="publish-section-reason publish-section-warn">Nobody ticked — {st.label} won't be sent and its weeks stay pending.</div>
+                    )}
                     {st.unavailable ? (
                       <div className="publish-section-reason">{st.unavailable}</div>
                     ) : !m.include[st.key] && !st.sent ? (

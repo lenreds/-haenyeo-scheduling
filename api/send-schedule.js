@@ -7,18 +7,20 @@
 // { weekLabel, dayHeaders:[7], rows:[{name,shifts:[7],roles?,primaryRole?}] OR
 // groups:[{label,rows}], sectionLabel?, days?:[{dow,date}×7], todayIdx?, managerOn? }.
 // Legacy single-week bodies (those same fields at the top level, no `weeks`) still
-// work. 2+ weeks stack in one email; `attachments` are PDF files (one per week).
-// `sections` restricts recipients by staff.section (case-insensitive); omitted =
-// all registered. Sends the branded HTML sheet (plain-text alternative + the
-// real icon as an inline CID image). One message per recipient (see
+// work. Every week in the call goes in ONE email; `attachments` are PDF files
+// (one per week). `sections` restricts recipients by staff.section
+// (case-insensitive); omitted = all registered. The body is one line ("Schedule
+// for Oct 26 – Nov 1 attached.") plus the manager's message — the PDFs carry the
+// schedule. A real send also copies the signed-in manager (see
+// _lib/schedule-recipients.js). One message per recipient (see
 // _lib/send-each.js); tagged Sent/Schedules.
 
 import { sendToEach } from "./_lib/send-each.js";
 import { companyCopyEmail } from "./_lib/config.js";
 import { gmailAccessToken, gmailErrorFields } from "./_lib/gmail-auth.js";
 import { buildHtmlRawEmail } from "./_lib/reply.js";
-import { buildScheduleEmailHtml, buildMultiWeekScheduleHtml } from "./_lib/emails.js";
-import { HAENYEO_ICON_B64 } from "./_lib/brand.js";
+import { buildScheduleAttachedEmail } from "./_lib/emails.js";
+import { scheduleRecipients } from "./_lib/schedule-recipients.js";
 import { makeLabeler, LABELS } from "./_lib/labels.js";
 import { isManager, managerEmail, fetchRegisteredStaff } from "./_lib/store.js";
 
@@ -64,7 +66,6 @@ export default async function handler(req, res) {
   if (!w0.weekLabel || !Array.isArray(w0.dayHeaders) || (!Array.isArray(w0.rows) && !Array.isArray(w0.groups))) {
     return res.status(400).json({ error: "weeks[0] needs weekLabel, dayHeaders, and rows or groups" });
   }
-  const sectionLabel = w0.sectionLabel;
 
   // Every attachment must be a real PDF ("JVBERi0" = "%PDF-" in base64). One bad
   // file means nothing is sent — same rule as the Tip Sheet.
@@ -75,35 +76,21 @@ export default async function handler(req, res) {
   const pdfAttachments = rawAttachments.map((a) => ({ filename: a.filename, b64: a.b64, mime: "application/pdf" }));
 
   try {
-    // Who gets it, as [{ name, email }]. test: the signed-in manager (address
-    // from their JWT, never the client). Real: registered staff by section and
-    // by the ids ticked in the dialog (addresses from the DB). Either way the
-    // company inbox gets its own copy when its line was ticked — on a
-    // test too, so the setup can be checked without emailing staff.
-    let recipients;
-    if (test) {
-      const me = await managerEmail(token);
-      if (!me) return res.status(400).json({ sent: 0, error: "couldn't find your sign-in email for the test" });
-      recipients = [{ name: "Test (you)", email: me }];
-    } else {
-      let staff = await fetchRegisteredStaff();
-      if (Array.isArray(sections) && sections.length) {
-        const want = sections.map((s) => String(s).toLowerCase());
-        staff = staff.filter((r) => want.includes(String(r.section || "").toLowerCase()));
-      }
-      if (Array.isArray(body.recipientIds)) {
-        const ids = new Set(body.recipientIds.map(String));
-        staff = staff.filter((r) => ids.has(String(r.id)));
-      }
-      recipients = staff.map((r) => ({ name: r.name, email: r.personal_email }));
-    }
+    // Who gets it — see _lib/schedule-recipients.js. The sender's address
+    // always comes from their JWT, never the client: it's the test recipient,
+    // and on a real send it gets its own copy of every section sent.
+    const me = await managerEmail(token);
     const copy = body.includeCopy === true ? companyCopyEmail() : null;
-    if (copy) recipients.push({ name: "Company inbox", email: copy });
+    const picked = scheduleRecipients({
+      test, me, copy, sections, recipientIds: body.recipientIds,
+      staff: test ? [] : await fetchRegisteredStaff(),
+    });
+    if (picked.error) return res.status(400).json({ sent: 0, error: picked.error });
+    const { recipients, senderCopy } = picked;
 
     const { accessToken } = await gmailAccessToken("send-schedule");
-    const email = weeks.length > 1
-      ? buildMultiWeekScheduleHtml({ weeks, sectionLabel }, { subject: wantSubject, notes })
-      : buildScheduleEmailHtml(weeks[0], { subject: wantSubject, notes });
+    // The PDFs carry the schedule; the body is one line + the manager's message.
+    const email = buildScheduleAttachedEmail({ weeks }, { subject: wantSubject, notes });
     const { text, html } = email;
     // Identical email to the real send, except the [TEST] tag (always the server's call).
     const subject = test ? `[TEST] ${email.subject}` : email.subject;
@@ -111,22 +98,23 @@ export default async function handler(req, res) {
     let labelId = null;
     try { labelId = await labeler.ensure(LABELS.sentSchedules); } catch { /* non-fatal */ }
 
-    // One message per recipient (the company inbox is simply one of them).
+    // One message per recipient (the company inbox and the sender copy are
+    // simply two of them).
     const result = await sendToEach({
       accessToken, recipients, labelId,
-      buildRaw: (to) => buildHtmlRawEmail({
-        to, subject, text, html,
-        images: [{ cid: "haenyeo-icon", b64: HAENYEO_ICON_B64 }],
-        attachments: pdfAttachments,
-      }),
+      buildRaw: (to) => buildHtmlRawEmail({ to, subject, text, html, attachments: pdfAttachments }),
     });
     if (result.invalid.length) {
       console.warn(`[send-schedule] skipped malformed addresses: ${result.invalid.map((r) => `${r.name} <${r.email}>`).join(", ")}`);
     }
     if (result.failures.length) console.warn(`[send-schedule] failed: ${result.failures.join("; ")}`);
+    // senderCopy: the address the sender's copy went to, or null if there was
+    // none (no address in the JWT) or it didn't go out.
+    const senderMissed = !senderCopy || result.failures.some((f) => f.startsWith("You (sender copy):"));
     return res.status(200).json({
       sent: result.sent, recipients: result.attempted, copied: !!copy,
       invalid: result.invalid, failures: result.failures, test,
+      senderCopy: test || senderMissed ? null : senderCopy,
       ...(result.error ? { error: result.error } : {}),
     });
   } catch (e) {

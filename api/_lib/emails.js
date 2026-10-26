@@ -317,6 +317,24 @@ export function buildMultiWeekScheduleHtml({ weeks, sectionLabel }, opts = {}) {
   return { subject, text, html };
 }
 
+// The schedule email as sent from Publish: the PDFs carry the schedule, so the
+// body is one line naming the span plus the manager's message, nothing else —
+// no inline tables, header band, footer or icon. weeks: the week payloads in
+// order (only weekLabel, "Oct 26 – Nov 1", is read). Returns { subject, text, html }.
+export function buildScheduleAttachedEmail({ weeks }, opts = {}) {
+  const list = weeks || [];
+  const first = String(list[0]?.weekLabel || "");
+  const last = String(list[list.length - 1]?.weekLabel || "");
+  const range = `${first.split(" – ")[0]} – ${last.split(" – ")[1] || last}`;
+  const line = `Schedule for ${range} attached.`;
+  const notes = String(opts.notes || "").trim();
+  const subject = String(opts.subject || "").trim() || `Haenyeo Schedule — ${range}`;
+  const text = notes ? `${line}\n\n${notes}` : line;
+  const p = (s) => `<p style="margin:0 0 12px;font-family:${EMAIL_SANS};font-size:14px;line-height:1.5;color:#222222;">${escHtml(s).replace(/\n/g, "<br>")}</p>`;
+  const html = `<div>${p(line)}${notes ? p(notes) : ""}</div>`;
+  return { subject, text, html };
+}
+
 // Manual Rail entry ("+ Add Request"): paper-trail copy to the scheduling
 // inbox. type is the canonical uppercase rail type ("REQUEST OFF" etc.).
 export function buildManualEntryInboxEmail({ managerName, staffName, type, dates, note }) {
