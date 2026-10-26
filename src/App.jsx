@@ -344,6 +344,9 @@ function roleCellStyle(role) {
   const accent = ROLE_COLOR[role];
   return accent ? CELL_STYLE_BY_ACCENT[accent] : undefined;
 }
+// A Set Schedule cell holding a code that isn't a current option: dashed red,
+// so it reads as something to query, never as a day off.
+const DEAD_CELL_STYLE = { color: "#f0b86b", borderColor: "#e0796c", borderStyle: "dashed", background: "rgba(224,121,108,0.16)" };
 // Dark-theme "Off" chip (Management grid). The old inline SHIFT_META.OFF colors
 // were tuned for the light card and left a tan border on the dark surface.
 const OFF_CHIP_DARK = { color: "#555555", borderColor: "#2a2a2a", background: "transparent" };
@@ -4070,7 +4073,8 @@ export default function SchedulingHub({ session, onSignOut }) {
         {WEEKDAY_LABELS.map((w, wi) => {
           const realWeekday = WEEKDAY_ORDER[wi];
           const type = row[realWeekday] || "OFF";
-          const value = opts.some((o) => o.code === type) ? type : "OFF";
+          const dead = deadShiftOption(type, opts, placeholderShiftLabel(groupKey, personName, type));
+          const value = dead || opts.some((o) => o.code === type) ? type : "OFF";
           const workedRole = value === "OFF" ? null : roleForCell(value, GROUP_ROLE[groupKey]);
           const blockLabel = value === "OFF" ? crossSectionBlock(personName, groupKey, realWeekday) : null;
           if (blockLabel) {
@@ -4089,9 +4093,11 @@ export default function SchedulingHub({ session, onSignOut }) {
                 className="cell-select shift-select"
                 value={value}
                 disabled={scheduleFrozen}
-                style={value === "OFF" ? undefined : roleCellStyle(workedRole)}
+                title={dead?.title}
+                style={dead ? DEAD_CELL_STYLE : value === "OFF" ? undefined : roleCellStyle(workedRole)}
                 onChange={(e) => setPlaceholderShift(groupKey, idx, realWeekday, e.target.value)}
               >
+                {dead && <option value={dead.code}>{dead.label}</option>}
                 {opts.map((o) => (
                   <option key={o.code} value={o.code}>
                     {groupKey === "kitchen" && o.code === "KITCHEN" && isYesPerson ? "Yes" : o.label}
@@ -4660,6 +4666,21 @@ export default function SchedulingHub({ session, onSignOut }) {
   // The on-screen grid keeps showing the option's own label.
   function sheetShiftLabel(type) {
     return isOffCell(type) ? "Off" : shiftLabelForType(type);
+  }
+  // A stored code that is NOT one of the cell's current options (an option
+  // deleted in Manage Shifts, a legacy code like bare KITCHEN). The grids used
+  // to show these as "Off", indistinguishable from a real day off, while Print,
+  // the PDFs, the published schedule, Glance and the Tip Sheet all treat them
+  // as a working day. Now the cell shows "? CODE", flagged, and says what the
+  // sheet prints for it. printedAs: the sheet label for this code.
+  function deadShiftOption(code, opts, printedAs) {
+    if (!code || code === "OFF" || opts.some((o) => o.code === code)) return null;
+    const prints = printedAs === "Off" ? "as Off" : `as "${printedAs}", a working day`;
+    return {
+      code,
+      label: `? ${code}`,
+      title: `This day holds "${code}", which isn't one of the current options. Print, the PDFs and the published schedule show it ${prints}. Pick a shift or Off to fix it.`,
+    };
   }
   function weekDayHeaders(week) {
     return week.map((d) => `${JS_WEEKDAY_NAMES[d.weekday]} ${d.date.getMonth() + 1}/${d.date.getDate()}`);
@@ -7329,7 +7350,8 @@ export default function SchedulingHub({ session, onSignOut }) {
                                 const selKey = `${p.name}|${weekday}`;
                                 const cellRole = cellRoleSel[selKey] || roleFromCode(code) || personRoles[0];
                                 const opts = roleOptions[cellRole] || [{ code: "OFF", label: "Off" }];
-                                const value = opts.some((o) => o.code === code) ? code : "OFF";
+                                const dead = deadShiftOption(code, opts, sheetShiftLabel(code));
+                                const value = dead || opts.some((o) => o.code === code) ? code : "OFF";
                                 const workedRole = value === "OFF" ? null : roleForCell(value, cellRole);
                                 const timeOff = approvedOffFor(p.name, weekday);
                                 return (
@@ -7353,9 +7375,11 @@ export default function SchedulingHub({ session, onSignOut }) {
                                         className="cell-select shift-select"
                                         value={value}
                                         disabled={scheduleFrozen}
-                                        style={value === "OFF" ? undefined : roleCellStyle(workedRole)}
+                                        title={dead?.title}
+                                        style={dead ? DEAD_CELL_STYLE : value === "OFF" ? undefined : roleCellStyle(workedRole)}
                                         onChange={(e) => setCellShift(p.name, weekday, e.target.value)}
                                       >
+                                        {dead && <option value={dead.code}>{dead.label}</option>}
                                         {opts.map((o) => (
                                           <option key={o.code} value={o.code}>{o.label}</option>
                                         ))}
@@ -7463,7 +7487,8 @@ export default function SchedulingHub({ session, onSignOut }) {
                             }
                             const mgmtTimeOff = approvedOffFor(personName, realWeekday);
                             if (mgmtOpts) {
-                              const value = mgmtOpts.some((o) => o.code === type) ? type : "OFF";
+                              const dead = deadShiftOption(type, mgmtOpts, placeholderShiftLabel("management", personName, type));
+                              const value = dead || mgmtOpts.some((o) => o.code === type) ? type : "OFF";
                               const workedRole = value === "OFF" ? null : roleForCell(value, "Management");
                               return (
                                 <td key={w} className="shift-cell">
@@ -7474,9 +7499,11 @@ export default function SchedulingHub({ session, onSignOut }) {
                                       className="cell-select shift-select"
                                       value={value}
                                       disabled={scheduleFrozen}
-                                      style={value === "OFF" ? undefined : roleCellStyle(workedRole)}
+                                      title={dead?.title}
+                                      style={dead ? DEAD_CELL_STYLE : value === "OFF" ? undefined : roleCellStyle(workedRole)}
                                       onChange={(e) => setPlaceholderShift("management", idx, realWeekday, e.target.value)}
                                     >
+                                      {dead && <option value={dead.code}>{dead.label}</option>}
                                       {mgmtOpts.map((o) => (
                                         <option key={o.code} value={o.code}>{o.label}</option>
                                       ))}
