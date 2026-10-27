@@ -7942,7 +7942,9 @@ export default function SchedulingHub({ session, onSignOut }) {
                     {tipCalc?.version >= 2 ? (
                       <>
                         <div className="check-sub">{floorCheckMatches ? "✓ Adds up to floor cash + CC" : `Doesn't add up — more than truncation can leave (up to ${money(tipCalc.leftBehindBound)})`}</div>
-                        <div className="check-sub check-left-behind">Left behind: ${money(tipCalc.leftBehind)}</div>
+                        {/* The manager's check, not the staff's: screen only, never
+                            on the printout or the PDF (.screen-only, like the notes). */}
+                        <div className="check-sub check-left-behind screen-only">Left behind: ${money(tipCalc.leftBehind)}</div>
                       </>
                     ) : (
                       <div className="check-sub">{floorCheckMatches ? "✓ Matches floor cash + CC" : `Off by ${money(Math.abs(floorCheckTotal - floorPool))} vs floor cash + CC`}</div>
