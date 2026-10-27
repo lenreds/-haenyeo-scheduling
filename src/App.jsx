@@ -7,6 +7,7 @@ import {
   upsertScheduleOverride,
   sendRailReply,
   fetchTipSheet,
+  tipCalcColumnPresent,
   upsertTipSheet,
   insertStaff,
   updateStaff,
@@ -83,7 +84,7 @@ import {
 } from "./lib/tipRules.js";
 import { upcomingTimeOff } from "./lib/upcomingOff.js";
 import { hoursBetween } from "./lib/tipTimes.js";
-import { calcTips, rowCalcVersion } from "./lib/tipMath.js";
+import { calcTips, sheetCalcVersion } from "./lib/tipMath.js";
 import { ackEntry, tipSheetProblems, zeroesAllAcked } from "./lib/tipGuard.js";
 import { pickerMayOpen, scheduledStartMins } from "./lib/tipPickers.js";
 import { CashPickerBody, PickerPanel, TimePickerBody } from "./components/TipPickers.jsx";
@@ -1460,6 +1461,7 @@ export default function SchedulingHub({ session, onSignOut }) {
   // calc_version; none = method 1). null = the sheet didn't load, so nothing
   // is known about it and it is blocked like an unknown method.
   const [tipCalcVersion, setTipCalcVersion] = useState(1);
+  const tipCalcColumnRef = useRef(false); // tip_sheets.calc_version confirmed to exist
   // Every "$0.00 checked" tick given before a Lock or Send on this date — who,
   // when, which action (migration 0024). Append-only, never shown on the sheet.
   const [zeroTipAcks, setZeroTipAcks] = useState([]);
@@ -2591,6 +2593,10 @@ export default function SchedulingHub({ session, onSignOut }) {
       slot_overrides: customMode ? slotOverrides : {},
       time_entries: tipTimes,
       roster_snapshot: rosterSnapshot,
+      // The method this sheet is calculated with. Sent only for method 2+, so a
+      // method-1 sheet's stored value (none) is never written; on a new date it
+      // is stamped on the first save, and the database refuses any later change.
+      ...(tipCalcVersion && tipCalcVersion !== 1 ? { calc_version: tipCalcVersion } : {}),
       // Only once there is one, so sheets save as before until migration 0024.
       ...(zeroTipAcks.length ? { zero_tip_acks: zeroTipAcks } : {}),
       // The values the sheet is actually using, not just what was typed, so a
@@ -3942,9 +3948,14 @@ export default function SchedulingHub({ session, onSignOut }) {
   // Load the saved tip sheet for the selected date (or clear the form if none).
   useEffect(() => {
     let cancelled = false;
-    fetchTipSheet(tipDateIso)
-      .then((row) => {
+    // Whether calc_version can be stored, asked alongside the sheet itself, so
+    // a new sheet's method is settled before anything shows. Once known present
+    // it stays known; "no" is asked again on the next date.
+    const columnCheck = tipCalcColumnRef.current ? Promise.resolve(true) : tipCalcColumnPresent();
+    Promise.all([fetchTipSheet(tipDateIso), columnCheck])
+      .then(([row, columnPresent]) => {
         if (cancelled) return;
+        if (columnPresent) tipCalcColumnRef.current = true;
         const s = (v) => (v === null || v === undefined ? "" : String(v));
         setFloorCash(s(row?.floor_cash));
         setFloorCredit(s(row?.floor_credit));
@@ -3959,7 +3970,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         setSlotOverrides(row?.slot_overrides || {});
         setTipTimes(row?.time_entries || {});
         setRosterSnapshot(row?.roster_snapshot || null);
-        setTipCalcVersion(rowCalcVersion(row));
+        setTipCalcVersion(sheetCalcVersion({ loaded: true, row, columnPresent }));
         setZeroTipAcks(Array.isArray(row?.zero_tip_acks) ? row.zero_tip_acks : []);
         setTipGuard(null);
         setTipPicker(null);
@@ -7928,7 +7939,14 @@ export default function SchedulingHub({ session, onSignOut }) {
                   <div className={`check-box ${floorCheckMatches ? "match" : "mismatch"}`}>
                     <div className="check-label">Floor Check (paid out of floor pool)</div>
                     <div className="check-value">${money(floorCheckTotal)}</div>
-                    <div className="check-sub">{floorCheckMatches ? "✓ Matches floor cash + CC" : `Off by $${money(Math.abs(floorCheckTotal - floorPool))} vs floor cash + CC`}</div>
+                    {tipCalc?.version >= 2 ? (
+                      <>
+                        <div className="check-sub">{floorCheckMatches ? "✓ Adds up to floor cash + CC" : `Doesn't add up — more than truncation can leave (up to ${money(tipCalc.leftBehindBound)})`}</div>
+                        <div className="check-sub check-left-behind">Left behind: ${money(tipCalc.leftBehind)}</div>
+                      </>
+                    ) : (
+                      <div className="check-sub">{floorCheckMatches ? "✓ Matches floor cash + CC" : `Off by ${money(Math.abs(floorCheckTotal - floorPool))} vs floor cash + CC`}</div>
+                    )}
                   </div>
                   {/* Sign-off rules, paper and PDF only. Fills the gap between
                       the floor check and the table's right edge. */}

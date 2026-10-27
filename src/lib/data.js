@@ -1153,8 +1153,30 @@ export async function upsertTipSheet(payload) {
   if (error && /expo_as_busser|bar_tip_out_auto|closing_sum_auto/.test(error.message || "")) {
     throw new Error(`Run migration 0022 in Supabase, then save again (${error.message})`);
   }
+  // calc_version (0025) is never dropped and retried: a method-2 sheet saved
+  // without it would reopen as method 1 with different figures. And the
+  // database refuses to change it on an existing sheet (trigger) — say so.
+  if (error && /calc_version/.test(error.message || "")) {
+    throw new Error(/can only be set when a sheet is created/.test(error.message || "")
+      ? `This sheet's calculation method can't be changed once it exists — nothing was saved. Reload. (${error.message})`
+      : `The calculation method couldn't be saved — run migration 0025, then reload. Nothing was saved. (${error.message})`);
+  }
   if (error) throw error;
   return data;
+}
+
+// Does tip_sheets.calc_version (migration 0025) exist? Method 2 is reachable
+// ONLY when this says yes. Any error at all — missing column, network, RLS —
+// counts as no: unavailable means method 2 can't be reached, even for a brand
+// new sheet, so a sheet can never show method-2 figures and then save (and
+// reopen) as method 1.
+export async function tipCalcColumnPresent() {
+  try {
+    const { error } = await supabase.from("tip_sheets").select("calc_version").limit(1);
+    return !error;
+  } catch {
+    return false;
+  }
 }
 
 /* ------------------------------------------------ bulk initial load -------- */

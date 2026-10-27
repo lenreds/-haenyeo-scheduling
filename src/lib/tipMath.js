@@ -7,10 +7,11 @@
 // Code that opens a sheet stamped with a method it doesn't implement must not
 // show figures for it — calcTips returns null and the Tip Sheet refuses
 // (reload). Never guess, never fall back to another method.
-import { BAR_TIP_OUT_RATE } from "./tipRules.js";
+import { BAR_TIP_OUT_RATE, truncCents } from "./tipRules.js";
 
-// Methods this build implements.
-export const TIP_CALC_VERSIONS = [1];
+// Methods this build implements, and the one a brand-new sheet gets.
+export const TIP_CALC_VERSIONS = [1, 2];
+export const CURRENT_TIP_CALC_VERSION = 2;
 
 // The method a stored row was paid under. No column (pre-0025) or no value =
 // method 1. Anything else is returned as stored, known or not.
@@ -28,7 +29,19 @@ export function tipCalcSupported(version) {
 // -> every figure the sheet prints, or null for a method this build lacks.
 export function calcTips(version, input) {
   if (version === 1) return calcTipsV1(input);
+  if (version === 2) return calcTipsV2(input);
   return null;
+}
+
+// The method a sheet gets: a stored row keeps its own; a date with NO saved
+// row gets the current method — but only when the calc_version column is
+// known to exist, so it can be stored. Otherwise method 1, even for a new
+// sheet: a sheet must never show figures it would reopen without.
+// loaded: false when the load failed (-> null, blocked).
+export function sheetCalcVersion({ loaded, row, columnPresent }) {
+  if (!loaded) return null;
+  if (row) return rowCalcVersion(row);
+  return columnPresent ? CURRENT_TIP_CALC_VERSION : 1;
 }
 
 // ---- METHOD 1 — FROZEN ------------------------------------------------------
@@ -89,5 +102,92 @@ export function calcTipsV1({ displaySlots, floorPool, barPool, barTipOutCharged 
     barTipOutRecipients, barShareEach,
     serverRate, bussersRate, barRate,
     finalSlots, totalDistributed, floorCheckTotal, floorCheckMatches,
+  };
+}
+
+// ---- METHOD 2 ---------------------------------------------------------------
+// Owner, 2026-10-26: "a sheet whose own printed numbers add up". Every printed
+// figure truncates to the cent, and every step is computed from the PRINTED
+// (truncated) figure above it, so anyone holding the paper sheet can reproduce
+// it with a calculator:
+//   1. $ / POINT        = trunc(floor pool ÷ total points)
+//   2. AMT BY PT        = trunc(points × printed $ / POINT)
+//   3. Bar Tip-Out      = trunc(bar pool × 10%)
+//      Each Recipient   = trunc(printed Bar Tip-Out ÷ recipients)
+//   4. each role's pool = sum of its printed AMT BY PT (+ printed shares for
+//      Busser/Runners; + bar pool − printed Bar Tip-Out for Bar)
+//      $ / HR           = trunc(that pool ÷ the role's hours)
+//   5. FINAL TIP        = trunc(hours × printed $ / HR); Expo = printed AMT BY
+//      PT + printed share; Host = printed AMT BY PT
+// Truncating never rounds up, so whatever is left over stays with the house —
+// printed as "Left behind" on every method-2 sheet, $0.00 included.
+// All money is carried in whole cents inside, so sums can't pick up float noise.
+export function calcTipsV2({ displaySlots, floorPool, barPool, barTipOutCharged }) {
+  const c = (dollars) => truncCents(dollars); // dollars -> whole cents, truncated
+  const $ = (cents) => cents / 100;
+  const floorPoolC = c(floorPool);
+  const barPoolC = c(barPool);
+
+  const barTipOutC = barTipOutCharged ? c($(barPoolC) * BAR_TIP_OUT_RATE) : 0;
+
+  const totalPoints = displaySlots.reduce((s, p) => s + (p.pts || 0), 0);
+  const perPointC = totalPoints > 0 ? c($(floorPoolC) / totalPoints) : 0;
+  const withRawC = displaySlots.map((p) => ({ ...p, rawC: c((p.pts || 0) * $(perPointC)) }));
+
+  const bussers = withRawC.filter((p) => p.role === "Busser/Runner" && p.name);
+  const expoSlot = withRawC.find((p) => p.role.startsWith("Expo") && p.name);
+  const barTipOutRecipients = bussers.length + (expoSlot ? 1 : 0);
+  const barShareC = barTipOutRecipients > 0 ? c($(barTipOutC) / barTipOutRecipients) : 0;
+
+  const rateC = (poolC, hours) => (hours > 0 ? c($(poolC) / hours) : 0);
+  const servers = withRawC.filter((p) => p.role === "Servers" && p.name);
+  const serverHoursSum = servers.reduce((s, p) => s + p.hours, 0);
+  const serverRateC = rateC(servers.reduce((s, p) => s + p.rawC, 0), serverHoursSum);
+
+  const bussersHoursSum = bussers.reduce((s, p) => s + p.hours, 0);
+  const bussersRateC = rateC(bussers.reduce((s, p) => s + p.rawC + barShareC, 0), bussersHoursSum);
+
+  const barStaff = withRawC.filter((p) => p.role === "Bar" && p.name);
+  const barHoursSum = barStaff.reduce((s, p) => s + p.hours, 0);
+  const barRateC = rateC(barStaff.reduce((s, p) => s + p.rawC, 0) + barPoolC - barTipOutC, barHoursSum);
+
+  const finalSlots = withRawC.map(({ rawC, ...p }) => {
+    const raw = $(rawC);
+    if (!p.name) return { ...p, raw, barShare: null, final: null };
+    if (p.role === "Servers") return { ...p, raw, barShare: 0, final: $(c(p.hours * $(serverRateC))) };
+    if (p.role === "Busser/Runner") return { ...p, raw, barShare: $(barShareC), final: $(c(p.hours * $(bussersRateC))) };
+    if (p.role === "Bar") return { ...p, raw, barShare: 0, final: $(c(p.hours * $(barRateC))) };
+    if (p.role.startsWith("Expo")) return { ...p, raw, barShare: $(barShareC), final: $(rawC + barShareC) };
+    return { ...p, raw, barShare: 0, final: raw }; // Host — flat, only earns if covers > 80
+  });
+  const totalDistributedC = finalSlots.reduce((s, p) => s + (p.final == null ? 0 : c(p.final)), 0);
+
+  // Floor check — same money as method 1 (what ORIGINATED in the floor pool:
+  // finals minus bar-tip-out shares; bartenders' AMT BY PT only).
+  const floorCheckTotalC = finalSlots.reduce((s, p) => {
+    if (!p.name) return s;
+    if (p.role === "Bar") return s + c(p.raw || 0);
+    return s + c(p.final || 0) - c(p.barShare || 0);
+  }, 0);
+  const leftBehindC = floorPoolC - floorCheckTotalC;
+  // What truncation alone can leave behind, at most, in whole cents: under 1¢
+  // per point at $/POINT, per filled slot at AMT BY PT, per hour at each $/HR
+  // (servers, bussers), per hourly-paid person at FINAL TIP. Passes when the
+  // total is at or under the pool and within that — anything more is a real
+  // error, not truncation.
+  const filled = withRawC.filter((p) => p.name).length;
+  const leftBehindBoundC =
+    Math.ceil(totalPoints) + filled + Math.ceil(serverHoursSum + bussersHoursSum) + servers.length + bussers.length;
+  const floorCheckMatches = leftBehindC >= 0 && leftBehindC <= leftBehindBoundC;
+
+  return {
+    version: 2,
+    barTipOutTotal: $(barTipOutC), totalPoints, perPoint: $(perPointC),
+    withRaw: finalSlots.map(({ barShare, final, ...p }) => p),
+    barTipOutRecipients, barShareEach: $(barShareC),
+    serverRate: $(serverRateC), bussersRate: $(bussersRateC), barRate: $(barRateC),
+    finalSlots, totalDistributed: $(totalDistributedC),
+    floorCheckTotal: $(floorCheckTotalC), floorCheckMatches,
+    leftBehind: $(leftBehindC), leftBehindBound: $(leftBehindBoundC),
   };
 }

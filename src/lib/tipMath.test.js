@@ -5,8 +5,8 @@
 // exercise each rule, and on thousands of random ones.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { calcTips, calcTipsV1, rowCalcVersion, tipCalcSupported, TIP_CALC_VERSIONS } from "./tipMath.js";
-import { BAR_TIP_OUT_RATE, applyExpoMode } from "./tipRules.js";
+import { calcTips, calcTipsV1, calcTipsV2, rowCalcVersion, sheetCalcVersion, tipCalcSupported, TIP_CALC_VERSIONS, CURRENT_TIP_CALC_VERSION } from "./tipMath.js";
+import { BAR_TIP_OUT_RATE, applyExpoMode, truncCents } from "./tipRules.js";
 
 // ---- c96ec05 src/App.jsx, verbatim (inputs passed in instead of closed over).
 function REFERENCE({ displaySlots, floorPool, barPool, barTipOutCharged }) {
@@ -126,14 +126,127 @@ test("method 1 = c96ec05 arithmetic, 5000 random sheets", () => {
 });
 
 test("versions: no column / null = method 1; unknown methods give no figures", () => {
-  assert.deepEqual(TIP_CALC_VERSIONS, [1]);
+  assert.deepEqual(TIP_CALC_VERSIONS, [1, 2]);
+  assert.equal(CURRENT_TIP_CALC_VERSION, 2);
   assert.equal(rowCalcVersion(null), 1, "no row");
   assert.equal(rowCalcVersion({}), 1, "pre-0025 row (no column)");
   assert.equal(rowCalcVersion({ calc_version: null }), 1, "column, no value");
   assert.equal(rowCalcVersion({ calc_version: 2 }), 2);
   assert.equal(tipCalcSupported(1), true);
-  assert.equal(tipCalcSupported(2), false, "this build doesn't know method 2");
-  assert.equal(calcTips(2, CASES["full night, bar tip-out on"]), null);
+  assert.equal(tipCalcSupported(2), true);
+  assert.equal(tipCalcSupported(3), false);
+  assert.equal(calcTips(2, CASES["full night, bar tip-out on"]).version, 2);
   assert.equal(calcTips(3, CASES["full night, bar tip-out on"]), null);
   assert.equal(calcTips(null, CASES["full night, bar tip-out on"]), null, "a sheet that didn't load");
+});
+
+test("which method a sheet gets", () => {
+  // Any saved sheet keeps its own method — including every sheet from before 0025.
+  assert.equal(sheetCalcVersion({ loaded: true, row: { date: "x" }, columnPresent: true }), 1, "existing row, no value -> 1, even with the column");
+  assert.equal(sheetCalcVersion({ loaded: true, row: { calc_version: null }, columnPresent: true }), 1);
+  assert.equal(sheetCalcVersion({ loaded: true, row: { calc_version: 2 }, columnPresent: true }), 2);
+  assert.equal(sheetCalcVersion({ loaded: true, row: { calc_version: 2 }, columnPresent: false }), 2, "a stored method is never overridden");
+  // Only a date with NO saved sheet gets method 2, and only with the column there.
+  assert.equal(sheetCalcVersion({ loaded: true, row: null, columnPresent: true }), 2);
+  assert.equal(sheetCalcVersion({ loaded: true, row: null, columnPresent: false }), 1, "no column: method 2 unreachable, even for a new sheet");
+  // A failed load is not "no sheet".
+  assert.equal(sheetCalcVersion({ loaded: false, row: null, columnPresent: true }), null);
+});
+
+// ---- method 2 ---------------------------------------------------------------
+const isCents = (n) => Number.isFinite(n) && Math.abs(n * 100 - Math.round(n * 100)) < 1e-6;
+const T = (n) => truncCents(n) / 100;
+const sumCents = (xs) => xs.reduce((s, x) => s + Math.round(x * 100), 0) / 100;
+
+// Every printed figure follows from the printed figure above it.
+function assertReproducibleByHand(r, input, label, { payable = true } = {}) {
+  const { floorPool, barPool, barTipOutCharged } = input;
+  for (const k of ["perPoint", "barTipOutTotal", "barShareEach", "serverRate", "bussersRate", "barRate", "totalDistributed", "floorCheckTotal", "leftBehind"]) {
+    assert.ok(isCents(r[k]), `${label}: ${k} ${r[k]} isn't whole cents`);
+  }
+  assert.equal(r.perPoint, r.totalPoints > 0 ? T(T(floorPool) / r.totalPoints) : 0, `${label}: $/POINT`);
+  assert.equal(r.barTipOutTotal, barTipOutCharged ? T(T(barPool) * BAR_TIP_OUT_RATE) : 0, `${label}: Bar Tip-Out`);
+  assert.equal(r.barShareEach, r.barTipOutRecipients > 0 ? T(r.barTipOutTotal / r.barTipOutRecipients) : 0, `${label}: each recipient`);
+  const named = r.finalSlots.filter((p) => p.name);
+  r.finalSlots.forEach((p) => {
+    assert.ok(isCents(p.raw), `${label}: ${p.id} AMT BY PT`);
+    assert.equal(p.raw, T((p.pts || 0) * r.perPoint), `${label}: ${p.id} AMT BY PT = trunc(points x printed $/POINT)`);
+  });
+  const rate = (pool, hrs) => (hrs > 0 ? T(pool / hrs) : 0);
+  const of = (role) => named.filter((p) => p.role === role);
+  const hrs = (ps) => ps.reduce((s, p) => s + p.hours, 0);
+  assert.equal(r.serverRate, rate(sumCents(of("Servers").map((p) => p.raw)), hrs(of("Servers"))), `${label}: server $/HR`);
+  assert.equal(r.bussersRate, rate(sumCents(of("Busser/Runner").flatMap((p) => [p.raw, r.barShareEach])), hrs(of("Busser/Runner"))), `${label}: busser $/HR`);
+  assert.equal(r.barRate, rate(sumCents([...of("Bar").map((p) => p.raw), T(barPool), -r.barTipOutTotal]), hrs(of("Bar"))), `${label}: bar $/HR`);
+  named.forEach((p) => {
+    assert.ok(isCents(p.final), `${label}: ${p.id} FINAL`);
+    const want = p.role === "Servers" ? T(p.hours * r.serverRate)
+      : p.role === "Busser/Runner" ? T(p.hours * r.bussersRate)
+      : p.role === "Bar" ? T(p.hours * r.barRate)
+      : p.role.startsWith("Expo") ? sumCents([p.raw, r.barShareEach])
+      : p.raw;
+    assert.equal(p.final, want, `${label}: ${p.id} FINAL from printed figures`);
+  });
+  assert.ok(r.leftBehind >= 0, `${label}: never pays out more than the floor pool (left behind ${r.leftBehind})`);
+  // payable: every filled hourly group (Servers, Busser/Runner, Bar) has hours,
+  // so only truncation can leave floor money behind. A group on 0 hours leaves
+  // its whole pool unpaid, and the check must then say so.
+  if (payable) {
+    assert.ok(r.leftBehind <= r.leftBehindBound + 1e-9, `${label}: left behind ${r.leftBehind} within truncation bound ${r.leftBehindBound}`);
+    assert.equal(r.floorCheckMatches, true, `${label}: floor check passes on an honest sheet`);
+  }
+}
+
+test("method 2: every printed figure reproducible by hand, every rule", () => {
+  for (const [label, input] of Object.entries(CASES)) assertReproducibleByHand(calcTipsV2(input), input, label);
+});
+
+test("method 2: reproducible by hand, never above method 1, 5000 random sheets", () => {
+  let seed = 4242;
+  const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+  const cents = (max) => Math.floor(rnd() * max * 100) / 100;
+  for (let i = 0; i < 5000; i++) {
+    const filled = SLOTS.map((s) => s.id).filter(() => rnd() < 0.75);
+    const hours = {};
+    SLOTS.forEach((s) => { hours[s.id] = Math.round(rnd() * 44) / 4; });
+    const input = {
+      displaySlots: sheet({ filled, hours, covers: Math.floor(rnd() * 160), expoAsBusser: rnd() < 0.3 }),
+      floorPool: cents(6000), barPool: cents(1200), barTipOutCharged: rnd() < 0.7,
+    };
+    const v2 = calcTipsV2(input);
+    const v1 = calcTipsV1(input);
+    const named = input.displaySlots.filter((p) => p.name && (p.pts || 0) > 0);
+    const payable = ["Servers", "Busser/Runner", "Bar"].every((role) => {
+      const ps = named.filter((p) => p.role === role);
+      return ps.length === 0 || ps.reduce((s, p) => s + p.hours, 0) > 0;
+    });
+    assertReproducibleByHand(v2, input, `random #${i}`, { payable });
+    v2.finalSlots.forEach((p, k) => {
+      if (p.final == null) return;
+      // Bar may keep up to 1¢ more: Bar Tip-Out is truncated before it leaves
+      // the bar pool, so the fraction method 1 passed on stays with the bar.
+      const slack = p.role === "Bar" ? 0.01 : 0;
+      assert.ok(p.final <= T(v1.finalSlots[k].final) + slack + 1e-9, `random #${i}: ${p.id} method 2 ${p.final} above method 1 ${T(v1.finalSlots[k].final)}`);
+    });
+  }
+});
+
+test("method 2: truncate $/HR before multiplying (the 15 Oct busser shape)", () => {
+  // Two Busser/Runners on 5 hours, AMT BY PT 121.81 each, bar share 3.75 each:
+  // pool 251.12 / 10 hrs -> $/HR 25.11 -> 5 x 25.11 = 125.55 each.
+  const slots = [
+    { id: "server1", role: "Servers", name: "A", pts: 1, hours: 6 },
+    { id: "server2", role: "Servers", name: "B", pts: 1, hours: 6 },
+    { id: "busser1", role: "Busser/Runner", name: "C", pts: 0.6, hours: 5 },
+    { id: "busser2", role: "Busser/Runner", name: "D", pts: 0.6, hours: 5 },
+    { id: "bar1", role: "Bar", name: "E", pts: 1, hours: 8 },
+  ];
+  const r = calcTipsV2({ displaySlots: slots, floorPool: 852.69, barPool: 75, barTipOutCharged: true });
+  assert.equal(r.perPoint, 203.02); // 852.69 / 4.2 = 203.0214…
+  assert.equal(r.barTipOutTotal, 7.5);
+  assert.equal(r.barShareEach, 3.75);
+  const c = r.finalSlots.find((p) => p.id === "busser1");
+  assert.equal(c.raw, 121.81);
+  assert.equal(r.bussersRate, 25.11);
+  assert.equal(c.final, 125.55);
 });
