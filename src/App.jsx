@@ -346,6 +346,10 @@ function roleCellStyle(role) {
   const accent = ROLE_COLOR[role];
   return accent ? CELL_STYLE_BY_ACCENT[accent] : undefined;
 }
+// The Tip Sheet floor check's printed "passes" line — one wording for every
+// calculation method, true for all of them, so paper looks the same whichever
+// method produced it (the date + tip_sheets.calc_version are the record).
+const FLOOR_CHECK_PASS = "✓ Reconciled with floor cash + CC";
 // A Set Schedule cell holding a code that isn't a current option: dashed red,
 // so it reads as something to query, never as a day off.
 const DEAD_CELL_STYLE = { color: "#f0b86b", borderColor: "#e0796c", borderStyle: "dashed", background: "rgba(224,121,108,0.16)" };
@@ -7941,13 +7945,13 @@ export default function SchedulingHub({ session, onSignOut }) {
                     <div className="check-value">${money(floorCheckTotal)}</div>
                     {tipCalc?.version >= 2 ? (
                       <>
-                        <div className="check-sub">{floorCheckMatches ? "✓ Adds up to floor cash + CC" : `Doesn't add up — more than truncation can leave (up to ${money(tipCalc.leftBehindBound)})`}</div>
+                        <div className="check-sub">{floorCheckMatches ? FLOOR_CHECK_PASS : `Doesn't add up — more than truncation can leave (up to $${money(tipCalc.leftBehindBound)})`}</div>
                         {/* The manager's check, not the staff's: screen only, never
                             on the printout or the PDF (.screen-only, like the notes). */}
                         <div className="check-sub check-left-behind screen-only">Left behind: ${money(tipCalc.leftBehind)}</div>
                       </>
                     ) : (
-                      <div className="check-sub">{floorCheckMatches ? "✓ Matches floor cash + CC" : `Off by ${money(Math.abs(floorCheckTotal - floorPool))} vs floor cash + CC`}</div>
+                      <div className="check-sub">{floorCheckMatches ? FLOOR_CHECK_PASS : `Off by $${money(Math.abs(floorCheckTotal - floorPool))} vs floor cash + CC`}</div>
                     )}
                   </div>
                   {/* Sign-off rules, paper and PDF only. Fills the gap between
