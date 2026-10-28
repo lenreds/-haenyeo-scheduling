@@ -47,6 +47,8 @@ import {
   calendarNotesAvailable,
   insertRoleShiftOption,
   deleteRoleShiftOption,
+  setShiftOptionRetired,
+  fetchShiftOptionUsage,
   updateRoleShiftOption,
   fetchRoleDuties,
   insertRoleDuty,
@@ -787,6 +789,13 @@ const ROLE_CODE_PREFIX = {
   Training: "TRAIN", BOH: "BOH", Kitchen: "KITCHEN", Management: "FM",
 };
 // "7pm-CL" -> "SV_7PMCL", de-duped against the codes already on that role.
+// The options a dropdown offers. A retired option (migration 0026) is still a
+// real option — labels, colours and the unknown-code check all use the full
+// list — but it's only offered on a cell that already holds it.
+function pickableOptions(opts, current) {
+  return opts.filter((o) => !o.retired || o.code === current);
+}
+
 function shiftCodeFor(role, label, existingCodes = []) {
   const prefix = ROLE_CODE_PREFIX[role] || "SHIFT";
   const slug = String(label).toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 12) || "NEW";
@@ -2077,14 +2086,15 @@ export default function SchedulingHub({ session, onSignOut }) {
   // this editor, where the name and "Counts as off" are set together. So
   // whether a shift is an off state is decided once, when it's made, not
   // toggled from a checkbox on every chip.
-  // shiftEditor: { role, code (null = new), label, isOff, confirmDelete, busy, error }
+  // shiftEditor: { role, code (null = new), label, isOff, retired, confirmDelete,
+  //   inUse ({ total, sources } once Delete found cells using it), busy, error }
   const [shiftEditor, setShiftEditor] = useState(null);
   function openShiftEditor(role, opt = null) {
     setShiftMsg("");
     setShiftEditor({
       role, code: opt ? opt.code : null,
-      label: opt ? opt.label : "", isOff: opt ? !!opt.isOff : false,
-      confirmDelete: false, busy: false, error: null,
+      label: opt ? opt.label : "", isOff: opt ? !!opt.isOff : false, retired: opt ? !!opt.retired : false,
+      confirmDelete: false, inUse: null, busy: false, error: null,
     });
   }
   async function saveShiftEditor() {
@@ -2094,7 +2104,8 @@ export default function SchedulingHub({ session, onSignOut }) {
     const label = ed.label.trim();
     if (!label) { setShiftEditor({ ...ed, error: "Give the shift a name." }); return; }
     const current = roleOptions[role] || [];
-    if (current.some((o) => o.code !== ed.code && o.label.toLowerCase() === label.toLowerCase())) {
+    // Only offered (not retired) options clash: a retired one never shows in a dropdown.
+    if (current.some((o) => o.code !== ed.code && !o.retired && o.label.toLowerCase() === label.toLowerCase())) {
       setShiftEditor({ ...ed, error: `${role} already has a "${label}" shift.` });
       return;
     }
@@ -2135,13 +2146,58 @@ export default function SchedulingHub({ session, onSignOut }) {
       setShiftEditor((p) => (p ? { ...p, busy: false, error: `Couldn't save: ${e.message || e}` } : p));
     }
   }
+  // Delete only an option nothing uses. First click asks the database how many
+  // stored cells hold it (per-week + template on all three grids, Rail / day-of
+  // overrides): any at all -> refused, Retire offered instead; can't tell -> refused.
+  // Migration 0026's trigger refuses the delete in the database too.
   async function deleteFromShiftEditor() {
     const ed = shiftEditor;
-    if (!ed?.code || ed.busy) return;
-    if (!ed.confirmDelete) { setShiftEditor({ ...ed, confirmDelete: true }); return; }
+    if (!ed?.code || ed.busy || ed.inUse) return;
+    if (!ed.confirmDelete) {
+      setShiftEditor({ ...ed, busy: true, error: null });
+      try {
+        const usage = await fetchShiftOptionUsage(ed.role, ed.code);
+        setShiftEditor((p) => (p && p.code === ed.code
+          ? { ...p, busy: false, ...(usage.total > 0 ? { inUse: usage } : { confirmDelete: true }) }
+          : p));
+      } catch (e) {
+        console.error("Shift usage check failed:", e);
+        setShiftEditor((p) => (p ? { ...p, busy: false, error: `Can't delete: couldn't check whether any schedule uses it. ${e.message || e}` } : p));
+      }
+      return;
+    }
     setShiftEditor(null);
     const saved = (roleOptions[ed.role] || []).find((o) => o.code === ed.code);
     await handleRemoveShiftOption(ed.role, ed.code, saved?.label || ed.code);
+  }
+  // Retire (keep on the cells that hold it, stop offering it) or restore.
+  async function retireFromShiftEditor(retired) {
+    const ed = shiftEditor;
+    if (!ed?.code || ed.busy) return;
+    const role = ed.role;
+    const list = roleOptions[role] || [];
+    const opt = list.find((o) => o.code === ed.code);
+    const label = opt?.label || ed.code;
+    if (!retired && list.some((o) => o.code !== ed.code && !o.retired && o.label.toLowerCase() === label.toLowerCase())) {
+      setShiftEditor({ ...ed, error: `${role} already offers a "${label}" shift. Rename one of them first, then restore this one.` });
+      return;
+    }
+    setShiftEditor({ ...ed, busy: true, error: null });
+    const apply = (r) => setRoleOptions((prev) => ({
+      ...prev, [role]: (prev[role] || []).map((x) => (x.code === ed.code ? { ...x, retired: r } : x)),
+    }));
+    apply(retired);
+    try {
+      await setShiftOptionRetired(role, ed.code, retired);
+      setShiftEditor(null);
+      setShiftMsg(retired
+        ? `Retired "${label}" (${role}). Days that already have it keep it; it's no longer offered for new ones.`
+        : `Restored "${label}" (${role}). It's offered in the dropdowns again.`);
+    } catch (e) {
+      console.error("Retire shift option failed:", e);
+      apply(!retired);
+      setShiftEditor((p) => (p ? { ...p, busy: false, error: `Couldn't ${retired ? "retire" : "restore"} it: ${e.message || e}` } : p));
+    }
   }
   async function handleRemoveShiftOption(role, code, label) {
     if (code === "OFF") return; // Off is structural, not a real shift
@@ -2150,11 +2206,15 @@ export default function SchedulingHub({ session, onSignOut }) {
     setShiftMsg("");
     try {
       await deleteRoleShiftOption(role, code);
-      setShiftMsg(`Removed "${label}" from ${role}. Shifts already scheduled with it are unchanged.`);
+      setShiftMsg(`Removed "${label}" from ${role}. No schedule was using it.`);
     } catch (e) {
       console.error("Remove shift option failed:", e);
       setRoleOptions((prev) => ({ ...prev, [role]: prevList }));
-      setShiftMsg(`Couldn't remove "${label}": ${e.message || e}`);
+      // The database refuses while any cell holds it (0026) — e.g. it was put
+      // on a schedule between the check and the click.
+      setShiftMsg(/used by/i.test(e.message || "")
+        ? `Couldn't remove "${label}": a schedule is using it now. Open it again and retire it instead.`
+        : `Couldn't remove "${label}": ${e.message || e}`);
     }
   }
 
@@ -4106,7 +4166,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                 onChange={(e) => setPlaceholderShift(groupKey, idx, realWeekday, e.target.value)}
               >
                 {dead && <option value={dead.code}>{dead.label}</option>}
-                {opts.map((o) => (
+                {pickableOptions(opts, value).map((o) => (
                   <option key={o.code} value={o.code}>
                     {groupKey === "kitchen" && o.code === "KITCHEN" && isYesPerson ? "Yes" : o.label}
                   </option>
@@ -6161,6 +6221,11 @@ export default function SchedulingHub({ session, onSignOut }) {
         /* The duties print sheet: rendered only while printing, never on screen. */
         .duties-print { display: none; }
         .shift-mgmt-chip.is-off { border-style: dashed; }
+        .shift-mgmt-chip.is-retired { opacity: 0.55; }
+        .shift-retired-tag { display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 4px; background: rgba(160,160,160,0.18); color: var(--txt2); font-family: 'Space Mono', monospace; font-size: 8.5px; font-weight: 700; letter-spacing: 0.8px; line-height: 15px; }
+        .shift-retired-note .shift-retired-tag { margin-left: 0; margin-right: 4px; }
+        .shift-in-use { line-height: 1.45; }
+        .shift-editor .nr-btn-primary { border-color: var(--accent); color: var(--accent); }
         .shift-off-check { display: inline-flex; align-items: center; gap: 3px; margin-left: 6px; padding-left: 7px; border-left: 1px solid var(--line2); font-size: 9px; letter-spacing: 0.3px; color: var(--muted); cursor: pointer; white-space: nowrap; }
         .shift-mgmt-chip.is-off .shift-off-check { color: var(--accent); }
         .shift-off-check input { accent-color: var(--accent); margin: 0; width: 11px; height: 11px; cursor: pointer; }
@@ -7394,7 +7459,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                                         onChange={(e) => setCellShift(p.name, weekday, e.target.value)}
                                       >
                                         {dead && <option value={dead.code}>{dead.label}</option>}
-                                        {opts.map((o) => (
+                                        {pickableOptions(opts, value).map((o) => (
                                           <option key={o.code} value={o.code}>{o.label}</option>
                                         ))}
                                       </select>
@@ -7518,7 +7583,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                                       onChange={(e) => setPlaceholderShift("management", idx, realWeekday, e.target.value)}
                                     >
                                       {dead && <option value={dead.code}>{dead.label}</option>}
-                                      {mgmtOpts.map((o) => (
+                                      {pickableOptions(mgmtOpts, value).map((o) => (
                                         <option key={o.code} value={o.code}>{o.label}</option>
                                       ))}
                                     </select>
@@ -8329,8 +8394,8 @@ export default function SchedulingHub({ session, onSignOut }) {
               <>
                 <div className="template-note" style={{ marginTop: 0, marginBottom: 10 }}>
                   These are the options each role sees in the Set Schedule dropdowns. Click a shift to rename it, set
-                  whether it counts as off, or delete it. Deleting stops it being picked going forward — shifts already on
-                  the schedule keep it.
+                  whether it counts as off, retire it, or delete it. Only a shift no schedule uses can be deleted; one that's
+                  in use can be retired instead — days that have it keep it, and it's no longer offered for new days.
                 </div>
                 {shiftMsg && <div className="staff-msg" style={{ display: "block", marginBottom: 10 }}>{shiftMsg}</div>}
                 <div className="shift-mgmt">
@@ -8342,13 +8407,15 @@ export default function SchedulingHub({ session, onSignOut }) {
                         <div className="shift-mgmt-opts">
                           {list.filter((o) => o.code !== "OFF").map((o) => (
                             <button
-                              className={`shift-mgmt-chip shift-chip-btn ${o.isOff ? "is-off" : ""}`}
+                              className={`shift-mgmt-chip shift-chip-btn ${o.isOff ? "is-off" : ""} ${o.retired ? "is-retired" : ""}`}
                               key={o.code}
                               onClick={() => openShiftEditor(role, o)}
-                              title={o.isOff ? `${o.label} — counts as off. Click to edit.` : `${o.label} — click to edit`}
+                              title={o.retired ? `${o.label} — retired: kept on days that have it, not offered for new ones. Click to restore or edit.`
+                                : o.isOff ? `${o.label} — counts as off. Click to edit.` : `${o.label} — click to edit`}
                             >
                               {o.label}
                               {o.isOff && <span className="shift-off-tag">OFF</span>}
+                              {o.retired && <span className="shift-retired-tag">RETIRED</span>}
                             </button>
                           ))}
                           <button className="shift-mgmt-add" onClick={() => openShiftEditor(role)}>+ Add Shift</button>
@@ -8604,7 +8671,7 @@ export default function SchedulingHub({ session, onSignOut }) {
           shows up in each immediately. */}
       {swapModal && (() => {
         const replRole = swapForm.withName ? primaryRoleOf(swapForm.withName) : null;
-        const shiftOpts = (replRole ? roleOptions[replRole] || [] : []).filter((o) => !isOffCell(o.code)); // no "Counts as off" option as a replacement
+        const shiftOpts = (replRole ? roleOptions[replRole] || [] : []).filter((o) => !isOffCell(o.code) && !o.retired); // no "Counts as off" option as a replacement; nothing retired
         // The date the glance box was showing when the swap was opened, not
         // necessarily today (brief item 7).
         const dateLabel = new Date(`${swapModal.dateIso || TODAY_ISO}T00:00:00`)
@@ -8715,7 +8782,7 @@ export default function SchedulingHub({ session, onSignOut }) {
           .filter((s) => s.active !== false && s.name && !tipWorkingNames.has(s.name))
           .sort((a, b) => a.name.localeCompare(b.name));
         const role = dayOfForm.role;
-        const shiftOpts = role ? (roleOptions[role] || []).filter((o) => !isOffCell(o.code)) : []; // adding someone as "off" would be a no-op
+        const shiftOpts = role ? (roleOptions[role] || []).filter((o) => !isOffCell(o.code) && !o.retired) : []; // adding someone as "off" would be a no-op; nothing retired
         const full = isAdd && role ? dayOfSlotsFull(role) : false;
         const roleLabel = role === "Servers" ? "Server" : role;
         const shiftLabel = dayOfForm.shift ? roleShiftText(role, dayOfForm.shift) : "";
@@ -9231,11 +9298,35 @@ export default function SchedulingHub({ session, onSignOut }) {
                   "{ed.label.trim()}" reads like an off state — tick Counts as off if staff on it aren't working.
                 </div>
               )}
+              {!isNew && ed.retired && (
+                <div className="shift-editor-explain shift-retired-note">
+                  <span className="shift-retired-tag">RETIRED</span> Days that already have this shift keep it, with its
+                  normal name and colour. It isn't offered when picking a shift for a new day. Restore puts it back in the dropdowns.
+                </div>
+              )}
+              {ed.inUse && (
+                <div className="send-error shift-in-use">
+                  <b>Can't delete — {ed.inUse.total} {ed.inUse.total === 1 ? "day uses" : "days use"} this shift</b>
+                  {" "}({ed.inUse.sources.map((s) => `${s.source}: ${s.cells}`).join(" · ")}). Deleting it would leave
+                  {ed.inUse.total === 1 ? " that day" : " those days"} holding a shift that no longer exists.
+                  {ed.retired ? " It's already retired, so it isn't offered for new days." : " Retire it instead: those days keep it, and it stops being offered for new ones."}
+                </div>
+              )}
               {ed.error && <div className="send-error">{ed.error}</div>}
               <div className="send-actions">
-                {!isNew && (
+                {!isNew && !ed.inUse && (
                   <button className={`nr-btn ${ed.confirmDelete ? "nr-btn-deny" : ""}`} disabled={ed.busy} onClick={deleteFromShiftEditor}>
-                    {ed.confirmDelete ? "Confirm delete" : "Delete"}
+                    {ed.confirmDelete ? "Confirm delete (nothing uses it)" : "Delete"}
+                  </button>
+                )}
+                {!isNew && (
+                  <button
+                    className={`nr-btn ${ed.inUse && !ed.retired ? "nr-btn-primary" : ""}`}
+                    disabled={ed.busy}
+                    onClick={() => retireFromShiftEditor(!ed.retired)}
+                    title={ed.retired ? "Offer this shift in the dropdowns again" : "Keep it on days that have it; stop offering it for new ones"}
+                  >
+                    {ed.retired ? "Restore" : ed.inUse ? "Retire instead" : "Retire"}
                   </button>
                 )}
                 <span style={{ flex: 1 }} />

@@ -232,13 +232,38 @@ shifts stored against a roster slot with the person known only by name. Both sto
 data against a position and work out who holds it afterwards. The fix in both is a
 staff id recorded on the slot. Whoever scopes either one should read both.
 
+## 10. Real RLS with a manager role — before ANY new login is created
+
+**Hard dependency (owner, 2026-10-28):** no new login until this and the Manage Shifts
+guard (migration 0026) are both in place. They're two different things, and one doesn't
+cover the other.
+
+**Where it stands:** every manager-facing table's policy is `using (true) with check
+(true)` for `authenticated`. Anyone who can sign in can read, change or delete anything,
+from the app or straight through the API. There is no role system.
+
+**What 0026 did and didn't do.** 0026 makes a shift option's `code` and `role` read-only
+and refuses deleting an option any cell still uses, from every route (app, API, table
+editor, SQL). That **limits what a write can break** in that one table. It does **not**
+decide **who may write**. A signed-in user can still retire options, relabel them, or
+change every schedule cell directly. The same goes for 0025's `calc_version` trigger:
+it protects the record, not access to it.
+
+**Needed:** a manager role (who holds it, stored server-side, not in the browser),
+policies that check it on every table, and decisions per table about what a non-manager
+login (if one ever exists) may read. Items 1 (2FA) and 5 (CSS-only lock) depend on the
+same role.
+
 ---
 
 ## Related hardening already in place (not Phase 2 work)
 
 - `SUPABASE_SERVICE_ROLE_KEY` is server-only and never `VITE_`-prefixed, so it cannot
   reach the browser bundle.
-- RLS is authenticated-only on every manager-facing table.
+- RLS is authenticated-only on every manager-facing table. (That's "signed in", not
+  "is a manager": see item 10.)
+- Shift options (migration 0026): `code` / `role` read-only once created; delete refused
+  while any cell uses the option; `retired` flag instead. Narrows damage, not access.
 - `/api/poll` no longer logs staff email addresses (commit 4f46bb8).
 - Untagged inbox mail that doesn't match a registered sender is left unread and
   unlabeled rather than being touched.

@@ -219,15 +219,23 @@ export async function replaceStaffRoles(staffId, roles) {
 }
 
 /* -------------------------------------------------- role_shift_options ----- */
-// -> { [role]: [{ code, label, isOff }] } in sort order — null pre-migration.
+// -> { [role]: [{ code, label, isOff, retired }] } in sort order — null pre-migration.
 // isOff (migration 0019) marks an option that means "off" (e.g. an RO option):
 // staff on it are not working. Pre-0019 the select degrades and isOff is false.
+// retired (migration 0026): still valid on cells that hold it, but not offered
+// for new cells. Pre-0026 the select degrades and retired is false.
 
 export async function fetchRoleShiftOptions() {
   let { data, error } = await supabase
     .from("role_shift_options")
-    .select("role, code, label, sort_order, is_off")
+    .select("role, code, label, sort_order, is_off, retired")
     .order("sort_order", { ascending: true });
+  if (error) {
+    ({ data, error } = await supabase
+      .from("role_shift_options")
+      .select("role, code, label, sort_order, is_off")
+      .order("sort_order", { ascending: true }));
+  }
   if (error) {
     ({ data, error } = await supabase
       .from("role_shift_options")
@@ -238,7 +246,7 @@ export async function fetchRoleShiftOptions() {
   if (!data || data.length === 0) return null;
   const byRole = {};
   data.forEach((row) => {
-    (byRole[row.role] = byRole[row.role] || []).push({ code: row.code, label: row.label, isOff: row.is_off === true });
+    (byRole[row.role] = byRole[row.role] || []).push({ code: row.code, label: row.label, isOff: row.is_off === true, retired: row.retired === true });
   });
   return byRole;
 }
@@ -289,9 +297,42 @@ export async function updateRoleShiftOption(role, code, { label, isOff }) {
   }
 }
 
-// Remove an option from the dropdown. Deliberately does NOT touch
-// schedule_patterns / weekly_schedules — shifts already assigned with this code
-// keep rendering from SHIFT_META, they just can't be picked again.
+// Retire / restore one option (migration 0026). Retired = kept for the cells
+// that hold it, not offered for new ones.
+export async function setShiftOptionRetired(role, code, retired) {
+  const { error } = await supabase
+    .from("role_shift_options")
+    .update({ retired: !!retired })
+    .eq("role", role)
+    .eq("code", code);
+  if (error) {
+    if (/retired/.test(error.message || "")) {
+      throw new Error("Retiring a shift needs migration 0026 — run it in the Supabase SQL editor.");
+    }
+    throw error;
+  }
+}
+
+// How many stored cells hold this option where nothing else would make the
+// code valid (migration 0026's shift_option_usage): per-week records and
+// templates on all three grids, and Rail / day-of overrides.
+// -> { total, sources: [{ source, cells }] }. Throws when the count can't be
+// had (no 0026) — the caller must then refuse to delete, never guess 0.
+export async function fetchShiftOptionUsage(role, code) {
+  const { data, error } = await supabase.rpc("shift_option_usage", { p_role: role, p_code: code });
+  if (error) {
+    if (/shift_option_usage|function|schema cache/i.test(error.message || "")) {
+      throw new Error("Deleting a shift needs migration 0026 (it checks no schedule still uses it) — run it in the Supabase SQL editor.");
+    }
+    throw error;
+  }
+  const sources = (data || []).map((r) => ({ source: r.source, cells: Number(r.cells) || 0 })).filter((r) => r.cells > 0);
+  return { total: sources.reduce((s, r) => s + r.cells, 0), sources };
+}
+
+// Remove an option from the dropdown. Only for an option nothing uses: the
+// caller checks fetchShiftOptionUsage first, and migration 0026's trigger
+// refuses the delete in the database anyway if any cell still holds it.
 export async function deleteRoleShiftOption(role, code) {
   const { error } = await supabase
     .from("role_shift_options")
