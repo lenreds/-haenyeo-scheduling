@@ -77,11 +77,11 @@ This is the most complex piece — matches Haenyeo's actual paper tip-out sheet 
 
 **Print button** here too.
 
-### Tip Sheet calculation methods (current as of 2026-10-26)
+### Tip Sheet calculation methods (current as of 2026-10-28)
 
 **The rule:** the arithmetic a sheet was paid with is part of its record. Sheets recalculate from their stored inputs every time they open, so changing the maths would change every sheet ever sent. Each sheet therefore carries the **method** it was paid under, and keeps it for good.
 
-- `src/lib/tipMath.js` holds the methods. **Method 1** (`calcTipsV1`, truncate once at display) is the arithmetic every sheet up to Oct 2026 was paid with. It was moved verbatim out of `App.jsx` at commit `c96ec05` and is **frozen: never edit it**. A new method is a new function with a new number.
+- `src/lib/tipMath.js` holds the methods. **Method 1** (`calcTipsV1`, truncate once at display) is the arithmetic every sheet up to 26 Oct 2026 was paid with. It was moved verbatim out of `App.jsx` at commit `c96ec05` and is **frozen: never edit it**. Method 2 is frozen too (below). A new method is a new function with a new number.
 - `tip_sheets.calc_version` (migration 0025) stores the method. Empty = method 1. A trigger lets it be set only when a sheet is created, never changed. Only a date with no saved sheet can get a newer method, and every sheet that existed when 0025 ran stays method 1, drafts included (a printed, paid, never-locked sheet is still a record).
 - **Version guard:** code that opens a sheet stamped with a method it doesn't implement, or a sheet that failed to load, shows a "reload" notice instead of figures and saves nothing. `src/components/UpdateBanner.jsx` tells a long-open tab when a newer deploy is live.
 - Same discipline as the frozen clock-time parser in `src/lib/tipTimes.js` and the frozen roster (`roster_snapshot`, migration 0023).
@@ -93,7 +93,16 @@ This is the most complex piece — matches Haenyeo's actual paper tip-out sheet 
 
 The check only reads that file and git. It can't touch the database or the app. First run, 2026-10-26: 30 sheets (Jul 1 – Oct 25), zero differences. Sheets frozen before migration 0023 have no stored roster, so their filled slots are worked out from the clock times and marked "worked out". The permanent repo test `src/lib/tipMath.test.js` (part of `npm test`) pins method 1 to the same reference on synthetic and random sheets.
 
-**Method 2** (deploy B, pending): truncate at every printed step and compute each step from the printed figure above it, so the sheet can be checked by hand with a calculator. Every method-2 sheet shows "Left behind: $X.XX", even at $0.00.
+**Method 2** (`calcTipsV2`, deploy B `c368ebd`, live 27 Oct 2026; **frozen: never edit it**): truncate at every printed step and compute each step from the printed figure above it, so the sheet can be checked by hand with a calculator. `$/HR = trunc(group pool ÷ group hours)`, then `FINAL TIP = trunc(HRS × $/HR)` for every hourly group, every time. Every method-2 and method-3 sheet shows "Left behind: $X.XX" on screen only (not on the printout or PDF), even at $0.00.
+
+**Method 3** (`calcTipsV3`, current for new sheets): method 2, except the `$/HR` step is skipped for an hourly group (Servers, Busser/Runners, Bar) where every member has the same PTS and the same HRS. In that case dividing by hours and multiplying back can't move money between people. It can only shave cents off everyone (27 Oct: AMT BY PT $338.99, method-2 FINAL $338.95). Such a group gets AMT BY PT, plus the bar share for Busser/Runners. A bartender gets AMT BY PT plus an even split of (bar cash + bar CC − Bar Tip-Out), so a sole bartender gets the whole bar pool. Any difference (a swing's points, or unequal hours) means method 2's `$/HR` step, unchanged. `$/HR` is still printed either way. Expo and Host are flat in every method.
+
+**Cutover dates — read carefully, these are not ranges:**
+- Method 1: every sheet up to and including 26 Oct 2026.
+- Method 2: **27 Oct 2026 only, unless the 28 Oct sheet was created before method 3 went live.** 27 Oct was the first method-2 sheet, and method 3 was built the next day, so 27 Oct may be the only method-2 sheet that ever exists. To know for sure, don't assume. Ask the database: `select date, calc_version from tip_sheets where calc_version is not null order by date;`
+- Method 3: every date created after method 3 went live.
+
+The offline check (`tools/tipcheck/`) now checks method-2 sheets as well, against `calcTipsV2` as it shipped at `c368ebd` (read from git). Method-3 sheets are listed but not checked until a method 4 freezes method 3. `npm test` pins method 2 to a verbatim copy, the same way it pins method 1.
 
 ---
 

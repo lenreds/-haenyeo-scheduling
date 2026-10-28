@@ -10,8 +10,8 @@
 import { BAR_TIP_OUT_RATE, truncCents } from "./tipRules.js";
 
 // Methods this build implements, and the one a brand-new sheet gets.
-export const TIP_CALC_VERSIONS = [1, 2];
-export const CURRENT_TIP_CALC_VERSION = 2;
+export const TIP_CALC_VERSIONS = [1, 2, 3];
+export const CURRENT_TIP_CALC_VERSION = 3;
 
 // The method a stored row was paid under. No column (pre-0025) or no value =
 // method 1. Anything else is returned as stored, known or not.
@@ -30,6 +30,7 @@ export function tipCalcSupported(version) {
 export function calcTips(version, input) {
   if (version === 1) return calcTipsV1(input);
   if (version === 2) return calcTipsV2(input);
+  if (version === 3) return calcTipsV3(input);
   return null;
 }
 
@@ -105,7 +106,13 @@ export function calcTipsV1({ displaySlots, floorPool, barPool, barTipOutCharged 
   };
 }
 
-// ---- METHOD 2 ---------------------------------------------------------------
+// ---- METHOD 2 — FROZEN ------------------------------------------------------
+// Shipped in deploy B (c368ebd, unchanged through 21dff67). Sheets created from
+// 27 Oct 2026 until method 3 shipped were paid with this — possibly only the
+// 27 Oct sheet. DO NOT EDIT — not to fix, tidy or "improve" it. A different
+// method is a new function and a new version number (method 3 is the fix for
+// the cents this shaves off equal groups).
+//
 // Owner, 2026-10-26: "a sheet whose own printed numbers add up". Every printed
 // figure truncates to the cent, and every step is computed from the PRINTED
 // (truncated) figure above it, so anyone holding the paper sheet can reproduce
@@ -186,6 +193,98 @@ export function calcTipsV2({ displaySlots, floorPool, barPool, barTipOutCharged 
     withRaw: finalSlots.map(({ barShare, final, ...p }) => p),
     barTipOutRecipients, barShareEach: $(barShareC),
     serverRate: $(serverRateC), bussersRate: $(bussersRateC), barRate: $(barRateC),
+    finalSlots, totalDistributed: $(totalDistributedC),
+    floorCheckTotal: $(floorCheckTotalC), floorCheckMatches,
+    leftBehind: $(leftBehindC), leftBehindBound: $(leftBehindBoundC),
+  };
+}
+
+// ---- METHOD 3 ---------------------------------------------------------------
+// Owner, 2026-10-28: method 2, except the $/HR step is skipped for an hourly
+// group (Servers, Busser/Runners, Bar) where it can't do anything. When every
+// member of the group has the same PTS and the same HRS, pool ÷ hours × hours
+// can't move money between them; it can only shave cents off everyone (27 Oct:
+// AMT BY PT 338.99, FINAL 338.95). So for such a group:
+//   Servers         FINAL TIP = printed AMT BY PT
+//   Busser/Runners  FINAL TIP = printed AMT BY PT + printed share
+//   Bar             FINAL TIP = printed AMT BY PT
+//                               + trunc((bar pool − printed Bar Tip-Out) ÷ bartenders)
+// (each = trunc(group pool ÷ people in it); a sole bartender gets the whole bar
+// pool). A group with any difference — a swing's points, or unequal hours —
+// is paid exactly as method 2. HRS and PTS are both printed, so the sheet
+// shows which applies. Everything else, and $/HR as printed, is method 2's.
+export function calcTipsV3({ displaySlots, floorPool, barPool, barTipOutCharged }) {
+  const c = (dollars) => truncCents(dollars); // dollars -> whole cents, truncated
+  const $ = (cents) => cents / 100;
+  const floorPoolC = c(floorPool);
+  const barPoolC = c(barPool);
+
+  const barTipOutC = barTipOutCharged ? c($(barPoolC) * BAR_TIP_OUT_RATE) : 0;
+
+  const totalPoints = displaySlots.reduce((s, p) => s + (p.pts || 0), 0);
+  const perPointC = totalPoints > 0 ? c($(floorPoolC) / totalPoints) : 0;
+  const withRawC = displaySlots.map((p) => ({ ...p, rawC: c((p.pts || 0) * $(perPointC)) }));
+
+  const bussers = withRawC.filter((p) => p.role === "Busser/Runner" && p.name);
+  const expoSlot = withRawC.find((p) => p.role.startsWith("Expo") && p.name);
+  const barTipOutRecipients = bussers.length + (expoSlot ? 1 : 0);
+  const barShareC = barTipOutRecipients > 0 ? c($(barTipOutC) / barTipOutRecipients) : 0;
+
+  const rateC = (poolC, hours) => (hours > 0 ? c($(poolC) / hours) : 0);
+  const servers = withRawC.filter((p) => p.role === "Servers" && p.name);
+  const serverHoursSum = servers.reduce((s, p) => s + p.hours, 0);
+  const serverRateC = rateC(servers.reduce((s, p) => s + p.rawC, 0), serverHoursSum);
+
+  const bussersHoursSum = bussers.reduce((s, p) => s + p.hours, 0);
+  const bussersRateC = rateC(bussers.reduce((s, p) => s + p.rawC + barShareC, 0), bussersHoursSum);
+
+  const barStaff = withRawC.filter((p) => p.role === "Bar" && p.name);
+  const barHoursSum = barStaff.reduce((s, p) => s + p.hours, 0);
+  const barOwnC = barPoolC - barTipOutC; // the bar's own tips, after the tip-out
+  const barRateC = rateC(barStaff.reduce((s, p) => s + p.rawC, 0) + barOwnC, barHoursSum);
+
+  // Same PTS and same HRS for everyone in the group (one person counts).
+  const uniform = (ps) => ps.length > 0 && ps.every((p) => p.pts === ps[0].pts && p.hours === ps[0].hours);
+  const uniformGroups = { servers: uniform(servers), bussers: uniform(bussers), bar: uniform(barStaff) };
+  const barOwnEachC = barStaff.length > 0 ? c($(barOwnC) / barStaff.length) : 0;
+
+  const finalSlots = withRawC.map(({ rawC, ...p }) => {
+    const raw = $(rawC);
+    if (!p.name) return { ...p, raw, barShare: null, final: null };
+    if (p.role === "Servers") {
+      return { ...p, raw, barShare: 0, final: uniformGroups.servers ? raw : $(c(p.hours * $(serverRateC))) };
+    }
+    if (p.role === "Busser/Runner") {
+      return { ...p, raw, barShare: $(barShareC), final: uniformGroups.bussers ? $(rawC + barShareC) : $(c(p.hours * $(bussersRateC))) };
+    }
+    if (p.role === "Bar") {
+      return { ...p, raw, barShare: 0, final: uniformGroups.bar ? $(rawC + barOwnEachC) : $(c(p.hours * $(barRateC))) };
+    }
+    if (p.role.startsWith("Expo")) return { ...p, raw, barShare: $(barShareC), final: $(rawC + barShareC) };
+    return { ...p, raw, barShare: 0, final: raw }; // Host — flat, only earns if covers > 80
+  });
+  const totalDistributedC = finalSlots.reduce((s, p) => s + (p.final == null ? 0 : c(p.final)), 0);
+
+  // Floor check — as method 2. A uniform group truncates less than method 2
+  // would, so method 2's bound on what truncation can leave still holds.
+  const floorCheckTotalC = finalSlots.reduce((s, p) => {
+    if (!p.name) return s;
+    if (p.role === "Bar") return s + c(p.raw || 0);
+    return s + c(p.final || 0) - c(p.barShare || 0);
+  }, 0);
+  const leftBehindC = floorPoolC - floorCheckTotalC;
+  const filled = withRawC.filter((p) => p.name).length;
+  const leftBehindBoundC =
+    Math.ceil(totalPoints) + filled + Math.ceil(serverHoursSum + bussersHoursSum) + servers.length + bussers.length;
+  const floorCheckMatches = leftBehindC >= 0 && leftBehindC <= leftBehindBoundC;
+
+  return {
+    version: 3,
+    barTipOutTotal: $(barTipOutC), totalPoints, perPoint: $(perPointC),
+    withRaw: finalSlots.map(({ barShare, final, ...p }) => p),
+    barTipOutRecipients, barShareEach: $(barShareC),
+    serverRate: $(serverRateC), bussersRate: $(bussersRateC), barRate: $(barRateC),
+    uniformGroups,
     finalSlots, totalDistributed: $(totalDistributedC),
     floorCheckTotal: $(floorCheckTotalC), floorCheckMatches,
     leftBehind: $(leftBehindC), leftBehindBound: $(leftBehindBoundC),
