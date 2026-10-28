@@ -102,7 +102,7 @@ The check only reads that file and git. It can't touch the database or the app. 
 - Method 2: **27 Oct 2026 only, unless the 28 Oct sheet was created before method 3 went live.** 27 Oct was the first method-2 sheet, and method 3 was built the next day, so 27 Oct may be the only method-2 sheet that ever exists. To know for sure, don't assume. Ask the database: `select date, calc_version from tip_sheets where calc_version is not null order by date;`
 - Method 3: every date created after method 3 went live.
 
-The offline check (`tools/tipcheck/`) now checks method-2 sheets as well, against `calcTipsV2` as it shipped at `c368ebd` (read from git). Method-3 sheets are listed but not checked until a method 4 freezes method 3. `npm test` pins method 2 to a verbatim copy, the same way it pins method 1.
+The offline check (`tools/tipcheck/`) now checks method-2 sheets as well, against `calcTipsV2` as it shipped at `c368ebd` (read from git). Method-3 sheets are listed but not checked until a method 4 freezes method 3. Run of 2026-10-28 (fresh export, 32 sheets, Jul 1 – Oct 27): 31 method 1 and the 27 Oct sheet as method 2 (stored `calc_version` 2, sent + locked). Zero differences, and the control failed all 32. The 27 Oct figures reproduce the paid sheet: servers $338.95, Busser/Runners $211.70, Isabella $438.41. Method 3 would have given $338.99, $211.74 and $438.44. `npm test` pins method 2 to a verbatim copy, the same way it pins method 1.
 
 ---
 
