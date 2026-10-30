@@ -5234,6 +5234,7 @@ export default function SchedulingHub({ session, onSignOut }) {
              a blanket "hub descendant" rule, which would use !important to
              stomp the inline colors on the branded schedule sheet and QR sheet. */
           .hub { background: #fff !important; color: #2B2A25 !important; padding: 0 !important; }
+          html, body { background: #fff !important; }
           .cal-card, .nr-card, .nr-item, .nr-panel, .decision-card,
           .notes-modal, .delete-modal { background: #fff !important; color: #2B2A25 !important; border-color: rgba(43,42,37,0.2) !important; }
           .emp-name, .tip-stat, .check-value, .week-range, .print-week-range,
@@ -6078,6 +6079,11 @@ export default function SchedulingHub({ session, onSignOut }) {
            Calendar week view + Rail move to a near-black base where chips are a
            single solid tone and role identity lives in the text color only. */
         .hub { --bg: #0a0a0a; background: #0a0a0a; }
+        /* The page itself, behind .hub: anything wider than the screen (the tab
+           bar on a phone, the schedule grid) or any zoom-out shows this, not
+           white. Only while the app is mounted (this <style> is the app's), so
+           the sign-in screen keeps its own look. Print resets it to white. */
+        html, body { background: #0a0a0a; }
 
         /* ---- calendar week view ---- */
         .cal-week-view { background: #0a0a0a; border-color: #141414; }
