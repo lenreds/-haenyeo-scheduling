@@ -34,6 +34,8 @@ import {
   deleteScheduleNote,
   notesTableAvailable,
   fetchScheduleWeeks,
+  fetchWeekLocks,
+  isLockRefusal,
   setWeekFinalized,
   setWeekPublished,
   publishedBySectionFromRows,
@@ -1623,6 +1625,31 @@ export default function SchedulingHub({ session, onSignOut }) {
       loadedWeeksRef.current.delete(weekStartIso); // allow a retry
     }
   }
+  // Re-read a week's stored cells, replacing what's on screen — after the
+  // database refused a write (puts back what's really stored) and when the app
+  // comes back to the foreground (a phone tab can be days old).
+  async function reloadWeek(weekStartIso) {
+    if (!weekStartIso) return;
+    try {
+      const [wp, wph] = await Promise.all([
+        fetchWeeklySchedule(weekStartIso, idToName),
+        fetchWeeklyPlaceholders(weekStartIso),
+      ]);
+      loadedWeeksRef.current.add(weekStartIso);
+      setWeeklyPatterns((prev) => {
+        const next = { ...prev };
+        if (wp) next[weekStartIso] = wp; else delete next[weekStartIso];
+        return next;
+      });
+      setWeeklyPlaceholders((prev) => {
+        const next = { ...prev };
+        if (wph) next[weekStartIso] = wph; else delete next[weekStartIso];
+        return next;
+      });
+    } catch (e) {
+      console.error(`Weekly schedule reload failed for ${weekStartIso}:`, e);
+    }
+  }
 
   // ---- Per-week notes (migration 0010) ------------------------------------
   // notesWeek is the week the modal is showing — Set Schedule opens it on the
@@ -2763,11 +2790,28 @@ export default function SchedulingHub({ session, onSignOut }) {
     schedSaveStart();
     let ok = false;
     try {
+      // Locked sections are left out, as read fresh from the database: this
+      // tab's copy of a locked section can be stale, and pushing it would try
+      // to undo whatever changed before the lock. (The database refuses that
+      // anyway — 0027 — but then the unlocked sections wouldn't save either.)
+      // An untouched week is still written whole: that's a snapshot of what it
+      // shows, which the database accepts for a locked section too.
+      const locks = await fetchWeekLocks(ws);
+      setLockedSectionWeeks((prev) => {
+        const s = new Set(prev);
+        Object.entries(locks).forEach(([k, on]) => { if (on) s.add(lockKeyFor(ws, k)); else s.delete(lockKeyFor(ws, k)); });
+        return s;
+      });
+      const groupsToWrite = weeklyPlaceholders[ws]
+        ? Object.fromEntries(Object.entries(activePlaceholders).filter(([gk]) => !locks[groupLockKey(gk)]))
+        : activePlaceholders;
       // Both, not short-circuited — a week can have FOH rows and no placeholder
       // rows (or the other way round) and we want each attempted.
-      const wroteFoh = await seedWeeklySchedule(ws, activePatterns, nameToId);
-      const wroteGroups = await seedWeeklyPlaceholders(ws, activePlaceholders, groupRosters);
+      const wroteFoh = locks.foh ? true : await seedWeeklySchedule(ws, activePatterns, nameToId);
+      const wroteGroups = Object.keys(groupsToWrite).length ? await seedWeeklyPlaceholders(ws, groupsToWrite, groupRosters) : true;
       ok = wroteFoh && wroteGroups;
+      const skipped = Object.entries(locks).filter(([, on]) => on).map(([k]) => SECTION_LABEL[k]);
+      if (skipped.length) setSchedLockNotice(`Saved, except ${skipped.join(" and ")} — locked for the week of ${shortDate(ws)}, so left exactly as stored.`);
       if (ok) {
         // The week now has its own complete record, so later template edits
         // can't leak into it — the invariant writeCellShift's first-edit seed
@@ -2778,6 +2822,7 @@ export default function SchedulingHub({ session, onSignOut }) {
     } catch (e) {
       console.error("Save schedule failed:", e);
       ok = false;
+      if (isLockRefusal(e)) lockRefused(ws, scheduleView);
     }
     schedSaveEnd(ok);
   }
@@ -3345,11 +3390,9 @@ export default function SchedulingHub({ session, onSignOut }) {
   // Finalize/publish state per week. Without this the Finalize button forgot
   // itself on every reload — it wrote to schedule_weeks but nothing read back.
   // Lock rows live in the same table keyed by section, so they load here too.
-  useEffect(() => {
-    let cancelled = false;
-    fetchScheduleWeeks()
+  function refreshScheduleWeeks() {
+    return fetchScheduleWeeks()
       .then((rows) => {
-        if (cancelled) return;
         setFinalizedWeeks(new Set(rows.filter((r) => r.finalized).map((r) => r.week_start)));
         // Per-section publish marks (and when each went out, for the badge).
         setPublishedBySection(publishedBySectionFromRows(rows));
@@ -3362,7 +3405,32 @@ export default function SchedulingHub({ session, onSignOut }) {
         setLockedSectionWeeks(locks);
       })
       .catch((e) => console.error("Schedule weeks load failed:", e));
-    return () => { cancelled = true; };
+  }
+  useEffect(() => { refreshScheduleWeeks(); }, []);
+  // Coming back to the app (a phone tab left open for days, another device
+  // having locked a week meanwhile): re-read locks / finalize / publish state,
+  // and the week on screen — unless edits are still on their way to the
+  // database, which a reload would overwrite on screen.
+  const scheduleRefreshRef = useRef(() => {});
+  scheduleRefreshRef.current = () => {
+    refreshScheduleWeeks();
+    if (schedInflightRef.current === 0 && schedSaveState !== "dirty" && Object.keys(idToName).length) reloadWeek(activeWeekStart);
+  };
+  useEffect(() => {
+    let last = 0;
+    const onBack = () => {
+      if (document.visibilityState !== "visible") return;
+      const now = Date.now();
+      if (now - last < 2000) return; // focus + visibilitychange arrive together
+      last = now;
+      scheduleRefreshRef.current();
+    };
+    document.addEventListener("visibilitychange", onBack);
+    window.addEventListener("focus", onBack);
+    return () => {
+      document.removeEventListener("visibilitychange", onBack);
+      window.removeEventListener("focus", onBack);
+    };
   }, []);
 
   // Pull each week's own record as it comes into view — the Set Schedule week,
@@ -3720,6 +3788,26 @@ export default function SchedulingHub({ session, onSignOut }) {
     const sectionKey = scheduleView;
     const key = lockKeyFor(weekStart, sectionKey);
     const next = !lockedSectionWeeks.has(key);
+    // Locking a week nobody has edited yet: snapshot what it shows into its own
+    // rows first. An untouched week renders from the template, so without this
+    // a later template edit would quietly change a locked (published) week.
+    if (next) {
+      try {
+        if (sectionKey === "foh" && !weeklyPatterns[weekStart]) {
+          if (await seedWeeklySchedule(weekStart, activePatterns, nameToId)) {
+            setWeeklyPatterns((prev) => (prev[weekStart] ? prev : { ...prev, [weekStart]: activePatterns }));
+          }
+        } else if (sectionKey !== "foh" && !weeklyPlaceholders[weekStart]) {
+          if (await seedWeeklyPlaceholders(weekStart, activePlaceholders, groupRosters)) {
+            setWeeklyPlaceholders((prev) => (prev[weekStart] ? prev : { ...prev, [weekStart]: activePlaceholders }));
+          }
+        }
+      } catch (e) {
+        console.error("Snapshot before lock failed:", e);
+        setSchedLockNotice(`Not locked: couldn't save a copy of the week of ${shortDate(weekStart)} first (${e.message || e}). Try again.`);
+        return;
+      }
+    }
     setLockedSectionWeeks((prev) => {
       const s = new Set(prev);
       if (next) s.add(key); else s.delete(key);
@@ -4064,8 +4152,45 @@ export default function SchedulingHub({ session, onSignOut }) {
   // BOH / Kitchen dropdown cells write straight through; Management keeps the
   // click interaction but toggles Off <-> FM only.
   // Same per-week rule as writeCellShift: edits land on this week's own record.
-  function writePlaceholderShift(groupKey, slotIdx, weekday, newType) {
+  // ---- Lock check before every schedule write ---------------------------------
+  // This tab's idea of which weeks are locked can be days old (a phone left
+  // open), so every write first asks the database. Locked -> nothing is
+  // written, the lock now shows here too, and the manager is told why. Can't
+  // tell -> nothing is written either. The database refuses a locked write
+  // regardless (migration 0027); lockRefused handles that case.
+  const [schedLockNotice, setSchedLockNotice] = useState("");
+  async function sectionOpenForWrite(ws, sectionKey) {
+    let locks;
+    try {
+      locks = await fetchWeekLocks(ws);
+    } catch (e) {
+      console.error("Lock check failed:", e);
+      setSchedLockNotice(`Not saved: couldn't check whether ${SECTION_LABEL[sectionKey]} is locked for the week of ${shortDate(ws)}. Check the connection and try again.`);
+      return false;
+    }
+    setLockedSectionWeeks((prev) => {
+      const s = new Set(prev);
+      Object.entries(locks).forEach(([k, on]) => { if (on) s.add(lockKeyFor(ws, k)); else s.delete(lockKeyFor(ws, k)); });
+      return s;
+    });
+    if (locks[sectionKey]) {
+      setSchedLockNotice(`Not saved: ${SECTION_LABEL[sectionKey]} is locked for the week of ${shortDate(ws)} — it was locked after this page loaded, probably on another device. Nothing was changed.`);
+      return false;
+    }
+    return true;
+  }
+  // The database refused a write because the section is locked: show the lock,
+  // and put back what's really stored.
+  function lockRefused(ws, sectionKey) {
+    setSchedLockNotice(`Not saved: ${SECTION_LABEL[sectionKey]} is locked for the week of ${shortDate(ws)}. The schedule below has been reloaded to what's stored.`);
+    refreshScheduleWeeks();
+    reloadWeek(ws);
+  }
+
+  // Resolves true once the lock check passed and the write was started.
+  async function writePlaceholderShift(groupKey, slotIdx, weekday, newType) {
     const ws = activeWeekStart;
+    if (!(await sectionOpenForWrite(ws, groupLockKey(groupKey)))) return false;
     const base = weeklyPlaceholders[ws] || placeholderPatterns;
     const alreadySeeded = !!weeklyPlaceholders[ws];
     const rows = (base[groupKey] || []).map((row) => [...row]);
@@ -4084,9 +4209,11 @@ export default function SchedulingHub({ session, onSignOut }) {
       } catch (e) {
         console.error("Save weekly placeholder failed:", e);
         ok = false;
+        if (isLockRefusal(e)) lockRefused(ws, groupLockKey(groupKey));
       }
       schedSaveEnd(ok);
     })();
+    return true;
   }
   function setPlaceholderShift(groupKey, slotIdx, weekday, newType) {
     if (schedulePastWeek || isSectionLocked(activeWeekStart, groupLockKey(groupKey))) return;
@@ -4095,7 +4222,7 @@ export default function SchedulingHub({ session, onSignOut }) {
     if (blk) {
       setTimeOffBlock({
         name: personName, dayLabel: blk.dayLabel,
-        onOverride: () => { writePlaceholderShift(groupKey, slotIdx, weekday, newType); overwriteApprovedOverride(personName, blk.iso, newType, blk.override.railId); },
+        onOverride: async () => { if (await writePlaceholderShift(groupKey, slotIdx, weekday, newType)) overwriteApprovedOverride(personName, blk.iso, newType, blk.override.railId); },
       });
       return;
     }
@@ -4653,8 +4780,10 @@ export default function SchedulingHub({ session, onSignOut }) {
   // THIS WEEK's own record. The first edit of a week that has never been touched
   // snapshots the whole template week in first, so the week becomes a complete
   // independent record and later template changes can't leak into it.
-  function writeCellShift(name, weekday, code) {
+  // Resolves true once the lock check passed and the write was started.
+  async function writeCellShift(name, weekday, code) {
     const ws = activeWeekStart;
+    if (!(await sectionOpenForWrite(ws, "foh"))) return false;
     const base = weeklyPatterns[ws] || patterns; // exactly what's on screen
     const alreadySeeded = !!weeklyPatterns[ws];
     const nextWeek = {
@@ -4682,9 +4811,11 @@ export default function SchedulingHub({ session, onSignOut }) {
       } catch (e) {
         console.error("Save weekly shift failed:", e);
         ok = false;
+        if (isLockRefusal(e)) lockRefused(ws, "foh");
       }
       schedSaveEnd(ok);
     })();
+    return true;
   }
   function setCellShift(name, weekday, code) {
     if (schedulePastWeek || isSectionLocked(activeWeekStart, "foh")) return; // FOH grid, this week only
@@ -4693,7 +4824,7 @@ export default function SchedulingHub({ session, onSignOut }) {
     if (blk) {
       setTimeOffBlock({
         name, dayLabel: blk.dayLabel,
-        onOverride: () => { writeCellShift(name, weekday, code); overwriteApprovedOverride(name, blk.iso, code, blk.override.railId); },
+        onOverride: async () => { if (await writeCellShift(name, weekday, code)) overwriteApprovedOverride(name, blk.iso, code, blk.override.railId); },
       });
       return;
     }
@@ -7371,6 +7502,12 @@ export default function SchedulingHub({ session, onSignOut }) {
             {scheduleLocked && (
               <div className="template-note" style={{ marginBottom: 14, marginTop: -8 }}>
                 🔒 {SECTION_LABEL[scheduleView]} is locked for the week of {shortDate(activeWeekStart)} — its cells won't respond to clicks. Other sections, and other weeks, are unaffected. Hit "Locked ✓" above to unlock.
+              </div>
+            )}
+            {schedLockNotice && (
+              <div className="send-error sched-lock-notice" role="alert" style={{ marginBottom: 14 }}>
+                {schedLockNotice}
+                <button className="nr-btn" style={{ marginLeft: 10 }} onClick={() => setSchedLockNotice("")}>OK</button>
               </div>
             )}
 

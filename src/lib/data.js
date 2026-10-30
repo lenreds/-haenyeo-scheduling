@@ -968,6 +968,34 @@ export function publishedBySectionFromRows(rows) {
   return out;
 }
 
+// The lock state of all three sections of one week, read fresh from the
+// database: { foh, bohkitchen, management } booleans. Asked immediately before
+// every schedule write, because what the app loaded when it opened can be days
+// old (a phone tab). Throws if it can't be read — the caller must then not
+// write, never assume "unlocked". The database refuses a locked write anyway
+// (migration 0027); this is so the app can say so instead of failing a save.
+export async function fetchWeekLocks(weekStartIso) {
+  const { data, error } = await supabase
+    .from("schedule_weeks")
+    .select("section, locked")
+    .eq("week_start", weekStartIso);
+  if (error) {
+    if (isMissingTable(error)) return { foh: false, bohkitchen: false, management: false };
+    throw error;
+  }
+  const out = { foh: false, bohkitchen: false, management: false };
+  (data || []).forEach((r) => {
+    const key = { FOH: "foh", BOHKITCHEN: "bohkitchen", MANAGEMENT: "management" }[r.section];
+    if (key) out[key] = !!r.locked;
+  });
+  return out;
+}
+
+// The database's refusal of a write to a locked section-week (migration 0027).
+export function isLockRefusal(error) {
+  return /is locked for the week of/.test(error?.message || String(error || ""));
+}
+
 // One section of one week. sectionKey is the UI sub-tab key ('foh' etc).
 export async function setWeekSectionLocked(weekStartIso, sectionKey, locked) {
   await upsertWeekRow(weekStartIso, weekSectionDbValue(sectionKey), {
