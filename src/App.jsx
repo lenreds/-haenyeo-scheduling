@@ -36,6 +36,12 @@ import {
   fetchScheduleWeeks,
   fetchWeekLocks,
   isLockRefusal,
+  fetchScheduleTemplates,
+  saveScheduleTemplate,
+  deleteScheduleTemplate,
+  recordTemplateApply,
+  fetchLatestApply,
+  markApplyUndone,
   setWeekFinalized,
   setWeekPublished,
   publishedBySectionFromRows,
@@ -91,6 +97,7 @@ import { hoursBetween } from "./lib/tipTimes.js";
 import { calcTips, sheetCalcVersion } from "./lib/tipMath.js";
 import { ackEntry, tipSheetProblems, zeroesAllAcked } from "./lib/tipGuard.js";
 import { pickerMayOpen, scheduledStartMins } from "./lib/tipPickers.js";
+import { planApply, undoConflicts, SECTION_GROUPS } from "./lib/scheduleTemplates.js";
 import { CashPickerBody, PickerPanel, TimePickerBody } from "./components/TipPickers.jsx";
 import UpdateBanner from "./components/UpdateBanner.jsx";
 import QRCode from "qrcode";
@@ -3827,6 +3834,293 @@ export default function SchedulingHub({ session, onSignOut }) {
     }
   }
 
+  // ---- Saved schedules (migration 0028) -------------------------------------
+  // Named copies of one section's week (FOH / BOH & Kitchen / Management),
+  // stored by person, applied to the week on screen. The rules live in
+  // lib/scheduleTemplates.js; here is how they meet this week's data. Every
+  // apply is previewed and nothing is written until the manager confirms;
+  // every apply is recorded so it can be undone.
+  // savedModal: { section, templates, loading, error, msg, saveName, busy,
+  //   preview: { template, plan, writesKey }, lastApply, undoProblem }
+  const [savedModal, setSavedModal] = useState(null);
+  const SAVED_SECTION_LABEL = { foh: "Front of House", bohkitchen: "BOH & Kitchen", management: "Management" };
+  const GROUP_NAME = { boh: "BOH", kitchen: "Kitchen", management: "Management" };
+  const FOH_OPTION_ROLES = ["Servers", "Busser/Runner", "Host", "Expo", "Bar", "Training"];
+
+  async function openSavedSchedules() {
+    const section = scheduleView;
+    const ws = activeWeekStart;
+    setSavedModal({ section, ws, templates: [], loading: true, error: null, msg: "", saveName: "", busy: false, preview: null, lastApply: null, undoProblem: null });
+    try {
+      const [templates, lastApply] = await Promise.all([fetchScheduleTemplates(), fetchLatestApply(ws, section)]);
+      setSavedModal((m) => (m && m.ws === ws && m.section === section
+        ? { ...m, loading: false, templates: templates.filter((t) => t.section === section), lastApply } : m));
+    } catch (e) {
+      setSavedModal((m) => (m ? { ...m, loading: false, error: e.message || String(e) } : m));
+    }
+  }
+
+  // The week on screen, this section, as saved-schedule cells (by staff id).
+  // -> { cells, missing: [names with no staff record] }
+  function sectionCellsForSave(section) {
+    const cells = [];
+    const missing = [];
+    if (section === "foh") {
+      fohRoster.forEach((p) => {
+        const row = activePatterns[p.name] || ALL_OFF_WEEK;
+        row.forEach((code, weekday) => cells.push({ staff_id: p.id, name: p.name, group_key: null, weekday, code: code || "OFF" }));
+      });
+    } else {
+      SECTION_GROUPS[section].forEach((gk) => {
+        (groupRosters[gk] || []).forEach((name, idx) => {
+          if (!name) return;
+          const staffId = nameToId[name];
+          if (!staffId) { missing.push(name); return; }
+          const row = activePlaceholders[gk]?.[idx] || ALL_OFF_WEEK;
+          row.forEach((code, weekday) => cells.push({ staff_id: staffId, name, group_key: gk, weekday, code: code || "OFF" }));
+        });
+      });
+    }
+    return { cells, missing };
+  }
+
+  async function saveCurrentAsTemplate(overwrite = null) {
+    const m = savedModal;
+    if (!m || m.busy) return;
+    const name = (overwrite ? overwrite.name : m.saveName).trim();
+    if (!name) { setSavedModal({ ...m, error: "Give it a name." }); return; }
+    const clash = !overwrite && m.templates.find((t) => t.name.trim().toLowerCase() === name.toLowerCase());
+    const target = overwrite || clash || null;
+    if (target && !window.confirm(`Replace the saved schedule "${target.name}" with the week of ${shortDate(m.ws)}? The old one is gone after this.`)) return;
+    const { cells, missing } = sectionCellsForSave(m.section);
+    setSavedModal({ ...m, busy: true, error: null, msg: "" });
+    try {
+      const row = await saveScheduleTemplate({ id: target?.id, name, section: m.section, cells });
+      const people = new Set(cells.map((c) => `${c.staff_id}|${c.group_key}`)).size;
+      setSavedModal((p) => p && {
+        ...p, busy: false, saveName: "",
+        templates: [...p.templates.filter((t) => t.id !== row.id), row].sort((a, b) => a.name.localeCompare(b.name)),
+        msg: `${target ? "Replaced" : "Saved"} "${name}" — ${people} ${people === 1 ? "person" : "people"}.`
+          + (missing.length ? ` Not included (no staff record to match them by): ${missing.join(", ")}.` : ""),
+      });
+    } catch (e) {
+      setSavedModal((p) => p && { ...p, busy: false, error: `Couldn't save: ${e.message || e}` });
+    }
+  }
+
+  async function deleteTemplate(t) {
+    const m = savedModal;
+    if (!m || m.busy) return;
+    if (!window.confirm(`Delete the saved schedule "${t.name}"? Weeks it was applied to keep their shifts.`)) return;
+    setSavedModal({ ...m, busy: true, error: null, msg: "" });
+    try {
+      await deleteScheduleTemplate(t.id);
+      setSavedModal((p) => p && { ...p, busy: false, templates: p.templates.filter((x) => x.id !== t.id), msg: `Deleted "${t.name}".` });
+    } catch (e) {
+      setSavedModal((p) => p && { ...p, busy: false, error: `Couldn't delete: ${e.message || e}` });
+    }
+  }
+
+  // Who's on this section's grid(s) this week, by staff id.
+  function sectionRoster(section) {
+    if (section === "foh") return fohRoster.map((p) => ({ staffId: p.id, name: p.name, groupKey: null, slotIndex: null }));
+    return SECTION_GROUPS[section].flatMap((gk) => (groupRosters[gk] || [])
+      .map((name, idx) => ({ staffId: nameToId[name], name, groupKey: gk, slotIndex: idx }))
+      .filter((e) => e.staffId));
+  }
+  function templateOptionStatus(entry, code) {
+    if (entry.groupKey === "management" && code === "FM") return "ok";
+    const roles = entry.groupKey == null ? FOH_OPTION_ROLES
+      : entry.groupKey === "management" ? ["Management", "Expo"] : [GROUP_ROLE[entry.groupKey]];
+    const matches = roles.flatMap((r) => (roleOptions[r] || []).filter((o) => o.code === code));
+    if (!matches.length) return "unknown";
+    return matches.some((o) => !o.retired) ? "ok" : "retired";
+  }
+  // The plan for applying `template` to the week on screen, as it stands now.
+  function planTemplate(template) {
+    const section = template.section;
+    const cells = template.cells || [];
+    const CROSS = { kitchen: [["boh", "BOH"], ["management", "Management"]], boh: [["kitchen", "Kitchen"]], management: [["kitchen", "Kitchen"]] };
+    return planApply({
+      cells,
+      roster: sectionRoster(section),
+      groupLabel: (gk) => (gk ? GROUP_NAME[gk] : "Front of House"),
+      current: (e, wd) => {
+        if (e.groupKey == null) {
+          const own = weeklyPatterns[activeWeekStart];
+          if (own && own[e.name]) return { code: own[e.name][wd] || "OFF", stored: true };
+          if (patterns[e.name]) return { code: patterns[e.name][wd] || "OFF", stored: true };
+          return { code: "OFF", stored: false };
+        }
+        const row = activePlaceholders[e.groupKey]?.[e.slotIndex];
+        return row ? { code: row[wd] || "OFF", stored: true } : { code: "OFF", stored: false };
+      },
+      timeOff: (e, wd) => !!approvedOffFor(e.name, wd),
+      optionStatus: templateOptionStatus,
+      // Another section that day — for a grid in this same section, as it will
+      // be after the apply (the saved schedule's value), not as it is now.
+      crossBlock: (e, wd) => {
+        for (const [grp, label] of CROSS[e.groupKey] || []) {
+          const idx = (groupRosters[grp] || []).indexOf(e.name);
+          if (idx < 0) continue;
+          let code = activePlaceholders[grp]?.[idx]?.[wd];
+          if (SECTION_GROUPS[section].includes(grp)) {
+            const t = cells.find((c) => c.staff_id === e.staffId && c.group_key === grp && c.weekday === wd);
+            if (t) code = t.code;
+          }
+          if (!isOffCell(code)) return label;
+        }
+        return null;
+      },
+    });
+  }
+  const planKey = (plan) => JSON.stringify([...plan.fill, ...plan.replace].map((w) => [w.entry.staffId, w.entry.groupKey, w.weekday, w.before, w.after]));
+  // Why this week can't take an apply / undo right now, or null.
+  function savedApplyBlocked(section) {
+    if (schedulePastWeek) return "This week is in the past — it can't be changed.";
+    if (finalizedWeeks.has(activeWeekStart)) return `The week of ${shortDate(activeWeekStart)} is finalized. Un-finalize it first.`;
+    if (isSectionLocked(activeWeekStart, section)) return `${SECTION_LABEL[section]} is locked for the week of ${shortDate(activeWeekStart)}. Unlock it first.`;
+    return null;
+  }
+  function previewTemplate(t) {
+    const m = savedModal;
+    if (!m || m.busy) return;
+    const blocked = savedApplyBlocked(m.section);
+    if (blocked) { setSavedModal({ ...m, error: blocked, msg: "" }); return; }
+    const plan = planTemplate(t);
+    setSavedModal({ ...m, error: null, msg: "", preview: { template: t, plan, key: planKey(plan) } });
+  }
+
+  // Write cell changes for one section of the week on screen. changes:
+  // [{ groupKey, slotIndex, name, weekday, after }]. Bulk upsert of the whole
+  // section (same values elsewhere), so the week ends up with its own rows.
+  async function writeSectionChanges(section, ws, changes) {
+    if (section === "foh") {
+      const next = Object.fromEntries(Object.entries(activePatterns).map(([n, row]) => [n, [...row]]));
+      changes.forEach((c) => { next[c.name] = [...(next[c.name] || ALL_OFF_WEEK)]; next[c.name][c.weekday] = c.after; });
+      if (!(await seedWeeklySchedule(ws, next, nameToId))) throw new Error("the schedule tables aren't available");
+      setWeeklyPatterns((prev) => ({ ...prev, [ws]: next }));
+      return;
+    }
+    const next = Object.fromEntries(Object.entries(activePlaceholders).map(([gk, rows]) => [gk, rows.map((r) => [...r])]));
+    changes.forEach((c) => {
+      const rows = next[c.groupKey] || (next[c.groupKey] = []);
+      while (rows.length <= c.slotIndex) rows.push([...ALL_OFF_WEEK]);
+      rows[c.slotIndex][c.weekday] = c.after;
+    });
+    // A week with its own rows: write only this section. An untouched week:
+    // write it whole (a snapshot), or the other sections would lose their rows.
+    const toWrite = weeklyPlaceholders[ws]
+      ? Object.fromEntries(Object.entries(next).filter(([gk]) => SECTION_GROUPS[section].includes(gk)))
+      : next;
+    if (!(await seedWeeklyPlaceholders(ws, toWrite, groupRosters))) throw new Error("the schedule tables aren't available");
+    setWeeklyPlaceholders((prev) => ({ ...prev, [ws]: next }));
+  }
+
+  async function confirmApply() {
+    const m = savedModal;
+    if (!m?.preview || m.busy) return;
+    const { template } = m.preview;
+    const ws = activeWeekStart;
+    const blocked = savedApplyBlocked(m.section);
+    if (blocked) { setSavedModal({ ...m, error: blocked }); return; }
+    setSavedModal({ ...m, busy: true, error: null });
+    if (!(await sectionOpenForWrite(ws, m.section))) {
+      setSavedModal((p) => p && { ...p, busy: false, preview: null, error: `${SECTION_LABEL[m.section]} is locked for the week of ${shortDate(ws)} — nothing was applied.` });
+      return;
+    }
+    // The week may have changed since the preview (another device, a refresh):
+    // if the plan moved, show the new one instead of applying the old.
+    const plan = planTemplate(template);
+    if (planKey(plan) !== m.preview.key) {
+      setSavedModal((p) => p && { ...p, busy: false, preview: { template, plan, key: planKey(plan) }, error: "The week changed since this preview was made. Here's the up-to-date version — check it, then apply." });
+      return;
+    }
+    const writes = [...plan.fill, ...plan.replace];
+    const changes = writes.map((w) => ({
+      staff_id: w.entry.staffId, name: w.name, group_key: w.entry.groupKey, slot_index: w.entry.slotIndex,
+      weekday: w.weekday, before: w.before, after: w.after,
+    }));
+    schedSaveStart();
+    try {
+      await writeSectionChanges(m.section, ws, writes.map((w) => ({ groupKey: w.entry.groupKey, slotIndex: w.entry.slotIndex, name: w.name, weekday: w.weekday, after: w.after })));
+    } catch (e) {
+      console.error("Apply saved schedule failed:", e);
+      schedSaveEnd(false);
+      if (isLockRefusal(e)) lockRefused(ws, m.section);
+      setSavedModal((p) => p && { ...p, busy: false, error: `Nothing applied: ${e.message || e}` });
+      return;
+    }
+    schedSaveEnd(true);
+    let lastApply = null;
+    let note = "";
+    try {
+      lastApply = await recordTemplateApply({ templateId: template.id, templateName: template.name, section: m.section, weekStart: ws, changes });
+    } catch (e) {
+      console.error("Recording the apply failed:", e);
+      note = ` The record for Undo couldn't be saved (${e.message || e}), so this apply can't be undone from here.`;
+    }
+    addLog(`Applied saved schedule "${template.name}" to ${SECTION_LABEL[m.section]} — week of ${shortDate(ws)} (${changes.length} change${changes.length === 1 ? "" : "s"}, ${plan.skip.length} skipped)`, "good");
+    setSavedModal((p) => p && {
+      ...p, busy: false, preview: null, lastApply, undoProblem: null,
+      msg: `Applied "${template.name}": ${plan.fill.length} filled, ${plan.replace.length} replaced, ${plan.skip.length} skipped.${note}`,
+    });
+  }
+
+  async function undoLastApply() {
+    const m = savedModal;
+    const a = m?.lastApply;
+    if (!a || m.busy) return;
+    const ws = activeWeekStart;
+    const blocked = savedApplyBlocked(m.section);
+    if (blocked) { setSavedModal({ ...m, error: blocked }); return; }
+    setSavedModal({ ...m, busy: true, error: null, undoProblem: null });
+    if (!(await sectionOpenForWrite(ws, m.section))) {
+      setSavedModal((p) => p && { ...p, busy: false, error: `${SECTION_LABEL[m.section]} is locked for the week of ${shortDate(ws)} — nothing was undone.` });
+      return;
+    }
+    try {
+      // What the database holds now, not this tab's copy.
+      const [wp, wph] = await Promise.all([fetchWeeklySchedule(ws, idToName), fetchWeeklyPlaceholders(ws)]);
+      const now = (c) => (c.group_key == null
+        ? wp?.[idToName[c.staff_id] || c.name]?.[c.weekday] ?? null
+        : wph?.[c.group_key]?.[c.slot_index]?.[c.weekday] ?? null);
+      const conflicts = undoConflicts(a.changes, now);
+      if (conflicts.length) {
+        setSavedModal((p) => p && { ...p, busy: false, undoProblem: conflicts.map((c) => ({ ...c, now: now(c) })) });
+        return;
+      }
+      if (wp) setWeeklyPatterns((prev) => ({ ...prev, [ws]: wp }));
+      if (wph) setWeeklyPlaceholders((prev) => ({ ...prev, [ws]: wph }));
+      schedSaveStart();
+      try {
+        if (m.section === "foh") {
+          const next = Object.fromEntries(Object.entries(wp || {}).map(([n, row]) => [n, [...row]]));
+          a.changes.forEach((c) => { const n = idToName[c.staff_id] || c.name; next[n] = [...(next[n] || ALL_OFF_WEEK)]; next[n][c.weekday] = c.before; });
+          if (!(await seedWeeklySchedule(ws, next, nameToId))) throw new Error("the schedule tables aren't available");
+          setWeeklyPatterns((prev) => ({ ...prev, [ws]: next }));
+        } else {
+          const next = Object.fromEntries(Object.entries(wph || {}).map(([gk, rows]) => [gk, rows.map((r) => [...r])]));
+          a.changes.forEach((c) => { next[c.group_key][c.slot_index][c.weekday] = c.before; });
+          const toWrite = Object.fromEntries(Object.entries(next).filter(([gk]) => SECTION_GROUPS[m.section].includes(gk)));
+          if (!(await seedWeeklyPlaceholders(ws, toWrite, groupRosters))) throw new Error("the schedule tables aren't available");
+          setWeeklyPlaceholders((prev) => ({ ...prev, [ws]: next }));
+        }
+        schedSaveEnd(true);
+      } catch (e) {
+        schedSaveEnd(false);
+        if (isLockRefusal(e)) lockRefused(ws, m.section);
+        throw e;
+      }
+      await markApplyUndone(a.id);
+      addLog(`Undid saved schedule "${a.template_name}" on ${SECTION_LABEL[m.section]} — week of ${shortDate(ws)} (${a.changes.length} change${a.changes.length === 1 ? "" : "s"} put back)`, "warn");
+      setSavedModal((p) => p && { ...p, busy: false, lastApply: null, msg: `Undone: "${a.template_name}" — ${a.changes.length} change${a.changes.length === 1 ? "" : "s"} put back.` });
+    } catch (e) {
+      console.error("Undo failed:", e);
+      setSavedModal((p) => p && { ...p, busy: false, error: `Couldn't undo: ${e.message || e}` });
+    }
+  }
+
   // ---- Publish dialog (PUBLISH brief A1–A5) ---------------------------------
   // Publish is the one button that reaches every employee at once, so it opens
   // a confirmation instead of sending: the weeks, an editable subject, a
@@ -6362,7 +6656,17 @@ export default function SchedulingHub({ session, onSignOut }) {
         .shift-retired-tag { display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 4px; background: rgba(160,160,160,0.18); color: var(--txt2); font-family: 'Space Mono', monospace; font-size: 8.5px; font-weight: 700; letter-spacing: 0.8px; line-height: 15px; }
         .shift-retired-note .shift-retired-tag { margin-left: 0; margin-right: 4px; }
         .shift-in-use { line-height: 1.45; }
-        .shift-editor .nr-btn-primary { border-color: var(--accent); color: var(--accent); }
+        .shift-editor .nr-btn-primary, .saved-sched-modal .nr-btn-primary { border-color: var(--accent); color: var(--accent); }
+        .saved-sched-modal { width: min(640px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow-y: auto; }
+        .saved-list { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 14px; }
+        .saved-item { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; padding: 8px 10px; border: 1px solid var(--line2); border-radius: 8px; }
+        .saved-item-actions { display: flex; gap: 6px; }
+        .saved-sched-modal .muted { color: var(--txt2); font-weight: 400; }
+        .saved-plan { display: flex; flex-direction: column; gap: 10px; margin: 6px 0 14px; }
+        .saved-plan-row summary { cursor: pointer; }
+        .saved-plan-list { margin: 6px 0 0 18px; padding: 0; line-height: 1.55; font-size: 13px; }
+        .saved-plan-skip { border-left: 3px solid var(--accent); padding-left: 8px; }
+        .saved-undo { margin-top: 14px; font-size: 13px; }
         .shift-off-check { display: inline-flex; align-items: center; gap: 3px; margin-left: 6px; padding-left: 7px; border-left: 1px solid var(--line2); font-size: 9px; letter-spacing: 0.3px; color: var(--muted); cursor: pointer; white-space: nowrap; }
         .shift-mgmt-chip.is-off .shift-off-check { color: var(--accent); }
         .shift-off-check input { accent-color: var(--accent); margin: 0; width: 11px; height: 11px; cursor: pointer; }
@@ -7388,6 +7692,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                     </button>
                   </>
                 )}
+                <button className="print-btn" onClick={openSavedSchedules} title={`Save this week's ${SECTION_LABEL[scheduleView]} schedule under a name, or apply a saved one to this week`}>Saved schedules</button>
                 <button className="print-btn" onClick={printSchedule}><Printer size={13} /> Print</button>
                 <button className="print-btn" disabled={pdfBusy === "schedule"} onClick={exportSchedulePdf}>
                   <FileDown size={13} /> {pdfBusy === "schedule" ? "Saving…" : "Save as PDF"}
@@ -9478,6 +9783,121 @@ export default function SchedulingHub({ session, onSignOut }) {
                   {ed.busy ? "Saving…" : isNew ? "Add" : "Save"}
                 </button>
               </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {savedModal && (() => {
+        const m = savedModal;
+        const close = () => { if (!m.busy) setSavedModal(null); };
+        const dayName = (wd) => {
+          const d = activeWeek.find((x) => x.weekday === wd);
+          return d ? d.date.toLocaleDateString(undefined, { weekday: "short", month: "numeric", day: "numeric" }) : ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][wd];
+        };
+        const lbl = (code) => shiftLabelForType(code);
+        const where = `${SAVED_SECTION_LABEL[m.section]}, week of ${shortDate(m.ws)}`;
+        const p = m.preview;
+        return (
+          <div className="day-popup-backdrop" onClick={close}>
+            <div className="delete-modal saved-sched-modal" onClick={(e) => e.stopPropagation()}>
+              <div className="day-popup-head">
+                <div className="day-popup-date">{p ? `Apply "${p.template.name}"` : `Saved schedules — ${SAVED_SECTION_LABEL[m.section]}`}</div>
+                <button className="day-popup-close" disabled={m.busy} onClick={close}><X size={15} /></button>
+              </div>
+              {m.error && <div className="send-error">{m.error}</div>}
+              {m.msg && <div className="staff-msg" style={{ display: "block" }}>{m.msg}</div>}
+
+              {p ? (
+                <>
+                  <div className="template-note" style={{ marginTop: 0 }}>To {where}. Nothing is written until you press Apply.</div>
+                  <div className="saved-plan">
+                    <div className="saved-plan-row"><b>Filling</b> {p.plan.fill.length} {p.plan.fill.length === 1 ? "day" : "days"} with nothing on them yet</div>
+                    <details className="saved-plan-row" open={p.plan.replace.length > 0 && p.plan.replace.length <= 12}>
+                      <summary><b>Replacing</b> {p.plan.replace.length} {p.plan.replace.length === 1 ? "day" : "days"} that already hold something (Off included)</summary>
+                      <ul className="saved-plan-list">
+                        {p.plan.replace.map((w) => (
+                          <li key={`${w.entry.groupKey}|${w.entry.staffId}|${w.weekday}`}>{w.name} — {dayName(w.weekday)}: {lbl(w.before)} → <b>{lbl(w.after)}</b></li>
+                        ))}
+                      </ul>
+                    </details>
+                    <div className="saved-plan-row saved-plan-skip">
+                      <b>Skipping</b> {p.plan.skip.length} — never written
+                      {p.plan.skip.length > 0 && (
+                        <ul className="saved-plan-list">
+                          {p.plan.skip.map((s, i) => (
+                            <li key={i}>{s.name}{s.weekday == null ? "" : ` — ${dayName(s.weekday)}`}{s.code ? ` (${lbl(s.code)})` : ""}: {s.reason}</li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                    {p.plan.unchanged > 0 && <div className="saved-plan-row muted">{p.plan.unchanged} {p.plan.unchanged === 1 ? "day already matches" : "days already match"} — left alone.</div>}
+                  </div>
+                  <div className="send-actions">
+                    <button className="nr-btn" disabled={m.busy} onClick={() => setSavedModal({ ...m, preview: null, error: null })}>Back</button>
+                    <span style={{ flex: 1 }} />
+                    <button className="publish-btn" disabled={m.busy || p.plan.fill.length + p.plan.replace.length === 0} onClick={confirmApply}>
+                      {m.busy ? "Applying…" : p.plan.fill.length + p.plan.replace.length === 0 ? "Nothing to change" : `Apply ${p.plan.fill.length + p.plan.replace.length} change${p.plan.fill.length + p.plan.replace.length === 1 ? "" : "s"}`}
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  {m.loading ? <div className="template-note">Loading…</div> : (
+                    <>
+                      {m.templates.length === 0 && !m.error && <div className="template-note" style={{ marginTop: 0 }}>No saved {SAVED_SECTION_LABEL[m.section]} schedules yet. Save this week below to make one.</div>}
+                      <div className="saved-list">
+                        {m.templates.map((t) => {
+                          const people = new Set((t.cells || []).map((c) => `${c.staff_id}|${c.group_key}`)).size;
+                          return (
+                            <div className="saved-item" key={t.id}>
+                              <div className="saved-item-name">
+                                <b>{t.name}</b>
+                                <span className="muted"> · {people} {people === 1 ? "person" : "people"} · saved {new Date(t.updated_at).toLocaleDateString()}</span>
+                              </div>
+                              <div className="saved-item-actions">
+                                <button className="nr-btn nr-btn-primary" disabled={m.busy} onClick={() => previewTemplate(t)}>Apply…</button>
+                                <button className="nr-btn" disabled={m.busy} onClick={() => saveCurrentAsTemplate(t)} title={`Replace it with ${where}`}>Overwrite</button>
+                                <button className="nr-btn nr-btn-deny" disabled={m.busy} onClick={() => deleteTemplate(t)}>Delete</button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <label className="manual-field-label" htmlFor="saved-name">Save {where} as</label>
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <input
+                          id="saved-name" className="manual-field" style={{ flex: 1 }} placeholder="e.g. Standard week"
+                          value={m.saveName} disabled={m.busy}
+                          onChange={(e) => setSavedModal({ ...m, saveName: e.target.value, error: null })}
+                          onKeyDown={(e) => { if (e.key === "Enter") saveCurrentAsTemplate(); }}
+                        />
+                        <button className="publish-btn" disabled={m.busy || !m.saveName.trim()} onClick={() => saveCurrentAsTemplate()}>Save</button>
+                      </div>
+                      {m.lastApply && (
+                        <div className="saved-undo">
+                          Last applied here: <b>{m.lastApply.template_name}</b>, {new Date(m.lastApply.applied_at).toLocaleString()} ({m.lastApply.changes.length} change{m.lastApply.changes.length === 1 ? "" : "s"}).
+                          <button className="nr-btn" style={{ marginLeft: 8 }} disabled={m.busy} onClick={undoLastApply}>Undo it</button>
+                        </div>
+                      )}
+                      {m.undoProblem && (
+                        <div className="send-error">
+                          <b>Can't undo — {m.undoProblem.length} {m.undoProblem.length === 1 ? "day has" : "days have"} been changed since the apply.</b> Undoing would throw that later change away, so nothing was touched:
+                          <ul className="saved-plan-list">
+                            {m.undoProblem.map((c, i) => (
+                              <li key={i}>{c.name} — {dayName(c.weekday)}: the apply set {lbl(c.after)}, it's now {c.now == null ? "empty" : lbl(c.now)}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </>
+                  )}
+                  <div className="send-actions">
+                    <span style={{ flex: 1 }} />
+                    <button className="nr-btn" disabled={m.busy} onClick={close}>Close</button>
+                  </div>
+                </>
+              )}
             </div>
           </div>
         );

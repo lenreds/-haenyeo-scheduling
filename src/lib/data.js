@@ -560,6 +560,73 @@ export async function seedWeeklyPlaceholders(weekStartIso, placeholders, slotNam
   return true;
 }
 
+/* --------------------------------------------- saved schedules (0028) ----- */
+// schedule_templates: a named copy of one section's week, cells by staff id.
+// schedule_template_applies: every apply, with each changed cell's before /
+// after, so it can be undone. Pre-0028 these throw a plain "run 0028" error.
+function needs0028(error) {
+  if (isMissingTable(error) || /schedule_template/.test(error?.message || "")) {
+    return new Error("Saved schedules need migration 0028 — run it in the Supabase SQL editor.");
+  }
+  return error;
+}
+
+export async function fetchScheduleTemplates() {
+  const { data, error } = await supabase
+    .from("schedule_templates")
+    .select("id, name, section, cells, updated_at")
+    .order("name", { ascending: true });
+  if (error) throw needs0028(error);
+  return data || [];
+}
+
+// New (no id) or overwrite (id). -> the saved row.
+export async function saveScheduleTemplate({ id, name, section, cells }) {
+  const q = id
+    ? supabase.from("schedule_templates").update({ name, cells, updated_at: new Date().toISOString() }).eq("id", id)
+    : supabase.from("schedule_templates").insert({ name, section, cells });
+  const { data, error } = await q.select("id, name, section, cells, updated_at").single();
+  if (error) throw needs0028(error);
+  return data;
+}
+
+export async function deleteScheduleTemplate(id) {
+  const { error } = await supabase.from("schedule_templates").delete().eq("id", id);
+  if (error) throw needs0028(error);
+}
+
+export async function recordTemplateApply({ templateId, templateName, section, weekStart, changes }) {
+  const { data, error } = await supabase
+    .from("schedule_template_applies")
+    .insert({ template_id: templateId, template_name: templateName, section, week_start: weekStart, changes })
+    .select("id, template_name, section, week_start, changes, applied_at")
+    .single();
+  if (error) throw needs0028(error);
+  return data;
+}
+
+// The latest apply to this section-week that hasn't been undone, or null.
+export async function fetchLatestApply(weekStart, section) {
+  const { data, error } = await supabase
+    .from("schedule_template_applies")
+    .select("id, template_name, section, week_start, changes, applied_at")
+    .eq("week_start", weekStart)
+    .eq("section", section)
+    .is("undone_at", null)
+    .order("applied_at", { ascending: false })
+    .limit(1);
+  if (error) throw needs0028(error);
+  return (data && data[0]) || null;
+}
+
+export async function markApplyUndone(id) {
+  const { error } = await supabase
+    .from("schedule_template_applies")
+    .update({ undone_at: new Date().toISOString() })
+    .eq("id", id);
+  if (error) throw needs0028(error);
+}
+
 /* ------------------------------------------------------- schedule_notes ---- */
 // Per-week notes. Also 0010-gated: pre-migration every read returns [] and the
 // Notes button stays hidden rather than erroring.
