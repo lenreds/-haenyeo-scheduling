@@ -404,7 +404,14 @@ const SHEET_MAX_GROUP_ROWS = 18;
 // staff + Manager On on one landscape page at full type size. Built into the
 // sheet (not print-only CSS) so Print, Save as PDF and the Publish attachment
 // are the same layout from one source. BOH/Kitchen keep the roomy default.
-function buildScheduleSheetNode({ sectionTitle, weekLabel, days, todayIdx, groups, managerOn, compact = false }) {
+// standing: a sheet meant to stay pinned up — day names only, no week range,
+// no "today" highlight; the "Printed <date>" line stays to tell copies apart.
+function buildScheduleSheetNode({ sectionTitle, weekLabel, days, todayIdx, groups, managerOn, compact = false, standing = false }) {
+  if (standing) {
+    days = days.map((d) => ({ ...d, date: "" }));
+    todayIdx = -1;
+    weekLabel = "";
+  }
   const P = compact
     ? { th: "5px 6px", cell: "3px 6px", name: "3px 12px", grp: "3px 12px", head: "6px 22px", pill: "3px 4px", legend: 6 }
     : { th: "11px 6px", cell: "8px 6px", name: "8px 12px", grp: "7px 12px", head: "16px 26px", pill: "6px 4px", legend: 12 };
@@ -414,8 +421,8 @@ function buildScheduleSheetNode({ sectionTitle, weekLabel, days, todayIdx, group
   const dayHead = days
     .map((d, i) =>
       i === todayIdx
-        ? `<th class="sh-th" style="padding:${P.th};background:${SHEET.orange};color:#fff;font-family:${mono};font-weight:700;font-size:11px;letter-spacing:1.5px;text-align:center;">★ ${d.dow} ${d.date}</th>`
-        : `<th class="sh-th" style="padding:${P.th};color:#8c8c8c;font-family:${mono};font-weight:700;font-size:11px;letter-spacing:1.5px;text-align:center;border-bottom:1.5px solid #e4e4e4;">${d.dow} ${d.date}</th>`
+        ? `<th class="sh-th" style="padding:${P.th};background:${SHEET.orange};color:#fff;font-family:${mono};font-weight:700;font-size:11px;letter-spacing:1.5px;text-align:center;">★ ${d.dow}${d.date ? ` ${d.date}` : ""}</th>`
+        : `<th class="sh-th" style="padding:${P.th};color:#8c8c8c;font-family:${mono};font-weight:700;font-size:11px;letter-spacing:1.5px;text-align:center;border-bottom:1.5px solid #e4e4e4;">${d.dow}${d.date ? ` ${d.date}` : ""}</th>`
     )
     .join("");
   // Cell text takes the color of the role worked that day (r.roles), not the
@@ -493,8 +500,8 @@ function buildScheduleSheetNode({ sectionTitle, weekLabel, days, todayIdx, group
         </div>
       </div>
       <div style="text-align:right;">
-        <div style="font-family:${mono};font-weight:700;font-size:14px;letter-spacing:1px;color:#2b2a25;">${escHtml(weekLabel)}</div>
-        <div style="font-family:${sans};font-size:10px;color:#8a8a8a;margin-top:2px;">Printed ${printedOn}</div>
+        ${weekLabel ? `<div style="font-family:${mono};font-weight:700;font-size:14px;letter-spacing:1px;color:#2b2a25;">${escHtml(weekLabel)}</div>` : ""}
+        <div style="font-family:${sans};font-size:10px;color:#8a8a8a;margin-top:${weekLabel ? 2 : 0}px;">Printed ${printedOn}</div>
       </div>
     </div>
     <table style="width:100%;border-collapse:collapse;table-layout:fixed;">
@@ -3592,8 +3599,13 @@ export default function SchedulingHub({ session, onSignOut }) {
   }
   // Build the branded colored sheet node for a section+week (used by both
   // Save-as-PDF and the multi-week publish attachments).
-  function scheduleSheetNodeFor(section, week) {
+  // paper: Print and Save-as-PDF. BOH & Kitchen on paper is a standing sheet
+  // (no dates) without the Manager On row — the manager rota changes weekly and
+  // BOH doesn't, so it would force reprints. The publish attachment (paper
+  // false) stays the dated, week-specific sheet; the screen keeps Manager On.
+  function scheduleSheetNodeFor(section, week, { paper = false } = {}) {
     const isFoh = section === "FOH";
+    const standing = paper && !isFoh;
     const node = buildScheduleSheetNode({
       sectionTitle: isFoh ? "FRONT OF HOUSE SCHEDULE" : "BOH & KITCHEN SCHEDULE",
       weekLabel: weekRangeLabel(week),
@@ -3605,8 +3617,9 @@ export default function SchedulingHub({ session, onSignOut }) {
             { label: "Kitchen", rows: buildGroupRows("kitchen", week) },
             { label: "BOH", rows: buildGroupRows("boh", week) },
           ],
-      managerOn: buildManagerOn(week),
+      managerOn: standing ? null : buildManagerOn(week),
       compact: isFoh,
+      standing,
     });
     // Print CSS keys off this: only the FOH sheet gets the tightened print
     // density; BOH/Kitchen prints exactly as before.
@@ -3622,8 +3635,9 @@ export default function SchedulingHub({ session, onSignOut }) {
       const range = weekFileRange(activeWeek);
       if (scheduleView === "foh" || scheduleView === "bohkitchen") {
         const isFoh = scheduleView === "foh";
-        const node = scheduleSheetNodeFor(isFoh ? "FOH" : "BOHKITCHEN", activeWeek);
-        await exportSheetNodeAsPdf(node, `Haenyeo-Schedule-${isFoh ? "FOH" : "BOH-Kitchen"}-${range}.pdf`);
+        const node = scheduleSheetNodeFor(isFoh ? "FOH" : "BOHKITCHEN", activeWeek, { paper: true });
+        // The standing BOH & Kitchen sheet is named by the day it was made, not a week.
+        await exportSheetNodeAsPdf(node, isFoh ? `Haenyeo-Schedule-FOH-${range}.pdf` : `Haenyeo-Schedule-BOH-Kitchen-printed-${TODAY_ISO}.pdf`);
       } else if (scheduleCardRef.current) {
         await exportNodeAsPdf(scheduleCardRef.current, `Haenyeo-Schedule-Management-${range}.pdf`, {
           orientation: "landscape",
@@ -3641,8 +3655,8 @@ export default function SchedulingHub({ session, onSignOut }) {
   // never the live interactive grid. Mount an offscreen sheet node into the
   // print portal, flip body.printing-schedule, print, then tear it down.
   function scheduleSheetNodeForCurrentView(week) {
-    if (scheduleView === "foh") return scheduleSheetNodeFor("FOH", week);
-    if (scheduleView === "bohkitchen") return scheduleSheetNodeFor("BOHKITCHEN", week);
+    if (scheduleView === "foh") return scheduleSheetNodeFor("FOH", week, { paper: true });
+    if (scheduleView === "bohkitchen") return scheduleSheetNodeFor("BOHKITCHEN", week, { paper: true });
     return buildScheduleSheetNode({
       sectionTitle: "MANAGEMENT SCHEDULE",
       weekLabel: weekRangeLabel(week),
