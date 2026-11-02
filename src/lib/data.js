@@ -1248,57 +1248,29 @@ export async function fetchTipSheet(dateIso) {
   return data || null;
 }
 
-// payload keys mirror the tip_sheets columns.
-export async function upsertTipSheet(payload) {
-  const write = (p) => supabase.from("tip_sheets").upsert(p, { onConflict: "date" }).select().maybeSingle();
-  // Each retry drops one more missing column from what was last sent.
-  let cur = payload;
-  let { data, error } = await write(cur);
-  // Until migration 0017 runs, bar_tip_out doesn't exist. With the tip-out on
-  // (the column's default) nothing is lost by dropping it; with it off the
-  // save must fail visibly rather than silently record a tip-out.
-  if (error && /bar_tip_out(?!_)/.test(error.message || "") && payload.bar_tip_out !== false) {
-    const { bar_tip_out, ...rest } = cur;
-    cur = rest;
-    ({ data, error } = await write(cur));
+// Save only what changed (lib/tipSave.js builds the list), via 0030's
+// save_tip_sheet. Returns { ok: true, row } — or { ok: false, conflicts, row }
+// when another device changed one of the same fields first: nothing was
+// written and row is the sheet as it now stands. expectRev (Lock / Send): the
+// rev this device loaded — refused if the row changed at all since.
+// Throws when the database refuses outright: a locked sheet (0029), a
+// calculation-method change (0025), or 0030 not run yet.
+export async function saveTipSheetChanges(dateIso, changes, expectRev = null) {
+  const { data, error } = await supabase.rpc("save_tip_sheet", { p_date: dateIso, p_changes: changes, p_expect_rev: expectRev });
+  if (!error) return data;
+  const msg = error.message || "";
+  if (error.code === "PGRST202" || /save_tip_sheet/.test(msg) && /not find|does not exist/.test(msg)) {
+    throw new Error("Run migration 0030 in Supabase, then reload — nothing was saved.");
   }
-  // Until migration 0023 runs, roster_snapshot doesn't exist. Dropping it
-  // leaves a frozen sheet following the schedule, as it did before 0023 —
-  // better than a send whose sent / locked state fails to save.
-  // Until migration 0024 runs, zero_tip_acks doesn't exist. The lock or send
-  // still saves (emails may already be out); the caller is told the "$0.00
-  // checked" ticks weren't kept so it can say so.
-  let acksNotSaved = false;
-  for (let i = 0; i < 2 && error; i++) {
-    if (/roster_snapshot/.test(error.message || "") && "roster_snapshot" in cur) {
-      console.warn("tip_sheets.roster_snapshot missing — run migration 0023 to pin frozen rosters.");
-      const { roster_snapshot, ...rest } = cur;
-      cur = rest;
-    } else if (/zero_tip_acks/.test(error.message || "") && "zero_tip_acks" in cur) {
-      console.warn("tip_sheets.zero_tip_acks missing — run migration 0024 to keep $0.00 acknowledgements.");
-      const { zero_tip_acks, ...rest } = cur;
-      cur = rest;
-      acksNotSaved = true;
-    } else break;
-    ({ data, error } = await write(cur));
+  if (/calc_version/.test(msg)) {
+    throw new Error(`This sheet's calculation method can't be changed once it exists — nothing was saved. Reload. (${msg})`);
   }
-  if (!error && acksNotSaved) return { ...(data || {}), acksNotSaved: true };
-  // 0022's columns carry pay decisions (Expo as 3rd Busser/Runner, how the
-  // tip-out and Closing Sum were decided). Dropping them would let the sheet
-  // reopen with different numbers, so the save fails visibly instead.
-  if (error && /expo_as_busser|bar_tip_out_auto|closing_sum_auto/.test(error.message || "")) {
-    throw new Error(`Run migration 0022 in Supabase, then save again (${error.message})`);
+  if (/is locked/.test(msg)) {
+    const e = new Error(msg);
+    e.tipLocked = true;
+    throw e;
   }
-  // calc_version (0025) is never dropped and retried: a method-2 sheet saved
-  // without it would reopen as method 1 with different figures. And the
-  // database refuses to change it on an existing sheet (trigger) — say so.
-  if (error && /calc_version/.test(error.message || "")) {
-    throw new Error(/can only be set when a sheet is created/.test(error.message || "")
-      ? `This sheet's calculation method can't be changed once it exists — nothing was saved. Reload. (${error.message})`
-      : `The calculation method couldn't be saved — run migration 0025, then reload. Nothing was saved. (${error.message})`);
-  }
-  if (error) throw error;
-  return data;
+  throw error;
 }
 
 // Does tip_sheets.calc_version (migration 0025) exist? Method 2 is reachable

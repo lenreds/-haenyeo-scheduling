@@ -8,7 +8,7 @@ import {
   sendRailReply,
   fetchTipSheet,
   tipCalcColumnPresent,
-  upsertTipSheet,
+  saveTipSheetChanges,
   insertStaff,
   updateStaff,
   replaceStaffRoles,
@@ -92,6 +92,7 @@ import {
   rulesPayload,
   truncCents,
 } from "./lib/tipRules.js";
+import { TIP_STATUS_COLUMNS, applyTipChanges, describeConflicts, diffTipRow, rowIsFrozen, withoutConflicts } from "./lib/tipSave.js";
 import { upcomingTimeOff } from "./lib/upcomingOff.js";
 import { hoursBetween } from "./lib/tipTimes.js";
 import { calcTips, sheetCalcVersion } from "./lib/tipMath.js";
@@ -1461,6 +1462,8 @@ export default function SchedulingHub({ session, onSignOut }) {
   // Opens on today, like the Calendar — it used to be pinned to the Jul 2 2026
   // sample date. TODAY_ISO is the same value the Today button jumps to.
   const [tipDateIso, setTipDateIso] = useState(TODAY_ISO);
+  const tipDateIsoRef = useRef(tipDateIso);
+  tipDateIsoRef.current = tipDateIso;
   const [floorCash, setFloorCash] = useState("");
   const [floorCredit, setFloorCredit] = useState("");
   const [barCash, setBarCash] = useState("");
@@ -1525,6 +1528,11 @@ export default function SchedulingHub({ session, onSignOut }) {
   // Bumped every time a date's saved row lands, which is the signal to re-take
   // the autosave baseline: that state came FROM the DB, so it isn't a change.
   const [tipLoadSeq, setTipLoadSeq] = useState(0);
+  // Per date: the tip_sheets row as this device last read or wrote it (null =
+  // no row yet). Saves send only what differs from it (writeTipSheetRow).
+  const tipBaseByDateRef = useRef({});
+  // Shown when another device saved some of the same fields first.
+  const [tipConflictMsg, setTipConflictMsg] = useState("");
   // Persistent Rail clears (brief item 1). GLOBAL, not per user: one shared
   // watermark per list, so a Clear by any manager hides those entries for
   // everyone. Hide-only — rail_requests is never touched.
@@ -2625,6 +2633,9 @@ export default function SchedulingHub({ session, onSignOut }) {
   // Sent, locked or finalized: the record of what was paid. Automatic rules
   // never re-run on it — it shows what its row stored.
   const tipFrozen = isFrozen({ sent: tipSent, locked: tipLocked, finalized: tipFinalized });
+  // Locked or finalized: every typed field is disabled, not just styled — Tab
+  // can't reach it and nothing can be typed (the database refuses it anyway, 0029).
+  const tipReadOnly = tipLocked || tipFinalized;
 
   // Off → $0 tip-out, so barShareEach is 0 and the bar keeps its full pool.
   const barTipOutCharged = barTipOutEffective({ mode: barTipOutMode, storedOn: barTipOutOn, barPool, frozen: tipFrozen });
@@ -2667,11 +2678,77 @@ export default function SchedulingHub({ session, onSignOut }) {
     totalDistributed: 0, floorCheckTotal: 0, floorCheckMatches: false,
   };
   // Every Tip Sheet write goes through here: a blocked sheet is never written.
-  function writeTipSheetRow(payload) {
+  // Only the fields that differ from the row as this device last had it from
+  // the database are sent (lib/tipSave.js, migration 0030), each with the value
+  // it had then; another device's edits to other fields are never overwritten.
+  // A locked / finalized row sends only lock and send state, never figures.
+  // status: only Lock, Unlock and Send change lock / send state — an autosave
+  // snapshot taken before a Lock must not carry "locked: false" in after it.
+  // exact (Lock / Send): refused unless the stored row is exactly the one this
+  // device last had, so a sheet is only frozen as the manager saw it.
+  // Resolves to the saved row. When another device changed one of the same
+  // fields first, nothing is written and this rejects with err.tipConflict.
+  async function writeTipSheetRow(payload, { status = false, exact = false } = {}) {
     if (tipCalcBlockedRef.current) {
-      return Promise.reject(new Error("This tip sheet can't be saved by this version of the app — reload."));
+      throw new Error("This tip sheet can't be saved by this version of the app — reload.");
     }
-    return upsertTipSheet(payload);
+    const date = payload.date;
+    const base = tipBaseByDateRef.current[date] ?? null;
+    const changes = diffTipRow(base, payload).filter((c) => status || !TIP_STATUS_COLUMNS.has(c.path[0]));
+    if (!changes.length) return base;
+    const res = await saveTipSheetChanges(date, changes, exact && base ? base.rev ?? null : null);
+    if (res?.ok) {
+      // The new base is what this screen was built from plus what it just
+      // wrote — NOT the returned row, which can hold another device's values
+      // this screen has never shown; taking those as base would make the
+      // screen's blank look like a deliberate clear on the next save. Its rev
+      // only moves on when nobody else wrote in between, so Lock / Send still
+      // see that the sheet has changed elsewhere.
+      const created = !base;
+      const onlyUs = created || Number(res.row?.rev) === Number(base.rev ?? -1) + 1;
+      const next = created ? res.row : applyTipChanges(base, changes);
+      if (!created) next.rev = onlyUs ? res.row.rev : base.rev;
+      tipBaseByDateRef.current[date] = next;
+      return next;
+    }
+    const err = new Error("Changed on another device");
+    err.tipConflict = { date, conflicts: res?.conflicts || [], row: res?.row || null, changes };
+    throw err;
+  }
+
+  // Another device saved some of the same fields first. Show the sheet as it
+  // now stands, put back this device's edits that didn't clash, save those, and
+  // say which fields now show the other device's values.
+  // action ("lock" / "send"): what was refused. Its lock / send change is never
+  // re-applied — the manager checks the sheet as it now stands and does it again.
+  async function resolveTipConflict(err, action = null) {
+    const { date, conflicts, row, changes } = err.tipConflict;
+    tipBaseByDateRef.current[date] = row;
+    const whole = conflicts.some((c) => c.path[0] === "rev");
+    const names = describeConflicts(conflicts.filter((c) => c.path[0] !== "rev"), Object.fromEntries(displaySlots.map((s) => [s.id, s.name])));
+    const what = action === "lock" ? "Not locked" : action === "send" ? "Not sent" : "";
+    const again = action ? `, then ${action} again` : "";
+    setTipConflictMsg(whole
+      ? `${what || "Not saved"}: the sheet was changed on another device since you opened it. It now shows what was saved there — check it${again}.`
+      : `${what ? `${what}. ` : ""}Changed on another device while you were editing: ${names}. Those now show what was saved there — check them${again}.`);
+    if (date !== tipDateIsoRef.current) return false; // left that date; the next load reads it fresh
+    const keep = withoutConflicts(changes, conflicts).filter((c) => !TIP_STATUS_COLUMNS.has(c.path[0]));
+    const merged = applyTipChanges(row, keep);
+    applyTipRow(merged);
+    if (!keep.length) return true;
+    try {
+      await writeTipSheetRow({ ...pickTipColumns(merged), date });
+      return true;
+    } catch (e) {
+      console.error("Tip sheet re-save after a clash failed:", e);
+      if (e.tipConflict) return resolveTipConflict(e);
+      setTipSaveState("error");
+      return false;
+    }
+  }
+  function pickTipColumns(row) {
+    const { id, rev, created_at, date, ...rest } = row || {};
+    return rest;
   }
 
   function shiftTipDate(delta) {
@@ -2750,7 +2827,19 @@ export default function SchedulingHub({ session, onSignOut }) {
       setTipSaveState(key === tipFormKeyRef.current ? "saved" : "dirty");
       return true;
     } catch (e) {
+      if (e.tipConflict) {
+        const ok = await resolveTipConflict(e);
+        setTipSaveState(ok ? "saved" : "error");
+        return ok;
+      }
       console.error("Tip sheet save failed:", e);
+      // Locked on another device since this one loaded it: what was typed here
+      // can never be saved, so show the sheet as stored — locked — and say so.
+      if (e.tipLocked && snapshot.date === tipDateIsoRef.current) {
+        setTipConflictMsg("Not saved: this sheet was locked on another device. It now shows what was stored when it was locked.");
+        await reloadTipSheet({ force: true });
+        return false;
+      }
       setTipSaveState("error");
       return false;
     }
@@ -2996,6 +3085,13 @@ export default function SchedulingHub({ session, onSignOut }) {
     }
     setTipSendBusy(true);
     setTipSendResult(null);
+    // Nothing is emailed unless the stored sheet is exactly what's on screen:
+    // this device's edits saved, and nothing changed on another device.
+    if (!(await settleTipSheetBeforeSend())) {
+      setTipSendBusy(false);
+      setTipSendOpen(false);
+      return;
+    }
     let pdfB64;
     try {
       pdfB64 = pdfToBase64(await renderTipSheetPdf());
@@ -3045,11 +3141,47 @@ export default function SchedulingHub({ session, onSignOut }) {
       res?.invalid?.length || res?.failures?.length ? "warn" : "good"
     );
     try {
-      const saved = await writeTipSheetRow(sentPayload);
-      if (saved?.acksNotSaved) addLog("Sheet sent, but the $0.00 acknowledgements weren't kept — run migration 0024", "warn");
+      try {
+        await writeTipSheetRow(sentPayload, { status: true, exact: true });
+      } catch (e) {
+        if (!e.tipConflict) throw e;
+        // Another device saved in the seconds the emails took. The emails are
+        // out, so the sheet is still marked sent and locked — field by field,
+        // over whatever was saved there — and the manager is told to look.
+        await writeTipSheetRow(sentPayload, { status: true });
+        addLog("Tip sheet sent, but it was changed on another device while sending — check it against the emailed PDF", "warn");
+        reloadTipSheet();
+      }
     } catch (e) {
       console.error("Save tip sheet failed:", e);
       addLog(`Emails went out but the sheet's sent/locked state didn't save — ${e.message || "run migration 0015?"}`, "warn");
+    }
+  }
+
+  // Before Send emails anyone: save what's still waiting here, and re-read the
+  // stored row. If anything changed on another device since this one loaded
+  // it, nothing is sent — the sheet is reloaded for the manager to check.
+  async function settleTipSheetBeforeSend() {
+    const date = tipDateIso;
+    try {
+      if (tipFormKeyRef.current !== tipBaselineRef.current || tipSaveState === "error") {
+        await writeTipSheetRow(tipPayload(), { exact: true });
+        tipBaselineRef.current = tipFormKeyRef.current;
+        setTipSaveState("saved");
+      }
+      const stored = await fetchTipSheet(date);
+      const base = tipBaseByDateRef.current[date] ?? null;
+      if ((stored?.rev ?? null) !== (base?.rev ?? null)) {
+        await resolveTipConflict({ tipConflict: { date, conflicts: [{ path: ["rev"] }], row: stored, changes: [] } }, "send");
+        return false;
+      }
+      return true;
+    } catch (e) {
+      if (e.tipConflict) { await resolveTipConflict(e, "send"); return false; }
+      console.error("Saving before send failed:", e);
+      setTipSendResult(null);
+      addLog(`Not sent — the sheet couldn't be saved first (${e.message || e})`, "warn");
+      return false;
     }
   }
 
@@ -3101,9 +3233,10 @@ export default function SchedulingHub({ session, onSignOut }) {
     setTipLockedAt(at);
     if (!next) { setTipFinalized(false); setTipFinalizedAt(null); }
     try {
-      const saved = await writeTipSheetRow(payload);
+      // exact: refused if another device changed anything since this one
+      // loaded it — the sheet is locked only as it is on this screen.
+      await writeTipSheetRow(payload, { status: true, exact: true });
       addLog(`Tip sheet ${next ? "locked" : "unlocked"} — ${shortDate(tipDateIso)}`, next ? "warn" : "good");
-      if (saved?.acksNotSaved) addLog("The $0.00 acknowledgements weren't kept — run migration 0024", "warn");
     } catch (e) {
       console.error("Tip lock save failed:", e);
       setTipLocked(!next);
@@ -3112,7 +3245,8 @@ export default function SchedulingHub({ session, onSignOut }) {
       setZeroTipAcks(prevAcks);
       setTipFinalized(prevFinalized);
       setTipFinalizedAt(prevFinalizedAt);
-      addLog(`Couldn't ${next ? "lock" : "unlock"} the tip sheet — ${e.message || "run migration 0013?"}`, "warn");
+      if (e.tipConflict) await resolveTipConflict(e, next ? "lock" : "unlock");
+      else addLog(`Couldn't ${next ? "lock" : "unlock"} the tip sheet — ${e.message || "run migration 0013?"}`, "warn");
     }
     setTipLockBusy(false);
   }
@@ -3429,6 +3563,8 @@ export default function SchedulingHub({ session, onSignOut }) {
   scheduleRefreshRef.current = () => {
     refreshScheduleWeeks();
     if (schedInflightRef.current === 0 && schedSaveState !== "dirty" && Object.keys(idToName).length) reloadWeek(activeWeekStart);
+    // The open tip sheet too: another device may have entered or locked it.
+    if (tab === "tips" && tipSaveState !== "saving") reloadTipSheet();
   };
   useEffect(() => {
     let last = 0;
@@ -4405,9 +4541,50 @@ export default function SchedulingHub({ session, onSignOut }) {
     setManualBusy(false);
   }
 
+  // Put a tip_sheets row (or null: no row yet) on screen. The date load, a
+  // clash with another device's save, and coming back to the app all use this,
+  // so there is one reading of what a stored row means.
+  function applyTipRow(row, columnPresent = tipCalcColumnRef.current) {
+    const s = (v) => (v === null || v === undefined ? "" : String(v));
+    setFloorCash(s(row?.floor_cash));
+    setFloorCredit(s(row?.floor_credit));
+    setBarCash(s(row?.bar_cash));
+    setBarCredit(s(row?.bar_credit));
+    setCovers(s(row?.covers));
+    setOpeningCounts(row?.opening_counts || {});
+    setClosingCounts(row?.closing_counts || {});
+    setClosingSum(s(row?.closing_sum));
+    setPayoutItems(Array.isArray(row?.payouts) ? row.payouts : []);
+    setCashSales(s(row?.cash_sales));
+    setSlotOverrides(row?.slot_overrides || {});
+    setTipTimes(row?.time_entries || {});
+    setRosterSnapshot(row?.roster_snapshot || null);
+    setTipCalcVersion(sheetCalcVersion({ loaded: true, row, columnPresent }));
+    setZeroTipAcks(Array.isArray(row?.zero_tip_acks) ? row.zero_tip_acks : []);
+    setTipGuard(null);
+    setTipPicker(null);
+    const rules = rulesFromRow(row);
+    setBarTipOutOn(rules.barStoredOn); // null / no row → on
+    setBarTipOutMode(rules.barMode);
+    setClosingSumAuto(rules.closingAuto);
+    setExpoAsBusser(rules.expoAsBusser);
+    setCustomMode(row?.slot_overrides && Object.keys(row.slot_overrides).length > 0);
+    setTipSent(!!row?.sent);
+    setTipSentAt(row?.sent_at || null);
+    setTipFinalized(!!row?.finalized);
+    setTipFinalizedAt(row?.finalized_at || null);
+    setTipLocked(!!row?.locked);
+    setTipLockedAt(row?.locked_at || null);
+    // Bumped last, in the same batch as the setters above, so the autosave
+    // baseline is re-taken from the values that just landed.
+    setTipLoadSeq((n) => n + 1);
+  }
   // Load the saved tip sheet for the selected date (or clear the form if none).
+  // The row as loaded is this device's "base" for that date: saves send only
+  // what differs from it (writeTipSheetRow).
   useEffect(() => {
     let cancelled = false;
+    setTipConflictMsg("");
     // Whether calc_version can be stored, asked alongside the sheet itself, so
     // a new sheet's method is settled before anything shows. Once known present
     // it stays known; "no" is asked again on the next date.
@@ -4416,39 +4593,8 @@ export default function SchedulingHub({ session, onSignOut }) {
       .then(([row, columnPresent]) => {
         if (cancelled) return;
         if (columnPresent) tipCalcColumnRef.current = true;
-        const s = (v) => (v === null || v === undefined ? "" : String(v));
-        setFloorCash(s(row?.floor_cash));
-        setFloorCredit(s(row?.floor_credit));
-        setBarCash(s(row?.bar_cash));
-        setBarCredit(s(row?.bar_credit));
-        setCovers(s(row?.covers));
-        setOpeningCounts(row?.opening_counts || {});
-        setClosingCounts(row?.closing_counts || {});
-        setClosingSum(s(row?.closing_sum));
-        setPayoutItems(Array.isArray(row?.payouts) ? row.payouts : []);
-        setCashSales(s(row?.cash_sales));
-        setSlotOverrides(row?.slot_overrides || {});
-        setTipTimes(row?.time_entries || {});
-        setRosterSnapshot(row?.roster_snapshot || null);
-        setTipCalcVersion(sheetCalcVersion({ loaded: true, row, columnPresent }));
-        setZeroTipAcks(Array.isArray(row?.zero_tip_acks) ? row.zero_tip_acks : []);
-        setTipGuard(null);
-        setTipPicker(null);
-        const rules = rulesFromRow(row);
-        setBarTipOutOn(rules.barStoredOn); // null / no row → on
-        setBarTipOutMode(rules.barMode);
-        setClosingSumAuto(rules.closingAuto);
-        setExpoAsBusser(rules.expoAsBusser);
-        setCustomMode(row?.slot_overrides && Object.keys(row.slot_overrides).length > 0);
-        setTipSent(!!row?.sent);
-        setTipSentAt(row?.sent_at || null);
-        setTipFinalized(!!row?.finalized);
-        setTipFinalizedAt(row?.finalized_at || null);
-        setTipLocked(!!row?.locked);
-        setTipLockedAt(row?.locked_at || null);
-        // Bumped last, in the same batch as the setters above, so the autosave
-        // baseline is re-taken from the values that just landed.
-        setTipLoadSeq((n) => n + 1);
+        tipBaseByDateRef.current[tipDateIso] = row;
+        applyTipRow(row, columnPresent);
       })
       .catch((e) => {
         console.error("Tip sheet load failed:", e);
@@ -4457,6 +4603,23 @@ export default function SchedulingHub({ session, onSignOut }) {
       });
     return () => { cancelled = true; };
   }, [tipDateIso]);
+  // Re-read the open date's row. Only replaces what's on screen when nothing
+  // typed here is still waiting to save — otherwise the next save compares
+  // field by field and any clash is reported then.
+  // force: replace it even so (the edits waiting here were refused for good).
+  function reloadTipSheet({ force = false } = {}) {
+    const date = tipDateIsoRef.current;
+    return fetchTipSheet(date)
+      .then((row) => {
+        if (date !== tipDateIsoRef.current) return;
+        const base = tipBaseByDateRef.current[date] ?? null;
+        if (!force && (row?.rev ?? null) === (base?.rev ?? null) && rowIsFrozen(row) === rowIsFrozen(base)) return;
+        if (!force && tipFormKeyRef.current !== tipBaselineRef.current) return;
+        tipBaseByDateRef.current[date] = row;
+        applyTipRow(row);
+      })
+      .catch((e) => console.error("Tip sheet refresh failed:", e));
+  }
   // BOH / Kitchen dropdown cells write straight through; Management keeps the
   // click interaction but toggles Off <-> FM only.
   // Same per-week rule as writeCellShift: edits land on this week's own record.
@@ -8199,6 +8362,12 @@ export default function SchedulingHub({ session, onSignOut }) {
                 <span className="tip-finalized-sub">This date's inputs are read-only. Press "Locked ✓" below to unlock.</span>
               </div>
             )}
+            {tipConflictMsg && (
+              <div className="send-error tip-conflict-msg screen-only" role="alert" style={{ marginBottom: 14 }}>
+                {tipConflictMsg}
+                <button className="nr-btn" style={{ marginLeft: 10 }} onClick={() => setTipConflictMsg("")}>OK</button>
+              </div>
+            )}
             <div className={`tip-page-split ${tipFinalized || tipLocked ? "tip-locked" : ""}`}>
               <div className="tip-left-col">
                 <div className="tip-logo-space">
@@ -8235,6 +8404,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                       type="number"
                       value={closingSumShowsCount ? (truncCents(closingBankTotal) ? closingSumValue.toFixed(2) : "") : closingSum}
                       onChange={(e) => editClosingSum(e.target.value)}
+                      disabled={tipReadOnly}
                       placeholder="0.00"
                     />
                   </div>
@@ -8257,14 +8427,14 @@ export default function SchedulingHub({ session, onSignOut }) {
                   <div className="payouts-block">
                     <div className="payouts-header">
                       <span>Payouts</span>
-                      <button className="add-payout-btn" onClick={addPayout}>+ Add</button>
+                      <button className="add-payout-btn" disabled={tipReadOnly} onClick={addPayout}>+ Add</button>
                     </div>
                     {payoutItems.length === 0 && <div className="payout-empty">No payouts logged.</div>}
                     {payoutItems.map((it) => (
                       <div className="payout-row" key={it.id}>
-                        <input type="text" placeholder="What was it" value={it.desc} onChange={(e) => updatePayout(it.id, "desc", e.target.value)} />
-                        <input type="number" placeholder="0.00" value={it.amount} onChange={(e) => updatePayout(it.id, "amount", e.target.value)} />
-                        <button className="remove-payout-btn" onClick={() => removePayout(it.id)}><X size={11} /></button>
+                        <input type="text" placeholder="What was it" value={it.desc} disabled={tipReadOnly} onChange={(e) => updatePayout(it.id, "desc", e.target.value)} />
+                        <input type="number" placeholder="0.00" value={it.amount} disabled={tipReadOnly} onChange={(e) => updatePayout(it.id, "amount", e.target.value)} />
+                        <button className="remove-payout-btn" disabled={tipReadOnly} onClick={() => removePayout(it.id)}><X size={11} /></button>
                       </div>
                     ))}
                     <div className="recon-row computed">
@@ -8279,7 +8449,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                   </div>
                   <div className="recon-row">
                     <label>Cash Sales</label>
-                    <input type="number" value={cashSales} onChange={(e) => setCashSales(e.target.value)} placeholder="0.00" />
+                    <input type="number" value={cashSales} disabled={tipReadOnly} onChange={(e) => setCashSales(e.target.value)} placeholder="0.00" />
                   </div>
                   <div className="recon-row computed">
                     <label>Minus Cash Sales</label>
@@ -8332,23 +8502,23 @@ export default function SchedulingHub({ session, onSignOut }) {
                   <div className="tip-inputs" style={{ marginBottom: 0 }}>
                     <div className="tip-field">
                       <label>Floor Cash Tips</label>
-                      <input type="number" value={floorCash} onChange={(e) => { setFloorCash(e.target.value); }} placeholder="0.00" />
+                      <input type="number" value={floorCash} disabled={tipReadOnly} onChange={(e) => { setFloorCash(e.target.value); }} placeholder="0.00" />
                     </div>
                     <div className="tip-field">
                       <label>Floor CC Tips</label>
-                      <input type="number" value={floorCredit} onChange={(e) => { setFloorCredit(e.target.value); }} placeholder="0.00" />
+                      <input type="number" value={floorCredit} disabled={tipReadOnly} onChange={(e) => { setFloorCredit(e.target.value); }} placeholder="0.00" />
                     </div>
                     <div className="tip-field">
                       <label>Bar Cash Tips</label>
-                      <input type="number" value={barCash} onChange={(e) => { setBarCash(e.target.value); }} placeholder="0.00" />
+                      <input type="number" value={barCash} disabled={tipReadOnly} onChange={(e) => { setBarCash(e.target.value); }} placeholder="0.00" />
                     </div>
                     <div className="tip-field">
                       <label>Bar CC Tips</label>
-                      <input type="number" value={barCredit} onChange={(e) => { setBarCredit(e.target.value); }} placeholder="0.00" />
+                      <input type="number" value={barCredit} disabled={tipReadOnly} onChange={(e) => { setBarCredit(e.target.value); }} placeholder="0.00" />
                     </div>
                     <div className="tip-field">
                       <label>Covers</label>
-                      <input type="number" value={covers} onChange={(e) => setCovers(e.target.value)} placeholder="0" style={{ width: 70 }} />
+                      <input type="number" value={covers} disabled={tipReadOnly} onChange={(e) => setCovers(e.target.value)} placeholder="0" style={{ width: 70 }} />
                     </div>
                   </div>
 
@@ -8440,6 +8610,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                                   value={p.name}
                                   placeholder="—"
                                   onChange={(e) => setSlotName(p.id, e.target.value)}
+                                  disabled={tipReadOnly}
                                 />
                               ) : (
                                 <span className="tip-name-display">
@@ -8462,7 +8633,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                               {!p.name ? (
                                 <span className="slot-empty">—</span>
                               ) : customMode ? (
-                                <input className="tip-table-input" type="number" step="0.05" value={p.pts} onChange={(e) => setSlotPts(p.id, e.target.value)} />
+                                <input className="tip-table-input" type="number" step="0.05" value={p.pts} disabled={tipReadOnly} onChange={(e) => setSlotPts(p.id, e.target.value)} />
                               ) : (
                                 p.pts.toFixed(2)
                               )}
@@ -8518,7 +8689,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                         : expoAsBusser ? "Back to Expo (0.30 pts) for this date"
                         : "No expo tonight: pay the Expo person as a 3rd Busser/Runner (0.60 pts)"}
                     >{expoAsBusser ? "✓ 3rd Busser/Runner" : "Expo → 3rd Busser/Runner"}</button>
-                    <button className={`custom-toggle ${customMode ? "on" : ""}`} onClick={toggleCustomMode}>
+                    <button className={`custom-toggle ${customMode ? "on" : ""}`} disabled={tipReadOnly} onClick={toggleCustomMode}>
                       {customMode ? "✓ Custom Schedule" : "Custom Schedule"}
                     </button>
                   </div>
