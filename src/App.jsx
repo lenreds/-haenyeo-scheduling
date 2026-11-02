@@ -100,6 +100,7 @@ import { ackEntry, tipSheetProblems, zeroesAllAcked } from "./lib/tipGuard.js";
 import { pickerMayOpen, scheduledStartMins } from "./lib/tipPickers.js";
 import { planApply, undoConflicts, SECTION_GROUPS } from "./lib/scheduleTemplates.js";
 import { CashPickerBody, PickerPanel, TimePickerBody } from "./components/TipPickers.jsx";
+import RailTipPanel, { PanelBoundary } from "./components/RailTipPanel.jsx";
 import UpdateBanner from "./components/UpdateBanner.jsx";
 import QRCode from "qrcode";
 
@@ -1431,6 +1432,9 @@ export default function SchedulingHub({ session, onSignOut }) {
   // Which day the "Today at a Glance" box is showing (brief item 7). Driven by
   // the 7-day strip; today until someone picks another day.
   const [glanceIso, setGlanceIso] = useState(TODAY_ISO);
+  // Tip sheet shortcut on the Rail (components/RailTipPanel.jsx) — collapsed
+  // until opened. It edits the Tip Sheet's own state for tipDateIso.
+  const [railTipOpen, setRailTipOpen] = useState(false);
   const [swapModal, setSwapModal] = useState(null); // { name, role, code, dateIso } | null
   // removeOnly: take the person off with no replacement (brief item 3).
   const [swapForm, setSwapForm] = useState({ withName: "", shift: "", note: "", removeOnly: false });
@@ -2665,6 +2669,30 @@ export default function SchedulingHub({ session, onSignOut }) {
   const tipCalcBlocked = !tipCalc;
   const tipCalcBlockedRef = useRef(false);
   tipCalcBlockedRef.current = tipCalcBlocked;
+
+  // ---- Tip sheet shortcut on the Rail (trial) -------------------------------
+  // The day picked in the Rail strip; "today" before 6am means last night's
+  // service, since closing runs past midnight.
+  const railTipIso = (() => {
+    if (glanceIso !== TODAY_ISO || new Date().getHours() >= 6) return glanceIso;
+    const d = new Date();
+    d.setDate(d.getDate() - 1);
+    return iso(d);
+  })();
+  // Stricter than the Tip Sheet: sent is read-only here even once unlocked.
+  const railTipReadOnlyWhy = tipCalcBlocked ? "This sheet can't be edited by this version of the app — reload"
+    : tipSent ? "Sent" : tipLocked ? "Locked" : tipFinalized ? "Finalized" : "";
+  // Opening it points the Tip Sheet at that day — one sheet in memory, so the
+  // Tip Sheet tab shows the same date and the same unsaved edits.
+  function toggleRailTip() {
+    if (!railTipOpen) setTipDateIso(railTipIso);
+    setTipPicker(null);
+    setRailTipOpen((o) => !o);
+  }
+  useEffect(() => {
+    if (railTipOpen && tipDateIso !== railTipIso) setTipDateIso(railTipIso);
+    // Only when the Rail's day changes — not when the Tip Sheet tab pages dates.
+  }, [railTipIso]); // eslint-disable-line react-hooks/exhaustive-deps
   const {
     barTipOutTotal, totalPoints, perPoint, barShareEach,
     serverRate, bussersRate, barRate,
@@ -3564,7 +3592,7 @@ export default function SchedulingHub({ session, onSignOut }) {
     refreshScheduleWeeks();
     if (schedInflightRef.current === 0 && schedSaveState !== "dirty" && Object.keys(idToName).length) reloadWeek(activeWeekStart);
     // The open tip sheet too: another device may have entered or locked it.
-    if (tab === "tips" && tipSaveState !== "saving") reloadTipSheet();
+    if ((tab === "tips" || (tab === "rail" && railTipOpen)) && tipSaveState !== "saving") reloadTipSheet();
   };
   useEffect(() => {
     let last = 0;
@@ -6394,6 +6422,49 @@ export default function SchedulingHub({ session, onSignOut }) {
         .send-reconnect { display: flex; align-items: flex-start; gap: 7px; margin: 0 0 12px; padding: 9px 12px; border: 1px solid #B23A2F; background: rgba(178,58,47,0.16); color: #e79289; border-radius: 7px; font-size: 12px; line-height: 1.45; }
         .send-reconnect a { color: inherit; font-weight: 700; }
 
+        /* Tip sheet shortcut on the Rail (trial). A phone tool: every control
+           is at least 44px tall. Collapsed it's one quiet bar. */
+        .rtp-bar { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 48px; box-sizing: border-box; padding: 8px 20px; background: none; border: 0; border-bottom: 1px solid var(--line); color: var(--txt2); font-family: inherit; text-align: left; cursor: pointer; }
+        .rtp-bar:hover { background: var(--s2); }
+        .rtp-bar-title { color: var(--txt); font-weight: 700; font-size: 13px; }
+        .rtp-bar-sub { font-size: 12px; flex: 1; min-width: 0; }
+        .rtp-bar-open { color: var(--accent); font-weight: 700; font-size: 12px; }
+        .rtp { padding: 14px 20px 18px; border-bottom: 1px solid var(--line); color: var(--txt); }
+        .rtp-failed { color: #e79289; font-size: 13px; }
+        .rtp-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 10px; }
+        .rtp-title { font-weight: 700; font-size: 15px; }
+        .rtp-sub { font-size: 11.5px; color: var(--txt2); margin-top: 2px; }
+        .rtp-btn { min-height: 44px; min-width: 44px; padding: 0 14px; background: var(--s2); color: var(--txt); border: 1px solid var(--line2); border-radius: 8px; font-family: inherit; font-weight: 700; font-size: 13px; cursor: pointer; }
+        .rtp-btn-small { margin-left: 10px; }
+        .rtp-ro { background: rgba(178,58,47,0.16); border: 1px solid #B23A2F; color: #e79289; border-radius: 8px; padding: 10px 12px; font-size: 13px; margin-bottom: 10px; }
+        .rtp-warn { background: rgba(200,149,108,0.14); border: 1px solid var(--accent); color: var(--txt); border-radius: 8px; padding: 10px 12px; font-size: 13px; margin-bottom: 10px; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+        .rtp-section { display: flex; align-items: center; margin: 16px 0 8px; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); font-weight: 700; }
+        .rtp-hint { margin-left: 8px; text-transform: none; letter-spacing: 0; color: var(--txt2); font-weight: 400; }
+        .rtp-empty { font-size: 13px; color: var(--txt2); }
+        .rtp-times { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 8px; }
+        .rtp-person { display: grid; grid-template-columns: minmax(0, 1fr) 96px 96px; gap: 6px; align-items: center; }
+        .rtp-name { font-weight: 700; font-size: 14px; overflow-wrap: anywhere; }
+        .rtp-pos { display: block; font-weight: 400; font-size: 11px; color: var(--txt2); }
+        .rtp-cell { min-height: 44px; box-sizing: border-box; display: flex; flex-direction: column; justify-content: center; align-items: center; background: var(--s2); border: 1px solid var(--line2); border-radius: 8px; cursor: pointer; padding: 2px 6px; }
+        .rtp-cell[aria-disabled="true"] { cursor: default; opacity: 0.6; }
+        .rtp-cell-empty .rtp-cell-val { color: var(--muted); }
+        .rtp-cell-label { font-size: 10px; color: var(--txt2); text-transform: uppercase; letter-spacing: 0.08em; }
+        .rtp-cell-val { font-size: 14px; font-weight: 700; }
+        .rtp-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px; }
+        .rtp-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--txt2); }
+        .rtp-field input, .rtp-payout input { min-height: 44px; box-sizing: border-box; background: var(--s2); color: var(--txt); border: 1px solid var(--line2); border-radius: 8px; padding: 0 10px; font-family: inherit; font-size: 16px; }
+        .rtp-field input:disabled, .rtp-payout input:disabled { opacity: 0.6; }
+        .rtp-note { font-size: 11px; color: var(--txt2); }
+        .rtp-payout { display: grid; grid-template-columns: minmax(0, 1fr) 110px auto; gap: 6px; margin-bottom: 6px; }
+        .rtp-cash { max-width: 420px; }
+        .rtp-cash-row { display: grid; grid-template-columns: 70px 1fr 1fr; gap: 6px; align-items: center; margin-bottom: 6px; }
+        .rtp-cash-head { font-size: 11px; color: var(--txt2); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 2px; }
+        .rtp-cash-total { font-weight: 700; padding-top: 4px; border-top: 1px solid var(--line); }
+        .rtp-cash-total span:not(:first-child) { text-align: center; }
+        .rtp-denom { font-weight: 700; font-size: 14px; }
+        .rtp-warnlist { font-size: 13px; color: var(--txt2); line-height: 1.6; }
+        .rtp-open-sheet { margin-top: 18px; width: 100%; }
+
         /* Date Note quick-add strip (brief item 3), where the Gmail bar was. */
         .rs-quicknote {
           display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
@@ -7070,6 +7141,54 @@ export default function SchedulingHub({ session, onSignOut }) {
                 {quickNoteMsg && <span className="rs-quicknote-msg">{quickNoteMsg}</span>}
               </div>
             )}
+            {/* Tip sheet shortcut (trial): the Tip Sheet's own fields for the
+                day picked in the strip. Inside its own boundary, so if it ever
+                fails to draw, only it disappears — never the Rail. */}
+            <PanelBoundary>
+              <RailTipPanel
+                open={railTipOpen}
+                onToggle={toggleRailTip}
+                summaryKnown={railTipOpen || tipDateIso === railTipIso}
+                dateLabel={new Date(`${railTipOpen ? tipDateIso : railTipIso}T00:00:00`).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}
+                readOnly={!!railTipReadOnlyWhy}
+                readOnlyWhy={railTipReadOnlyWhy}
+                saveLabel={{ saved: "Saved", dirty: "Saving…", saving: "Saving…", error: "Not saved — check the Tip Sheet" }[tipSaveState] || ""}
+                conflictMsg={tipConflictMsg}
+                onDismissConflict={() => setTipConflictMsg("")}
+                slots={displaySlots}
+                getTimes={getTimes}
+                onTimeTap={(e, s, f) => openTimePicker(e, s, f)}
+                denoms={DENOMS}
+                denomLabel={denomLabel}
+                openingCounts={openingCounts}
+                closingCounts={closingCounts}
+                onCashTap={(e, which, d) => openCashPicker(e, which, d)}
+                openingTotal={openingBankTotal}
+                closingTotal={closingBankTotal}
+                money={money}
+                fields={[
+                  { label: "Floor Cash Tips", value: floorCash, onChange: setFloorCash },
+                  { label: "Floor CC Tips", value: floorCredit, onChange: setFloorCredit },
+                  { label: "Bar Cash Tips", value: barCash, onChange: setBarCash },
+                  { label: "Bar CC Tips", value: barCredit, onChange: setBarCredit },
+                  { label: "Cash Sales", value: cashSales, onChange: setCashSales },
+                  {
+                    label: "Closing Sum",
+                    value: closingSumShowsCount ? (truncCents(closingBankTotal) ? closingSumValue.toFixed(2) : "") : closingSum,
+                    onChange: editClosingSum,
+                    note: closingSumShowsCount ? "auto: from the closing count" : "",
+                  },
+                  { label: "Covers", value: covers, onChange: setCovers, placeholder: "0" },
+                ]}
+                payouts={payoutItems}
+                onAddPayout={addPayout}
+                onPayout={updatePayout}
+                onRemovePayout={removePayout}
+                warnings={railTipOpen ? tipSheetProblems(finalSlots, tipTimes).blocks : []}
+                onOpenTipSheet={() => setTab("tips")}
+              />
+            </PanelBoundary>
+
             {/* ---- Dark Split: queue | detail | log+notes ---- */}
             <div className="rs-grid">
 
