@@ -6479,8 +6479,16 @@ export default function SchedulingHub({ session, onSignOut }) {
 
         .sched-wrap { position: relative; }
         /* Card's right edge sits 28px inside the wrap (its side padding); the
-           pad starts 14px past it, in what was empty margin. */
-        .sched-pad { position: absolute; top: 0; left: calc(100% - 14px); width: 160px; box-sizing: border-box; background: #141414; border: 0.5px solid #2a2a2a; border-radius: 10px; padding: 10px; font-family: 'Inter', sans-serif; }
+           pad starts 14px past it, in what was empty margin. The rail runs the
+           full height of the wrap so the pad inside can stick to the top of
+           the window as the grid scrolls, and stops at the end of the card.
+           The rail itself takes no clicks — only the pad does.
+           Sticky only from 1100px: narrower than ~1024px the grid spills past
+           the card's right edge into this column, and a pinned pad would sit
+           on top of those cells — so there it stays at the top as before. */
+        .sched-pad-rail { position: absolute; top: 0; bottom: 0; left: calc(100% - 14px); width: 160px; pointer-events: none; }
+        .sched-pad { pointer-events: auto; width: 160px; box-sizing: border-box; background: #141414; border: 0.5px solid #2a2a2a; border-radius: 10px; padding: 10px; font-family: 'Inter', sans-serif; }
+        @media (min-width: 1100px) { .sched-pad { position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow-y: auto; } }
         .sched-pad.collapsed { width: 20px; padding: 0; border-radius: 6px; }
         .sched-pad-tab { display: flex; flex-direction: column; align-items: center; gap: 6px; width: 100%; padding: 8px 0; background: none; border: 0; color: #c8956c; cursor: pointer; }
         .sched-pad-count { font-size: 10px; color: #aaa; font-family: 'Space Mono', monospace; }
@@ -8088,8 +8096,10 @@ export default function SchedulingHub({ session, onSignOut }) {
               right of the card, outside scheduleCardRef — the card (and so the
               grid) is laid out exactly as if the pad weren't there. When the
               window is too narrow for it, the page scrolls sideways instead of
-              the grid shrinking. */}
-          <aside className={`sched-pad screen-only ${padCollapsed ? "collapsed" : ""}`} aria-label="Standing schedule notes">
+              the grid shrinking. It sticks to the top of the window while the
+              card scrolls past (see .sched-pad-rail), never over the grid. */}
+          <div className="sched-pad-rail screen-only">
+          <aside className={`sched-pad ${padCollapsed ? "collapsed" : ""}`} aria-label="Standing schedule notes">
             {padCollapsed ? (
               <button className="sched-pad-tab" onClick={() => setPadCollapsed(false)} title="Show standing notes">
                 <StickyNote size={12} />
@@ -8145,6 +8155,7 @@ export default function SchedulingHub({ session, onSignOut }) {
               </>
             )}
           </aside>
+          </div>
         </div>
       )}
 
