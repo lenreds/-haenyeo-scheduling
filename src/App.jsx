@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef } from "react";
-import { Check, X, AlertTriangle, Users, Package, Clock, ChevronLeft, ChevronRight, Printer, FileDown, Calendar, CalendarDays, StickyNote, Receipt, Lock, Unlock } from "lucide-react";
+import { Check, X, AlertTriangle, Users, Package, Clock, ChevronLeft, ChevronRight, ChevronDown, Printer, FileDown, Calendar, CalendarDays, CalendarPlus, StickyNote, Receipt, Lock, Unlock, FolderOpen, UserPlus } from "lucide-react";
 import Sidebar, { NAV_ITEMS } from "./components/Sidebar.jsx";
 import {
   fetchInitial,
@@ -1343,6 +1343,10 @@ function railDatesMatch(datesStr, isoStr) {
 // write is wrapped and the app simply forgets the choice when it can't save.
 const THEME_KEY = "hmng-theme";
 const SIDEBAR_KEY = "hmng-sidebar-collapsed";
+const STAFF_SECTIONS_KEY = "hmng-staff-sections"; // { FOH: true/false, ... } open state per section
+// Staff tab, on screen only: the QR buttons kept visible (round 3, item 8b).
+// Every code still exists and prints — QR_CODES itself is untouched.
+const STAFF_QR_ON_SCREEN = ["reqoff", "register"];
 function readStoredTheme() {
   try { return localStorage.getItem(THEME_KEY) === "light" ? "light" : "dark"; } catch { return "dark"; }
 }
@@ -1475,6 +1479,21 @@ export default function SchedulingHub({ session, onSignOut }) {
   // Tip sheet shortcut on the Rail (components/RailTipPanel.jsx) — collapsed
   // until opened. It edits the Tip Sheet's own state for tipDateIso.
   const [railTipOpen, setRailTipOpen] = useState(false);
+  // Screen-only state from redesign round 3: the Rail's folded "Add note"
+  // row, the Set Schedule toolbar menus, the Staff tab's folded add box and
+  // its collapsible sections (remembered per section).
+  const [quickNoteOpen, setQuickNoteOpen] = useState(false);
+  const [schedMenu, setSchedMenu] = useState(null); // 'saved' | 'print' | 'status'
+  const [addStaffOpen, setAddStaffOpen] = useState(false);
+  const [staffSectionsOpen, setStaffSectionsOpen] = useState(() => {
+    try { return JSON.parse(localStorage.getItem(STAFF_SECTIONS_KEY) || "{}") || {}; } catch { return {}; }
+  });
+  function staffSectionIsOpen(section) { return staffSectionsOpen[section] !== false; }
+  function toggleStaffSection(section) {
+    const next = { ...staffSectionsOpen, [section]: !staffSectionIsOpen(section) };
+    setStaffSectionsOpen(next);
+    try { localStorage.setItem(STAFF_SECTIONS_KEY, JSON.stringify(next)); } catch { /* not remembered */ }
+  }
   const [swapModal, setSwapModal] = useState(null); // { name, role, code, dateIso } | null
   // removeOnly: take the person off with no replacement (brief item 3).
   const [swapForm, setSwapForm] = useState({ withName: "", shift: "", note: "", removeOnly: false });
@@ -3592,6 +3611,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         setCalNotes((m) => ({ ...m, [quickNoteDate]: [...(m[quickNoteDate] || []), row] }));
         setQuickNoteDraft("");
         setQuickNoteMsg(`Added to ${shortDate(quickNoteDate)}`);
+        setQuickNoteOpen(false); // round 3: the row folds back after a note is added
         setTimeout(() => setQuickNoteMsg(""), 3000);
       } else {
         setQuickNoteMsg("Couldn't save — calendar notes table missing?");
@@ -3766,7 +3786,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         Object.entries(idxByGroup).forEach(([gk, i]) => { if (next[gk]) next[gk] = next[gk].filter((_, j) => j !== i); });
         return next;
       });
-      if (staffProfile === s.id) setStaffProfile(null);
+      if (staffProfile === (s.id || s.name)) setStaffProfile(null);
       setStaffMsg(`Deleted ${s.name}.`);
     } catch (e) {
       console.error("Delete staff failed:", e);
@@ -5216,6 +5236,7 @@ export default function SchedulingHub({ session, onSignOut }) {
       applyStaffLocal({ ...row, active: true }, roles, primary, null);
       setNewStaff({ name: "", section: "FOH", roles: [], primary: "" });
       setStaffMsg(`Added ${name}.`);
+      setAddStaffOpen(false); // round 3: the add box folds back after adding
     } catch (e) {
       console.error("Add staff failed:", e);
       setStaffMsg(`Couldn't add ${name}: ${e.message || e}`);
@@ -7074,6 +7095,8 @@ export default function SchedulingHub({ session, onSignOut }) {
           --glass-modal: rgba(26,23,20,0.80);
           --primary-glass: rgba(74,115,80,0.55); --primary-glass-edge: rgba(255,255,255,0.28);
           --cl-bg: rgba(217,160,122,0.24); --cl-text: #f1c7a3; --cl-line: rgba(217,160,122,0.6);
+          /* round 3: outline-glass buttons glow on hover */
+          --ok-glow: rgba(127,179,146,0.35); --danger-glow: rgba(231,146,137,0.35);
         }
         [data-theme="light"] {
           color-scheme: light;
@@ -7099,6 +7122,7 @@ export default function SchedulingHub({ session, onSignOut }) {
           --glass-modal: rgba(255,255,255,0.82);
           --primary-glass: rgba(63,107,70,0.85); --primary-glass-edge: rgba(255,255,255,0.45);
           --cl-bg: rgba(154,91,46,0.18); --cl-text: #6e3d17; --cl-line: rgba(154,91,46,0.5);
+          --ok-glow: rgba(63,107,70,0.3); --danger-glow: rgba(178,58,47,0.3);
         }
         /* The old "dim label" role (section labels, log times, placeholders)
            needs a little more ink than --dim gives on glass over the colour
@@ -7220,15 +7244,31 @@ export default function SchedulingHub({ session, onSignOut }) {
         /* Every tab fills the panel's width. */
         .nr-wrap, .cal-wrap, .hub-grid { max-width: none; margin: 0; padding: 0; }
 
-        /* ---- buttons: sage glass (round 2, item 8) ---- */
-        .publish-btn, .btn-approve, .custom-toggle.on, .publish-btn-sent, .nr-btn-approve {
-          background: var(--primary-glass); color: #ffffff; border: 1px solid var(--primary-glass-edge);
-          box-shadow: inset 0 1px 0 var(--primary-glass-edge);
+        /* ---- buttons (round 3, items 2 + 3) ----
+           Primary = the Tip Sheet's floor-check box: glass, thin sage outline,
+           light green text, outline glows on hover/press. Destructive = the
+           same in red. Same buttons, same handlers — style only. */
+        .publish-btn, .btn-approve, .custom-toggle.on, .publish-btn-sent, .nr-btn-approve, .shift-mgmt-add {
+          background: var(--ok-bg); color: var(--ok-text); border: 1px solid var(--ok);
+          box-shadow: inset 0 1px 0 rgba(255,255,255,0.08);
           -webkit-backdrop-filter: blur(12px) saturate(140%); backdrop-filter: blur(12px) saturate(140%);
+          transition: box-shadow 0.12s ease, border-color 0.12s ease;
         }
-        .publish-btn:hover:not(:disabled), .btn-approve:hover:not(:disabled), .nr-btn-approve:hover:not(:disabled), .publish-btn-sent:hover:not(:disabled) { filter: brightness(1.12); }
-        .publish-btn:active:not(:disabled), .btn-approve:active:not(:disabled), .nr-btn-approve:active:not(:disabled) { filter: brightness(1.22); }
+        .publish-btn:hover:not(:disabled), .btn-approve:hover:not(:disabled), .nr-btn-approve:hover:not(:disabled), .publish-btn-sent:hover:not(:disabled), .shift-mgmt-add:hover {
+          border-color: var(--ok-text); box-shadow: inset 0 1px 0 rgba(255,255,255,0.08), 0 0 0 1px var(--ok-bg), 0 0 14px var(--ok-glow); transform: none;
+        }
+        .publish-btn:active:not(:disabled), .btn-approve:active:not(:disabled), .nr-btn-approve:active:not(:disabled) { box-shadow: inset 0 1px 0 rgba(255,255,255,0.08), 0 0 0 2px var(--ok-bg), 0 0 18px var(--ok-glow); }
         .publish-btn:disabled, .nr-btn-approve:disabled { opacity: 0.5; }
+        .btn-danger, .delete-confirm-btn, .staff-delete-btn, .staff-delete-arm-on, .print-btn.lock-active {
+          background: var(--danger-bg) !important; color: var(--danger-text) !important; border: 1px solid var(--danger) !important;
+          box-shadow: inset 0 1px 0 rgba(255,255,255,0.06);
+          -webkit-backdrop-filter: blur(12px) saturate(140%); backdrop-filter: blur(12px) saturate(140%);
+          transition: box-shadow 0.12s ease;
+        }
+        .btn-danger:hover:not(:disabled), .delete-confirm-btn:hover:not(:disabled), .staff-delete-btn:hover:not(:disabled), .print-btn.lock-active:hover {
+          box-shadow: inset 0 1px 0 rgba(255,255,255,0.06), 0 0 0 1px var(--danger-bg), 0 0 14px var(--danger-glow);
+        }
+        .btn-danger:active:not(:disabled), .delete-confirm-btn:active:not(:disabled) { box-shadow: 0 0 0 2px var(--danger-bg), 0 0 18px var(--danger-glow); }
         .published-badge, .staff-msg, .rs-quicknote-msg, .save-status-saved { color: var(--ok-text); }
         .rs-gmail-ok .rs-gmail-dot, .week-finalized-dot, .staff-reg-dot.reg-yes { background: var(--ok); }
         .print-btn.finalized-active { background: var(--ok); border-color: var(--ok); }
@@ -7286,18 +7326,94 @@ export default function SchedulingHub({ session, onSignOut }) {
         .print-header { flex-wrap: wrap; gap: 8px 10px; }
         .print-header > div { flex-wrap: wrap; row-gap: 8px; }
         .print-btn, .publish-btn, .custom-toggle, .today-btn, .past-week-tag, .add-staff-btn { white-space: nowrap; }
-        .sched-wrap { display: flex; flex-direction: column; gap: 14px; padding: 0; }
+        /* Round 3, item 1: the notes pad is a sticky column on the RIGHT of
+           the grid, folding to a slim tab (state remembered, see
+           PAD_COLLAPSED_KEY). When width is tight the grid scrolls inside
+           its own card; the notes stay in view. */
+        .sched-wrap { display: flex; flex-direction: row; align-items: flex-start; gap: 14px; padding: 0; }
         .sched-wrap > .cal-card { flex: 1 1 auto; min-width: 0; overflow-x: auto; }
-        .sched-pad-rail { position: static; width: auto; pointer-events: auto; padding: 0 22px 22px; }
-        .sched-pad { position: static; width: 100%; max-width: none; max-height: none; }
-        .sched-pad.collapsed { width: auto; padding: 0; display: inline-block; }
-        .sched-pad-tab { flex-direction: row; justify-content: flex-start; gap: 8px; padding: 8px 12px; }
-        @media (min-width: 1500px) {
-          .sched-wrap { flex-direction: row; align-items: flex-start; }
-          .sched-pad-rail { flex: 0 0 182px; padding: 0 22px 22px 0; }
-          .sched-pad { position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow-y: auto; }
-          .sched-pad.collapsed { width: 100%; display: block; }
+        .sched-pad-rail {
+          position: sticky; top: 12px; flex: 0 0 auto; width: auto; pointer-events: auto;
+          padding: 0 22px 22px 0; max-height: calc(100vh - 24px); overflow-y: auto; overflow-x: hidden;
         }
+        .sched-pad { position: static; width: 200px; max-width: none; max-height: none; box-sizing: border-box; }
+        .sched-pad-head { flex-wrap: wrap; row-gap: 6px; }
+        .sched-pad.collapsed { width: 40px; padding: 0; display: block; }
+        .sched-pad-tab { flex-direction: column; justify-content: center; gap: 6px; padding: 10px 0; }
+        .sched-pad-week {
+          display: inline-flex; align-items: center; margin-left: auto; margin-right: 6px; padding: 2px 7px;
+          border-radius: 10px; border: 1px solid var(--control-border); background: var(--control-bg); color: var(--txt2);
+          font-family: 'Space Mono', monospace; font-size: 9px; letter-spacing: 0.3px; text-transform: none; cursor: pointer; white-space: nowrap;
+        }
+        .sched-pad-week:hover { color: var(--accent); border-color: var(--accent-line); }
+
+        /* ---- round 3: Rail slim row (items 5 + 6) ---- */
+        .rs-quickrow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 8px 20px; border-bottom: 1px solid var(--line); }
+        .rs-quickrow .rs-quicknote { padding: 0; border: 0; flex: 0 1 auto; gap: 8px; }
+        .rs-quickrow .rs-quicknote.rs-quicknote-open { flex: 1 1 auto; }
+        .rs-icon-btn {
+          display: inline-flex; align-items: center; gap: 7px; min-height: 36px; padding: 0 12px; border-radius: 10px;
+          border: 1px solid var(--control-border); background: var(--control-bg); color: var(--txt2);
+          font-family: 'Manrope', sans-serif; font-weight: 700; font-size: 12.5px; cursor: pointer; white-space: nowrap;
+        }
+        .rs-icon-btn:hover, .rs-icon-btn[aria-expanded="true"] { color: var(--accent); border-color: var(--accent-line); }
+        .rs-quickrow .rtp-bar {
+          width: auto; min-height: 36px; margin-left: auto; padding: 3px 12px 3px 10px; gap: 9px;
+          border: 1px solid var(--control-border); border-radius: 10px; background: var(--control-bg); color: var(--txt2);
+        }
+        .rs-quickrow .rtp-bar:hover { filter: brightness(1.08); }
+        .rtp-bar-icon { display: inline-flex; color: var(--txt2); }
+        .rtp-bar-text { display: flex; flex-direction: column; line-height: 1.15; }
+        .rs-quickrow .rtp-bar-title { font-size: 10.5px; color: var(--txt2); font-weight: 600; }
+        .rs-quickrow .rtp-bar-sub { font-size: 12.5px; font-weight: 700; color: var(--txt); flex: none; }
+        .rtp-bar-pending { border-color: var(--warn-line); background: var(--warn-bg); }
+        .rtp-bar-pending .rtp-bar-icon, .rtp-bar-pending .rtp-bar-sub { color: var(--warn-text); }
+        .rtp-bar-done { border-color: var(--ok); background: var(--ok-bg); }
+        .rtp-bar-done .rtp-bar-icon, .rtp-bar-done .rtp-bar-sub { color: var(--ok-text); }
+        .rtp-bar-ro .rtp-bar-sub { color: var(--danger-text); }
+        .rs-quickrow .rtp, .rs-quickrow .rtp-failed { flex: 1 1 100%; border-bottom: 0; padding-left: 0; padding-right: 0; }
+        /* Panel body (item 4): two columns on wide screens, one on narrow. */
+        .rtp-cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 400px); gap: 4px 28px; align-items: start; }
+        .rtp-col { min-width: 0; }
+        @media (max-width: 900px) { .rtp-cols { grid-template-columns: 1fr; } }
+
+        /* ---- round 3: Set Schedule toolbar menus + status pill (item 7) ---- */
+        .tb-menu-wrap { position: relative; display: inline-flex; }
+        .tb-icon-btn { display: inline-flex; align-items: center; gap: 3px; padding: 7px 9px; }
+        .tb-menu { top: calc(100% + 4px); left: 0; right: auto; min-width: 200px; }
+        .tb-menu .rs-q-menu-item { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+        .tb-menu .rs-q-menu-item:disabled { opacity: 0.5; cursor: default; }
+        .tb-pill {
+          display: inline-flex; align-items: center; gap: 6px; padding: 6px 11px; border-radius: 20px;
+          border: 1px solid var(--control-border); background: var(--control-bg); color: var(--txt2);
+          font-family: 'Space Mono', monospace; font-size: 10.5px; letter-spacing: 1px; text-transform: uppercase; cursor: pointer; white-space: nowrap;
+        }
+        .tb-pill:hover { color: var(--txt); }
+        .tb-pill-locked { color: var(--danger-text); border-color: var(--danger); background: var(--danger-bg); }
+        .tb-pill-finalized { color: var(--ok-text); border-color: var(--ok); background: var(--ok-bg); }
+        .print-btn.tb-on { border-color: var(--accent-line); color: var(--accent); }
+
+        /* ---- round 3: Staff tab (item 8) ---- */
+        .staff-msg-row { margin-bottom: 10px; }
+        .staff-add-toggle-row { display: flex; align-items: center; gap: 10px; margin: 4px 0 10px; }
+        .staff-add-toggle { display: inline-flex; align-items: center; gap: 6px; }
+        .staff-section-head {
+          display: flex; align-items: center; gap: 8px; width: 100%; margin-top: 14px; padding: 8px 2px;
+          background: none; border: 0; border-bottom: 1px solid var(--line); cursor: pointer; text-align: left;
+          font-family: 'Space Mono', monospace; font-size: 10.5px; letter-spacing: 2px; text-transform: uppercase; font-weight: 700; color: var(--accent);
+        }
+        .staff-section-head:hover { color: var(--txt); }
+        .staff-section-caret { transition: transform 0.15s ease; color: var(--txt2); }
+        .staff-section-caret.open { transform: rotate(90deg); }
+        .staff-row-compact { padding: 6px 2px; gap: 10px; }
+        .staff-name-btn {
+          display: inline-flex; align-items: center; gap: 8px; background: none; border: 0; padding: 4px 2px;
+          font-family: 'Manrope', sans-serif; font-weight: 700; font-size: 13.5px; color: var(--txt); cursor: pointer; text-align: left;
+        }
+        .staff-name-btn:hover { color: var(--accent); }
+        .staff-name-btn-open { padding: 4px; color: var(--txt2); }
+        .staff-dirty-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--warn-text); display: inline-block; }
+        .staff-row-open { background: var(--glass-inner); border: 1px solid var(--glass-inner-border); border-top: 1px solid var(--glass-inner-border); border-radius: 10px; padding: 10px 12px; margin-top: 6px; }
 
         /* ---- phone / iPad portrait: the sidebar becomes a top bar ---- */
         @media (max-width: 900px) {
@@ -7325,6 +7441,12 @@ export default function SchedulingHub({ session, onSignOut }) {
           .sidebar .sb-user-name, .sidebar.sidebar-collapsed .sb-user-name { display: none; }
           .hub-header { padding: 10px 14px; }
           .hub-main { min-height: 0; }
+          /* Notes pad under the grid on narrow screens. */
+          .sched-wrap { flex-direction: column; }
+          .sched-pad-rail { position: static; max-height: none; width: 100%; padding: 0 10px 14px; }
+          .sched-pad { width: 100%; }
+          .sched-pad.collapsed { width: auto; display: inline-block; }
+          .sched-pad-tab { flex-direction: row; padding: 8px 12px; }
         }
       `}</style>
 
@@ -7466,32 +7588,47 @@ export default function SchedulingHub({ session, onSignOut }) {
                 used to occupy. Writes to calendar_notes — the same rows the
                 Calendar's date page reads, so a note added here shows up there
                 and vice versa. */}
+            {/* Round 3: one slim row — "Add note" on the left (the date, note
+                and Add unfold inline and fold back after adding), the tip
+                sheet button on the right. Same inputs, same handlers. */}
+            <div className="rs-quickrow">
             {calendarNotesAvailable() && (
-              <div className="rs-quicknote">
-                {/* Icon only — the date picker and the placeholder already say
-                    what this is (brief item 5). */}
-                <span className="rs-quicknote-label" title="Add a note to a date on the Calendar"><Calendar size={15} /></span>
-                <input
-                  className="rs-quicknote-date"
-                  type="date"
-                  value={quickNoteDate}
-                  onChange={(e) => setQuickNoteDate(e.target.value)}
-                  title="Which date this note belongs to"
-                />
-                <input
-                  className="rs-quicknote-text"
-                  type="text"
-                  placeholder="Add a note to this date on the Calendar…"
-                  value={quickNoteDraft}
-                  disabled={quickNoteBusy}
-                  onChange={(e) => setQuickNoteDraft(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") addQuickDateNote(); }}
-                />
+              <div className={`rs-quicknote ${quickNoteOpen ? "rs-quicknote-open" : ""}`}>
                 <button
-                  className="publish-btn"
-                  disabled={!quickNoteDraft.trim() || !quickNoteDate || quickNoteBusy}
-                  onClick={addQuickDateNote}
-                >{quickNoteBusy ? "Adding…" : "Add"}</button>
+                  type="button"
+                  className="rs-icon-btn"
+                  aria-expanded={quickNoteOpen}
+                  onClick={() => setQuickNoteOpen((v) => !v)}
+                  title="Add a note to a date on the Calendar"
+                >
+                  <CalendarPlus size={15} /><span>Add note</span>
+                </button>
+                {quickNoteOpen && (
+                  <>
+                    <input
+                      className="rs-quicknote-date"
+                      type="date"
+                      value={quickNoteDate}
+                      onChange={(e) => setQuickNoteDate(e.target.value)}
+                      title="Which date this note belongs to"
+                    />
+                    <input
+                      className="rs-quicknote-text"
+                      type="text"
+                      autoFocus
+                      placeholder="Add a note to this date on the Calendar…"
+                      value={quickNoteDraft}
+                      disabled={quickNoteBusy}
+                      onChange={(e) => setQuickNoteDraft(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") addQuickDateNote(); }}
+                    />
+                    <button
+                      className="publish-btn"
+                      disabled={!quickNoteDraft.trim() || !quickNoteDate || quickNoteBusy}
+                      onClick={addQuickDateNote}
+                    >{quickNoteBusy ? "Adding…" : "Add"}</button>
+                  </>
+                )}
                 {quickNoteMsg && <span className="rs-quicknote-msg">{quickNoteMsg}</span>}
               </div>
             )}
@@ -7542,6 +7679,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                 onOpenTipSheet={() => setTab("tips")}
               />
             </PanelBoundary>
+            </div>
 
             {/* ---- Dark Split: queue | detail | log+notes ---- */}
             <div className="rs-grid">
@@ -7654,7 +7792,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                               {isTimeOff && (
                                 <button className="nr-btn nr-btn-partial" disabled={busy} onClick={() => setPartialOpen((n) => ({ ...n, [item.id]: true }))}>Partial</button>
                               )}
-                              <button className="nr-btn nr-btn-deny" disabled={busy} onClick={() => resolve(item, false)}><X size={14} /> Deny</button>
+                              <button className="nr-btn nr-btn-deny btn-danger" disabled={busy} onClick={() => resolve(item, false)}><X size={14} /> Deny</button>
                             </>
                           )}
                         </div>
@@ -8350,56 +8488,129 @@ export default function SchedulingHub({ session, onSignOut }) {
                     </button>
                   </>
                 )}
-                <button className="print-btn" onClick={openSavedSchedules} title={`Save this week's ${SECTION_LABEL[scheduleView]} schedule under a name, or apply a saved one to this week`}>Saved schedules</button>
-                <button className="print-btn" onClick={printSchedule}><Printer size={13} /> Print</button>
-                <button className="print-btn" disabled={pdfBusy === "schedule"} onClick={exportSchedulePdf}>
-                  <FileDown size={13} /> {pdfBusy === "schedule" ? "Saving…" : "Save as PDF"}
-                </button>
+                {/* Round 3: Saved schedules and Print / Save as PDF sit behind
+                    icon menus. Each item calls the same handler the old
+                    button did, with its guards and confirmations. */}
+                <div className="tb-menu-wrap">
+                  <button
+                    type="button"
+                    className="print-btn tb-icon-btn"
+                    aria-haspopup="menu"
+                    aria-expanded={schedMenu === "saved"}
+                    onClick={() => setSchedMenu((m) => (m === "saved" ? null : "saved"))}
+                    title="Saved schedules"
+                  ><FolderOpen size={14} /><ChevronDown size={12} /></button>
+                  {schedMenu === "saved" && (
+                    <>
+                      <div className="rs-q-menu-scrim" onClick={() => setSchedMenu(null)} />
+                      <div className="rs-q-menu tb-menu" role="menu">
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="rs-q-menu-item"
+                          onClick={() => { setSchedMenu(null); openSavedSchedules(); }}
+                          title={`Save this week's ${SECTION_LABEL[scheduleView]} schedule under a name, or apply a saved one to this week`}
+                        ><FolderOpen size={13} /> Saved schedules…</button>
+                      </div>
+                    </>
+                  )}
+                </div>
+                <div className="tb-menu-wrap">
+                  <button
+                    type="button"
+                    className="print-btn tb-icon-btn"
+                    aria-haspopup="menu"
+                    aria-expanded={schedMenu === "print"}
+                    onClick={() => setSchedMenu((m) => (m === "print" ? null : "print"))}
+                    title="Print or save as PDF"
+                  ><Printer size={14} /><ChevronDown size={12} /></button>
+                  {schedMenu === "print" && (
+                    <>
+                      <div className="rs-q-menu-scrim" onClick={() => setSchedMenu(null)} />
+                      <div className="rs-q-menu tb-menu" role="menu">
+                        <button type="button" role="menuitem" className="rs-q-menu-item" onClick={() => { setSchedMenu(null); printSchedule(); }}>
+                          <Printer size={13} /> Print
+                        </button>
+                        <button type="button" role="menuitem" className="rs-q-menu-item" disabled={pdfBusy === "schedule"} onClick={() => { setSchedMenu(null); exportSchedulePdf(); }}>
+                          <FileDown size={13} /> {pdfBusy === "schedule" ? "Saving…" : "Save as PDF"}
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
                 {/* Lock / Finalize / Publish are all edit-state controls, so a
                     past week shows none of them (brief item 2) — just a label
                     saying why the grid won't respond. */}
                 {schedulePastWeek ? (
                   <span className="past-week-tag"><Lock size={12} /> Past week — view only</span>
                 ) : (
-                  <>
-                    {/* Locks the sub-tab on screen for the week on screen only — the
-                        other two sections, and every other week, are unaffected. */}
+                  <div className="tb-menu-wrap">
+                    {/* Round 3: Lock (this sub-tab, this week only) and Finalize
+                        (the Calendar gate, no email) live behind one status
+                        pill. Same two handlers, same confirmations. */}
                     <button
-                      className={`print-btn ${scheduleLocked ? "lock-active" : ""}`}
-                      onClick={toggleSectionLock}
-                      title={
-                        scheduleLocked
-                          ? `Unlock ${SECTION_LABEL[scheduleView]} for the week of ${shortDate(activeWeekStart)}`
-                          : `Lock ${SECTION_LABEL[scheduleView]} for the week of ${shortDate(activeWeekStart)} only`
-                      }
+                      type="button"
+                      className={`tb-pill ${weekIsFinalized ? "tb-pill-finalized" : scheduleLocked ? "tb-pill-locked" : ""}`}
+                      aria-haspopup="menu"
+                      aria-expanded={schedMenu === "status"}
+                      onClick={() => setSchedMenu((m) => (m === "status" ? null : "status"))}
+                      title={`${SECTION_LABEL[scheduleView]} is ${scheduleLocked ? "locked" : "unlocked"} for the week of ${shortDate(activeWeekStart)}; the week is ${weekIsFinalized ? "finalized" : "not finalized"}`}
                     >
-                      {scheduleLocked ? <Lock size={13} /> : <Unlock size={13} />}{" "}
-                      {scheduleLocked
-                        ? `Locked ✓ — ${shortDate(activeWeekStart)}`
-                        : `Lock ${SECTION_LABEL[scheduleView]} — ${shortDate(activeWeekStart)}`}
+                      {scheduleLocked ? <Lock size={11} /> : <Unlock size={11} />}
+                      {finalizeBusy ? "Saving…" : weekIsFinalized ? (scheduleLocked ? "Finalized · Locked" : "Finalized") : scheduleLocked ? "Locked" : "Unlocked"}
+                      <ChevronDown size={11} />
                     </button>
-                    {/* Finalize is purely a Calendar gate (brief item 3): it puts
-                        the week on the Calendar and takes it off again. No email
-                        is sent either way — that's Publish. */}
-                    <button
-                      className={`print-btn ${weekIsFinalized ? "finalized-active" : ""}`}
-                      disabled={finalizeBusy}
-                      onClick={toggleWeekFinalized}
-                      title={
-                        weekIsFinalized
-                          ? "Un-finalize — removes this week from the Calendar and clears its published state so it can be sent again"
-                          : "Mark this week final so it shows on the Calendar (sends no email)"
-                      }
-                    >
-                      {finalizeBusy ? "Saving…" : weekIsFinalized ? "✓ Finalized" : "Finalize"}
-                    </button>
-                  </>
+                    {schedMenu === "status" && (
+                      <>
+                        <div className="rs-q-menu-scrim" onClick={() => setSchedMenu(null)} />
+                        <div className="rs-q-menu tb-menu" role="menu">
+                          <button
+                            type="button"
+                            role="menuitem"
+                            className="rs-q-menu-item"
+                            onClick={() => { setSchedMenu(null); toggleSectionLock(); }}
+                            title={
+                              scheduleLocked
+                                ? `Unlock ${SECTION_LABEL[scheduleView]} for the week of ${shortDate(activeWeekStart)}`
+                                : `Lock ${SECTION_LABEL[scheduleView]} for the week of ${shortDate(activeWeekStart)} only`
+                            }
+                          >
+                            {scheduleLocked ? <Unlock size={13} /> : <Lock size={13} />}
+                            {scheduleLocked
+                              ? `Unlock ${SECTION_LABEL[scheduleView]} — ${shortDate(activeWeekStart)}`
+                              : `Lock ${SECTION_LABEL[scheduleView]} — ${shortDate(activeWeekStart)}`}
+                          </button>
+                          <button
+                            type="button"
+                            role="menuitem"
+                            className="rs-q-menu-item"
+                            disabled={finalizeBusy}
+                            onClick={() => { setSchedMenu(null); toggleWeekFinalized(); }}
+                            title={
+                              weekIsFinalized
+                                ? "Un-finalize — removes this week from the Calendar and clears its published state so it can be sent again"
+                                : "Mark this week final so it shows on the Calendar (sends no email)"
+                            }
+                          >
+                            <Check size={13} /> {finalizeBusy ? "Saving…" : weekIsFinalized ? "Un-finalize week" : "Finalize week"}
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
                 )}
-                {notesTableAvailable() && (
-                  <button className="print-btn" onClick={() => setNotesWeek(activeWeekStart)} title="Notes for this week">
-                    Notes ({weekNotes.length})
-                  </button>
-                )}
+                {/* Round 3: Notes shows/hides the standing notes panel on the
+                    right. The per-week notes dialog is reachable from that
+                    panel's "Week notes" button (same setNotesWeek handler). */}
+                <button
+                  type="button"
+                  className={`print-btn ${padCollapsed ? "" : "tb-on"}`}
+                  aria-pressed={!padCollapsed}
+                  onClick={() => setPadCollapsed((v) => !v)}
+                  title={padCollapsed ? "Show the notes panel" : "Hide the notes panel"}
+                >
+                  <StickyNote size={13} /> Notes
+                </button>
                 {/* Publish lives here only, never on the Calendar. It opens the Publish
                     dialog for every finalized week that hasn't gone out yet; nothing is
                     emailed until Confirm & Send there. */}
@@ -8464,7 +8675,7 @@ export default function SchedulingHub({ session, onSignOut }) {
             )}
             {scheduleLocked && (
               <div className="template-note" style={{ marginBottom: 14, marginTop: -8 }}>
-                🔒 {SECTION_LABEL[scheduleView]} is locked for the week of {shortDate(activeWeekStart)} — its cells won't respond to clicks. Other sections, and other weeks, are unaffected. Hit "Locked ✓" above to unlock.
+                🔒 {SECTION_LABEL[scheduleView]} is locked for the week of {shortDate(activeWeekStart)} — its cells won't respond to clicks. Other sections, and other weeks, are unaffected. Open the status pill above to unlock.
               </div>
             )}
             {schedLockNotice && (
@@ -8743,6 +8954,12 @@ export default function SchedulingHub({ session, onSignOut }) {
               <>
                 <div className="sched-pad-head">
                   <span><StickyNote size={11} /> Notes</span>
+                  {/* Per-week notes dialog — the toolbar's old Notes (N) button. */}
+                  {notesTableAvailable() && (
+                    <button type="button" className="sched-pad-week" onClick={() => setNotesWeek(activeWeekStart)} title="Notes for this week">
+                      Week notes ({weekNotes.length})
+                    </button>
+                  )}
                   <button className="sched-pad-collapse" onClick={() => setPadCollapsed(true)} title="Collapse" aria-label="Collapse notes"><ChevronRight size={12} /></button>
                 </div>
                 {padNotesAvailable() ? (
@@ -9257,11 +9474,14 @@ export default function SchedulingHub({ session, onSignOut }) {
       {tab === "staff" && (
         <div className="cal-wrap" key="staff">
           <div className="cal-card">
-            <div className="week-header" style={{ marginBottom: 14 }}>
-              <div className="week-range"><Users size={14} style={{ verticalAlign: "-2px", marginRight: 6 }} />Staff</div>
-              {staffMsg && <span className="staff-msg">{staffMsg}</span>}
-              {schedNoteMsg && <span className="staff-msg">{schedNoteMsg}</span>}
-            </div>
+            {/* Round 3: no duplicate "Staff" title under the header — only the
+                status messages, when there is one. */}
+            {(staffMsg || schedNoteMsg) && (
+              <div className="week-header staff-msg-row">
+                {staffMsg && <span className="staff-msg">{staffMsg}</span>}
+                {schedNoteMsg && <span className="staff-msg">{schedNoteMsg}</span>}
+              </div>
+            )}
 
             <div className="subtabs">
               <button className={`subtab-btn ${staffView === "roles" ? "active" : ""}`} onClick={() => setStaffView("roles")}>Staff &amp; Roles</button>
@@ -9273,7 +9493,9 @@ export default function SchedulingHub({ session, onSignOut }) {
             <>
             <div className="qr-row">
               <span className="qr-row-label">QR codes:</span>
-              {QR_CODES.map((q) => (
+              {/* Round 3: only Request Off and Register show here; the other
+                  codes still exist, print and work — see STAFF_QR_ON_SCREEN. */}
+              {STAFF_QR_ON_SCREEN.map((k) => QR_CODES.find((q) => q.key === k)).filter(Boolean).map((q) => (
                 <button key={q.key} className="qr-btn" onClick={() => setQrModal(q.key)}>{q.label}</button>
               ))}
               <button className="qr-btn qr-print-btn" disabled={qrPrinting} onClick={handlePrintQR}>
@@ -9301,7 +9523,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                     </div>
                     <div className="nr-item-actions">
                       <button className="nr-btn nr-btn-approve" onClick={() => handleApproveInfo(u)}><Check size={13} /> Approve</button>
-                      <button className="nr-btn nr-btn-deny" onClick={() => handleDenyInfo(u)}><X size={13} /> Deny</button>
+                      <button className="nr-btn nr-btn-deny btn-danger" onClick={() => handleDenyInfo(u)}><X size={13} /> Deny</button>
                     </div>
                   </div>
                 ))}
@@ -9315,6 +9537,21 @@ export default function SchedulingHub({ session, onSignOut }) {
               </div>
             )}
 
+            {/* Round 3: the add box is folded behind a button and folds back
+                after a successful add (handleAddStaff). Same fields, same
+                handler. */}
+            <div className="staff-add-toggle-row">
+              <button
+                type="button"
+                className="qr-btn staff-add-toggle"
+                aria-expanded={addStaffOpen}
+                onClick={() => setAddStaffOpen((v) => !v)}
+                title="Add a staff member"
+              >
+                <UserPlus size={14} /> Add staff
+              </button>
+            </div>
+            {addStaffOpen && (
             <div className="staff-add">
               <div className="staff-add-title">Add a staff member</div>
               <div className="staff-add-row">
@@ -9360,13 +9597,14 @@ export default function SchedulingHub({ session, onSignOut }) {
                 <button className="publish-btn" onClick={handleAddStaff}>Add</button>
               </div>
             </div>
+            )}
 
             {/* Two-step delete (brief item 6): the per-row Delete buttons stay
                 hidden until this is armed, so a stray click can't start a
                 deletion. The confirm dialog still runs after that. */}
             <div className="staff-delete-arm">
               <button
-                className={`qr-btn ${deleteMode ? "staff-delete-arm-on" : ""}`}
+                className={`qr-btn btn-danger ${deleteMode ? "staff-delete-arm-on" : ""}`}
                 onClick={() => setDeleteMode((v) => !v)}
                 title={deleteMode ? "Hide the delete buttons" : "Show a Delete button on each staff row"}
               >
@@ -9382,23 +9620,60 @@ export default function SchedulingHub({ session, onSignOut }) {
               if (members.length === 0) return null;
               return (
                 <React.Fragment key={section}>
-                  <div className="role-header" style={{ display: "block", padding: "16px 2px 4px" }}>{section}</div>
-                  {members.map((s) => {
+                  {/* Round 3: each section folds from its heading; the open
+                      state is remembered per section. */}
+                  <button
+                    type="button"
+                    className="staff-section-head"
+                    aria-expanded={staffSectionIsOpen(section)}
+                    onClick={() => toggleStaffSection(section)}
+                  >
+                    <ChevronRight size={13} className={`staff-section-caret ${staffSectionIsOpen(section) ? "open" : ""}`} />
+                    {section}
+                    <span className="nr-count">{members.length}</span>
+                  </button>
+                  {staffSectionIsOpen(section) && members.map((s) => {
                     const d = staffDraftFor(s);
                     const dirty =
                       d.name !== s.name ||
                       d.active !== (s.active !== false) ||
                       JSON.stringify(d.roles) !== JSON.stringify(staffRolesMap[s.name] || [s.role]) ||
                       d.primary !== (staffRolesMap[s.name] || [s.role])[0];
-                    const open = staffProfile === s.id;
+                    // Keyed like the row itself (id, or the name before the DB
+                    // assigns one) so a row with no id yet never reads as open.
+                    const rowKey = s.id || s.name;
+                    const open = staffProfile === rowKey;
                     return (
                       <React.Fragment key={s.id || s.name}>
-                      <div className={`staff-row ${d.active ? "" : "staff-row-inactive"}`}>
+                      {/* Round 3: closed, a row is the status dot and the name;
+                          tapping the name opens the full row (same fields,
+                          same handlers) plus the contact panel below it. */}
+                      {!open && (
+                        <div className={`staff-row staff-row-compact ${d.active ? "" : "staff-row-inactive"}`}>
+                          <button
+                            className={`staff-reg-dot ${s.registered ? "reg-yes" : "reg-no"}`}
+                            title={s.registered ? "Registered — view details" : "Not yet registered — view details"}
+                            onClick={() => setStaffProfile(rowKey)}
+                          />
+                          <button type="button" className="staff-name-btn" aria-expanded={false} onClick={() => setStaffProfile(rowKey)} title="Open details">
+                            {d.name}
+                            {dirty && <span className="staff-dirty-dot" title="Unsaved changes — open to save" />}
+                          </button>
+                          {deleteMode && (
+                            <button className="staff-delete-btn btn-danger" title={`Delete ${s.name}`} onClick={() => setDeleteTarget(s)}>Delete</button>
+                          )}
+                        </div>
+                      )}
+                      {open && (
+                      <div className={`staff-row staff-row-open ${d.active ? "" : "staff-row-inactive"}`}>
                         <button
                           className={`staff-reg-dot ${s.registered ? "reg-yes" : "reg-no"}`}
-                          title={s.registered ? "Registered — view contact info" : "Not yet registered — view contact info"}
-                          onClick={() => setStaffProfile(open ? null : s.id)}
+                          title={s.registered ? "Registered — close details" : "Not yet registered — close details"}
+                          onClick={() => setStaffProfile(null)}
                         />
+                        <button type="button" className="staff-name-btn staff-name-btn-open" aria-expanded onClick={() => setStaffProfile(null)} title="Close details">
+                          <ChevronDown size={13} />
+                        </button>
                         <input
                           className="staff-name-input"
                           type="text"
@@ -9454,9 +9729,10 @@ export default function SchedulingHub({ session, onSignOut }) {
                           <button className="publish-btn staff-save-btn" onClick={() => handleSaveStaff(s)}>Save</button>
                         )}
                         {deleteMode && (
-                          <button className="staff-delete-btn" title={`Delete ${s.name}`} onClick={() => setDeleteTarget(s)}>Delete</button>
+                          <button className="staff-delete-btn btn-danger" title={`Delete ${s.name}`} onClick={() => setDeleteTarget(s)}>Delete</button>
                         )}
                       </div>
+                      )}
                       {open && (
                         <div className="staff-profile">
                           <div className="staff-profile-row">

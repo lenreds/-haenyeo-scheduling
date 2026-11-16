@@ -19,7 +19,14 @@
 //
 // Wrapped in PanelBoundary: if anything in here throws while drawing, only this
 // panel is replaced by a notice — the Rail and the Tip Sheet carry on.
+//
+// Screen layout (redesign round 3): closed, it is a receipt icon button with
+// "x of y clocked out" (amber until everyone is out, green when complete).
+// Open, the body is two columns on wide screens — times, tips and payouts on
+// the left, the bank counts on the right — and one column on narrow screens.
+// This component is the Rail's only; the Tip Sheet tab has its own markup.
 import React from "react";
+import { Receipt } from "lucide-react";
 
 export class PanelBoundary extends React.Component {
   constructor(props) {
@@ -59,13 +66,23 @@ export default function RailTipPanel(p) {
   const clockedOut = people.filter((s) => getTimes(s.id).out).length;
 
   if (!open) {
+    // Same completion data the old row showed; the colour is the only addition.
+    const complete = people.length > 0 && clockedOut === people.length;
+    const state = !p.summaryKnown ? "" : readOnly ? "rtp-bar-ro" : complete ? "rtp-bar-done" : "rtp-bar-pending";
+    const sub = !p.summaryKnown ? "Tap to open" : readOnly ? readOnlyWhy : `${clockedOut} of ${people.length} clocked out`;
     return (
-      <button type="button" className="rtp-bar" onClick={onToggle} aria-expanded="false">
-        <span className="rtp-bar-title">Tip sheet — {dateLabel}</span>
-        <span className="rtp-bar-sub">
-          {!p.summaryKnown ? "Tap to open" : readOnly ? readOnlyWhy : `${clockedOut} of ${people.length} clocked out · ${saveLabel}`}
+      <button
+        type="button"
+        className={`rtp-bar ${state}`}
+        onClick={onToggle}
+        aria-expanded="false"
+        title={`Tip sheet — ${dateLabel}${p.summaryKnown && !readOnly ? ` · ${saveLabel}` : ""}`}
+      >
+        <span className="rtp-bar-icon"><Receipt size={16} /></span>
+        <span className="rtp-bar-text">
+          <span className="rtp-bar-title">Tip sheet — {dateLabel}</span>
+          <span className="rtp-bar-sub">{sub}</span>
         </span>
-        <span className="rtp-bar-open">Open</span>
       </button>
     );
   }
@@ -89,89 +106,95 @@ export default function RailTipPanel(p) {
         </div>
       )}
 
-      <div className="rtp-section">Clock in / out</div>
-      {people.length === 0 && <div className="rtp-empty">Nobody is on the sheet for this date.</div>}
-      <div className="rtp-times">
-        {people.map((s) => {
-          const t = getTimes(s.id);
-          return (
-            <div className="rtp-person" key={s.id}>
-              <div className="rtp-name">{s.name}<span className="rtp-pos">{s.label}</span></div>
-              {["in", "out"].map((f) => (
-                <div
-                  key={f}
-                  role="button"
-                  tabIndex={readOnly ? -1 : 0}
-                  aria-disabled={readOnly}
-                  className={`rtp-cell ${t[f] ? "" : "rtp-cell-empty"}`}
-                  onClick={(e) => !readOnly && onTimeTap(e, s, f)}
-                  onKeyDown={(e) => !readOnly && key(e, (ev) => onTimeTap(ev, s, f))}
-                >
-                  <span className="rtp-cell-label">{f === "in" ? "In" : "Out"}</span>
-                  <span className="rtp-cell-val">{t[f] || "—"}</span>
-                </div>
-              ))}
-            </div>
-          );
-        })}
-      </div>
-
-      <div className="rtp-section">Tips, sales & covers</div>
-      <div className="rtp-fields">
-        {fields.map((f) => (
-          <label className="rtp-field" key={f.label}>
-            <span>{f.label}</span>
-            <input
-              type="number"
-              inputMode="decimal"
-              value={f.value}
-              placeholder={f.placeholder || "0.00"}
-              disabled={readOnly || f.disabled}
-              onChange={(e) => f.onChange(e.target.value)}
-            />
-            {f.note && <em className="rtp-note">{f.note}</em>}
-          </label>
-        ))}
-      </div>
-
-      <div className="rtp-section">
-        Payouts
-        {!readOnly && <button type="button" className="rtp-btn rtp-btn-small" onClick={onAddPayout}>+ Add</button>}
-      </div>
-      {payouts.length === 0 && <div className="rtp-empty">None</div>}
-      {payouts.map((it) => (
-        <div className="rtp-payout" key={it.id}>
-          <input type="text" placeholder="What was it" value={it.desc} disabled={readOnly} onChange={(e) => onPayout(it.id, "desc", e.target.value)} />
-          <input type="number" inputMode="decimal" placeholder="0.00" value={it.amount} disabled={readOnly} onChange={(e) => onPayout(it.id, "amount", e.target.value)} />
-          {!readOnly && <button type="button" className="rtp-btn rtp-btn-small" aria-label="Remove payout" onClick={() => onRemovePayout(it.id)}>×</button>}
-        </div>
-      ))}
-
-      <div className="rtp-section">Opening bank / closing count <span className="rtp-hint">dollar amounts, not bill counts</span></div>
-      <div className="rtp-cash">
-        <div className="rtp-cash-row rtp-cash-head"><span /> <span>Opening</span><span>Closing</span></div>
-        {denoms.map((d) => (
-          <div className="rtp-cash-row" key={d}>
-            <span className="rtp-denom">{denomLabel(d)}</span>
-            {["open", "close"].map((which) => {
-              const v = (which === "open" ? openingCounts : closingCounts)[d];
+      <div className="rtp-cols">
+        <div className="rtp-col">
+          <div className="rtp-section">Clock in / out</div>
+          {people.length === 0 && <div className="rtp-empty">Nobody is on the sheet for this date.</div>}
+          <div className="rtp-times">
+            {people.map((s) => {
+              const t = getTimes(s.id);
               return (
-                <div
-                  key={which}
-                  role="button"
-                  tabIndex={readOnly ? -1 : 0}
-                  aria-disabled={readOnly}
-                  className={`rtp-cell ${v ? "" : "rtp-cell-empty"}`}
-                  onClick={(e) => !readOnly && onCashTap(e, which, d)}
-                  onKeyDown={(e) => !readOnly && key(e, (ev) => onCashTap(ev, which, d))}
-                >
-                  <span className="rtp-cell-val">{v ? `$${v}` : "—"}</span>
+                <div className="rtp-person" key={s.id}>
+                  <div className="rtp-name">{s.name}<span className="rtp-pos">{s.label}</span></div>
+                  {["in", "out"].map((f) => (
+                    <div
+                      key={f}
+                      role="button"
+                      tabIndex={readOnly ? -1 : 0}
+                      aria-disabled={readOnly}
+                      className={`rtp-cell ${t[f] ? "" : "rtp-cell-empty"}`}
+                      onClick={(e) => !readOnly && onTimeTap(e, s, f)}
+                      onKeyDown={(e) => !readOnly && key(e, (ev) => onTimeTap(ev, s, f))}
+                    >
+                      <span className="rtp-cell-label">{f === "in" ? "In" : "Out"}</span>
+                      <span className="rtp-cell-val">{t[f] || "—"}</span>
+                    </div>
+                  ))}
                 </div>
               );
             })}
           </div>
-        ))}
-        <div className="rtp-cash-row rtp-cash-total"><span>Total</span><span>${money(openingTotal)}</span><span>${money(closingTotal)}</span></div>
+
+          <div className="rtp-section">Tips, sales & covers</div>
+          <div className="rtp-fields">
+            {fields.map((f) => (
+              <label className="rtp-field" key={f.label}>
+                <span>{f.label}</span>
+                <input
+                  type="number"
+                  inputMode="decimal"
+                  value={f.value}
+                  placeholder={f.placeholder || "0.00"}
+                  disabled={readOnly || f.disabled}
+                  onChange={(e) => f.onChange(e.target.value)}
+                />
+                {f.note && <em className="rtp-note">{f.note}</em>}
+              </label>
+            ))}
+          </div>
+
+          <div className="rtp-section">
+            Payouts
+            {!readOnly && <button type="button" className="rtp-btn rtp-btn-small" onClick={onAddPayout}>+ Add</button>}
+          </div>
+          {payouts.length === 0 && <div className="rtp-empty">None</div>}
+          {payouts.map((it) => (
+            <div className="rtp-payout" key={it.id}>
+              <input type="text" placeholder="What was it" value={it.desc} disabled={readOnly} onChange={(e) => onPayout(it.id, "desc", e.target.value)} />
+              <input type="number" inputMode="decimal" placeholder="0.00" value={it.amount} disabled={readOnly} onChange={(e) => onPayout(it.id, "amount", e.target.value)} />
+              {!readOnly && <button type="button" className="rtp-btn rtp-btn-small" aria-label="Remove payout" onClick={() => onRemovePayout(it.id)}>×</button>}
+            </div>
+          ))}
+        </div>
+
+        <div className="rtp-col">
+          <div className="rtp-section">Opening bank / closing count <span className="rtp-hint">dollar amounts, not bill counts</span></div>
+          <div className="rtp-cash">
+            <div className="rtp-cash-row rtp-cash-head"><span /> <span>Opening</span><span>Closing</span></div>
+            {denoms.map((d) => (
+              <div className="rtp-cash-row" key={d}>
+                <span className="rtp-denom">{denomLabel(d)}</span>
+                {["open", "close"].map((which) => {
+                  const v = (which === "open" ? openingCounts : closingCounts)[d];
+                  return (
+                    <div
+                      key={which}
+                      role="button"
+                      tabIndex={readOnly ? -1 : 0}
+                      aria-disabled={readOnly}
+                      className={`rtp-cell ${v ? "" : "rtp-cell-empty"}`}
+                      onClick={(e) => !readOnly && onCashTap(e, which, d)}
+                      onKeyDown={(e) => !readOnly && key(e, (ev) => onCashTap(ev, which, d))}
+                    >
+                      <span className="rtp-cell-val">{v ? `$${v}` : "—"}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
+            <div className="rtp-cash-row rtp-cash-total"><span>Total</span><span>${money(openingTotal)}</span><span>${money(closingTotal)}</span></div>
+          </div>
+        </div>
       </div>
 
       {warnings.length > 0 && (
