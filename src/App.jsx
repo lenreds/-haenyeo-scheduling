@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useEffect, useRef } from "react";
-import { Check, X, AlertTriangle, Users, Package, Clock, ChevronLeft, ChevronRight, Printer, FileDown, Calendar, CalendarDays, StickyNote, Receipt, Lock, Unlock, LogOut } from "lucide-react";
+import { Check, X, AlertTriangle, Users, Package, Clock, ChevronLeft, ChevronRight, Printer, FileDown, Calendar, CalendarDays, StickyNote, Receipt, Lock, Unlock } from "lucide-react";
+import Sidebar, { NAV_ITEMS } from "./components/Sidebar.jsx";
 import {
   fetchInitial,
   fetchRailRequests,
@@ -342,22 +343,27 @@ function roleForCell(code, fallbackRole) {
   if (code === "KITCHEN") return "Kitchen";
   return roleFromCode(code) || fallbackRole || null;
 }
-// Readable chip triple (text/border/tint) per role accent for the live grid.
-// Screen-only cell chip styling for the Set Schedule grid (the PDF sheet and
-// schedule email read ROLE_COLOR directly, so they are unaffected). Dark Split:
-// same role hues as before, inverted for a dark surface — tinted background,
-// accent-colored text — instead of the previous dark-on-pale-tint.
-const CELL_STYLE_BY_ACCENT = {
-  "#c8956c": { color: "#e0b48f", borderColor: "rgba(200,149,108,0.55)", background: "rgba(200,149,108,0.14)" },
-  "#5a8a6a": { color: "#7fb392", borderColor: "rgba(90,138,106,0.55)", background: "rgba(90,138,106,0.14)" },
-  "#4a7a9b": { color: "#79a8c7", borderColor: "rgba(74,122,155,0.55)", background: "rgba(74,122,155,0.14)" },
-  "#8a5a9b": { color: "#b184c2", borderColor: "rgba(138,90,155,0.55)", background: "rgba(138,90,155,0.14)" },
-  "#888888": { color: "#aaaaaa", borderColor: "rgba(136,136,136,0.55)", background: "rgba(136,136,136,0.14)" },
-  "#2a9d8f": { color: "#5fc9bb", borderColor: "rgba(42,157,143,0.55)", background: "rgba(42,157,143,0.14)" },
+// Screen-only chip colours for the live grids (Set Schedule cells, Calendar
+// week view) — redesign round, 2026-11-16. A chip reads by its CUT: FC and SC
+// sit on the neutral chip, CL is copper, RO is amber; the role comes from the
+// row's group header and the cross-role label, so the cell no longer repeats
+// it in colour. Values are theme tokens from the stylesheet's :root block, so
+// they flip with Light/Dark. The PDF sheet and the schedule email read
+// ROLE_COLOR directly and are unaffected.
+const CUT_CHIP_STYLE = {
+  chip: { color: "var(--chip-text)", borderColor: "var(--line2)", background: "var(--chip)" },
+  cl: { color: "var(--accent)", borderColor: "var(--accent-line)", background: "var(--accent-soft)" },
+  ro: { color: "var(--ro-text)", borderColor: "var(--ro-line)", background: "var(--ro-bg)" },
 };
-function roleCellStyle(role) {
-  const accent = ROLE_COLOR[role];
-  return accent ? CELL_STYLE_BY_ACCENT[accent] : undefined;
+// Does a shift label carry the tag as a token of its own ("5pm-CL", "RO",
+// "4pm-FC")? Letters either side disqualify it, so "CLOSER" is not CL.
+function labelHasTag(label, tag) {
+  return new RegExp(`(^|[^A-Z])${tag}([^A-Z]|$)`).test(String(label || "").toUpperCase());
+}
+function cutChipStyle(label) {
+  if (labelHasTag(label, "RO")) return CUT_CHIP_STYLE.ro;
+  if (labelHasTag(label, "CL")) return CUT_CHIP_STYLE.cl;
+  return CUT_CHIP_STYLE.chip;
 }
 // The Tip Sheet floor check's printed "passes" line — one wording for every
 // calculation method, true for all of them, so paper looks the same whichever
@@ -365,21 +371,11 @@ function roleCellStyle(role) {
 const FLOOR_CHECK_PASS = "✓ Reconciled with floor cash + CC";
 // A Set Schedule cell holding a code that isn't a current option: dashed red,
 // so it reads as something to query, never as a day off.
-const DEAD_CELL_STYLE = { color: "#f0b86b", borderColor: "#e0796c", borderStyle: "dashed", background: "rgba(224,121,108,0.16)" };
-// Dark-theme "Off" chip (Management grid). The old inline SHIFT_META.OFF colors
-// were tuned for the light card and left a tan border on the dark surface.
-const OFF_CHIP_DARK = { color: "#555555", borderColor: "#2a2a2a", background: "transparent" };
-
-// Midnight Solid (MIDNIGHT-SOLID-TIPSHEET-RAIL-BRIEF item 1): the Calendar week
-// view is a read-only sheet on near-black, where every chip is the same solid
-// #1a1a1a and only the INK carries the role. That keeps a dense grid scannable
-// by hue without seven competing background colors. Off days drop the chip
-// entirely and show a recessive dot instead.
-const MIDNIGHT = { bg: "#0a0a0a", panel: "#0f0f0f", chip: "#1a1a1a", line: "#2a2a2a", row: "#141414", off: "#222222" };
-function calChipStyle(role) {
-  const accent = ROLE_COLOR[role];
-  return { background: MIDNIGHT.chip, borderColor: MIDNIGHT.line, color: accent || "#aaaaaa" };
-}
+const DEAD_CELL_STYLE = { color: "var(--warn-text)", borderColor: "var(--danger-text)", borderStyle: "dashed", background: "var(--danger-bg)" };
+// "Off" chip (Management grid): quiet, outline only, in theme tokens.
+const OFF_CHIP_DARK = { color: "var(--dim)", borderColor: "var(--line2)", background: "transparent" };
+// Coverage gap in the Calendar week view keeps its red warning.
+const GAP_CHIP_STYLE = { color: "var(--danger-text)", borderColor: "var(--danger-text)", background: "var(--danger-bg)" };
 // Cross-role label (CROSS-ROLE-LABEL-BRIEF): when someone works outside their
 // primary role, a small role name renders under the shift in a lighter shade
 // of the same accent. Mirrored in api/_lib/emails.js for the schedule email.
@@ -1341,8 +1337,38 @@ function railDatesMatch(datesStr, isoStr) {
 
 /* ------------------------------------ APP ------------------------------------- */
 
+// Light/Dark and the sidebar's collapsed state live in localStorage under
+// these keys (index.html reads THEME_KEY before first paint). localStorage
+// can be missing or throw (private mode, storage full), so every read and
+// write is wrapped and the app simply forgets the choice when it can't save.
+const THEME_KEY = "hmng-theme";
+const SIDEBAR_KEY = "hmng-sidebar-collapsed";
+function readStoredTheme() {
+  try { return localStorage.getItem(THEME_KEY) === "light" ? "light" : "dark"; } catch { return "dark"; }
+}
+function readStoredSidebar() {
+  try { return localStorage.getItem(SIDEBAR_KEY) === "1"; } catch { return false; }
+}
+
 export default function SchedulingHub({ session, onSignOut }) {
   const [tab, setTab] = useState("rail"); // 'rail' | 'calendar' | 'template'
+  // Visual only (redesign round): which theme and whether the sidebar is an
+  // icon rail. The theme is an attribute on <html> so the :root tokens flip.
+  const [theme, setThemeState] = useState(readStoredTheme);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(readStoredSidebar);
+  function setTheme(next) {
+    const t = next === "light" ? "light" : "dark";
+    setThemeState(t);
+    try { localStorage.setItem(THEME_KEY, t); } catch { /* choice not remembered */ }
+  }
+  function toggleSidebar() {
+    const next = !sidebarCollapsed;
+    setSidebarCollapsed(next);
+    try { localStorage.setItem(SIDEBAR_KEY, next ? "1" : "0"); } catch { /* choice not remembered */ }
+  }
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+  }, [theme]);
   const [pending, setPending] = useState(initialPending);
   const [log, setLog] = useState(initialLog);
   const [nameToId, setNameToId] = useState({});
@@ -4788,7 +4814,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                 value={value}
                 disabled={scheduleFrozen}
                 title={dead?.title}
-                style={dead ? DEAD_CELL_STYLE : value === "OFF" ? undefined : roleCellStyle(workedRole)}
+                style={dead ? DEAD_CELL_STYLE : value === "OFF" ? undefined : cutChipStyle(shiftLabelForType(value))}
                 onChange={(e) => setPlaceholderShift(groupKey, idx, realWeekday, e.target.value)}
               >
                 {dead && <option value={dead.code}>{dead.label}</option>}
@@ -5604,9 +5630,9 @@ export default function SchedulingHub({ session, onSignOut }) {
         .nr-row-status { color: #85897F; font-size: 12px; }
         /* Today at a Glance group labels — same small-caps label treatment as
            the Tip Sheet's section labels; no rule line. */
-        .rs-glance-group { font-family: 'Space Mono', monospace; font-size: 9px; letter-spacing: 1.5px; text-transform: uppercase; color: #666; padding: 10px 0 2px; }
+        .rs-glance-group { font-family: 'Space Mono', monospace; font-size: 9px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--dim); padding: 10px 0 2px; }
         .rs-glance-group:first-child { padding-top: 0; }
-        .rs-glance-swing { margin-left: 5px; font-size: 10.5px; color: #666; }
+        .rs-glance-swing { margin-left: 5px; font-size: 10.5px; color: var(--dim); }
 
         .nr-log-row { padding: 7px 0; border-bottom: 1px solid #E8E9E4; font-size: 12px; }
         .nr-log-row:last-child { border-bottom: none; }
@@ -5888,6 +5914,16 @@ export default function SchedulingHub({ session, onSignOut }) {
           .recon-row.final span { color: #8a5a20 !important; }
           .tabs, .hub-header, .print-btn, .custom-toggle, .publish-btn, .published-badge, .back-btn, .subject-preview,
           .save-status, .day-popup-backdrop { display: none !important; }
+          /* Liquid Glass is screen-only: no sidebar, no blobs, no blur, no
+             panel shadow, and the content column prints as a plain block. */
+          .sidebar, .glass-bg { display: none !important; }
+          .hub { display: block !important; }
+          .hub-main { display: block !important; padding: 0 !important; }
+          .nr-card, .cal-card, .hub-header {
+            -webkit-backdrop-filter: none !important; backdrop-filter: none !important;
+            box-shadow: none !important;
+          }
+          .cal-card { border-radius: 10px !important; }
           .cal-card { box-shadow: none !important; }
           /* Tip Sheet print: hide helper text, buttons, navigation, finalized banner; outline-only boxes; fit one page */
           .footer-note, .recon-note, .fm-banner, .week-header, .screen-only { display: none !important; }
@@ -5959,10 +5995,10 @@ export default function SchedulingHub({ session, onSignOut }) {
           body.printing-qr .qr-print-sheet { display: block !important; }
           body.printing-duties .hub > *:not(.duties-print) { display: none !important; }
           body.printing-duties .duties-print { display: block !important; page: dutiesPortrait; }
-          .duties-print { color: #1a1a1a; font-family: 'Manrope', sans-serif; }
+          .duties-print { color: var(--s3); font-family: 'Manrope', sans-serif; }
           .duties-print-head { border-bottom: 2px solid #2b2a25; padding-bottom: 10px; margin-bottom: 18px; }
           .duties-print-brand { font-family: 'Space Mono', monospace; font-weight: 700; font-size: 16px; letter-spacing: 5px; }
-          .duties-print-title { font-family: 'Space Mono', monospace; font-weight: 700; font-size: 10.5px; letter-spacing: 2px; text-transform: uppercase; color: #c8956c; margin-top: 3px; }
+          .duties-print-title { font-family: 'Space Mono', monospace; font-weight: 700; font-size: 10.5px; letter-spacing: 2px; text-transform: uppercase; color: var(--accent); margin-top: 3px; }
           .duties-print-role { break-inside: avoid; margin-bottom: 16px; }
           .duties-print-role h2 { font-size: 14px; margin: 0 0 6px; padding-bottom: 3px; border-bottom: 1px solid #d0d0d0; }
           .duties-print-role ol { margin: 0; padding-left: 20px; font-size: 12px; line-height: 1.55; }
@@ -5983,6 +6019,12 @@ export default function SchedulingHub({ session, onSignOut }) {
         /* html2canvas doesn't evaluate @media print, so the Tip Sheet PDF needs
            its own light restore — same reason the rules above exist. */
         .tip-pdf-mode, .tip-pdf-mode .cal-card { background: #fff !important; color: #2B2A25 !important; }
+        /* The capture must look as it did before the glass skin: the card's
+           old 1px #1e1e1e hairline and 10px corners, no blur, no shadow. */
+        .tip-pdf-mode, .tip-pdf-mode .cal-card {
+          border-color: #1e1e1e !important; border-radius: 10px !important;
+          -webkit-backdrop-filter: none !important; backdrop-filter: none !important; box-shadow: none !important;
+        }
         .tip-pdf-mode .emp-name, .tip-pdf-mode .tip-stat, .tip-pdf-mode .check-value,
         .tip-pdf-mode .tip-name-display, .tip-pdf-mode .tip-position,
         .tip-pdf-mode .denom-row.totals, .tip-pdf-mode .recon-row.final label { color: #2B2A25 !important; }
@@ -6036,15 +6078,15 @@ export default function SchedulingHub({ session, onSignOut }) {
         /* QR print sheet — branded single portrait page. Colors are accents on
            white (B&W friendly); color-adjust keeps the dark band + pills from
            being stripped by the browser's print defaults. */
-        .qr-print-sheet { font-family: 'Manrope', sans-serif; color: #1a1a1a; max-width: 760px; margin: 0 auto; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-        .qrs-band { background: #1a1a1a; border-radius: 12px; padding: 16px 20px 13px; text-align: center; }
+        .qr-print-sheet { font-family: 'Manrope', sans-serif; color: var(--s3); max-width: 760px; margin: 0 auto; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+        .qrs-band { background: var(--s3); border-radius: 12px; padding: 16px 20px 13px; text-align: center; }
         .qrs-band-row { display: flex; align-items: center; justify-content: center; gap: 13px; }
         .qrs-band-icon { width: 34px; height: 34px; object-fit: contain; }
         .qrs-band-word { font-family: 'Space Mono', monospace; font-weight: 700; font-size: 23px; letter-spacing: 8px; color: #fff; }
-        .qrs-band-sub { font-family: 'Space Mono', monospace; font-weight: 700; font-size: 9.5px; letter-spacing: 2.2px; color: #c8956c; margin-top: 7px; }
-        .qrs-register { display: flex; align-items: center; gap: 20px; background: #fff8f4; border: 2px solid #c8956c; border-radius: 10px; padding: 12px 18px; margin: 13px 0; }
+        .qrs-band-sub { font-family: 'Space Mono', monospace; font-weight: 700; font-size: 9.5px; letter-spacing: 2.2px; color: var(--accent); margin-top: 7px; }
+        .qrs-register { display: flex; align-items: center; gap: 20px; background: #fff8f4; border: 2px solid var(--accent); border-radius: 10px; padding: 12px 18px; margin: 13px 0; }
         .qrs-register-qr { width: 96px; height: 96px; flex-shrink: 0; }
-        .qrs-start-pill { display: inline-block; background: #c8956c; color: #fff; border-radius: 999px; padding: 3px 13px; font-weight: 800; font-size: 10px; letter-spacing: 1.5px; }
+        .qrs-start-pill { display: inline-block; background: var(--accent); color: #fff; border-radius: 999px; padding: 3px 13px; font-weight: 800; font-size: 10px; letter-spacing: 1.5px; }
         .qrs-register-title { font-weight: 800; font-size: 16px; margin-top: 6px; }
         .qrs-register-text { font-size: 11.5px; line-height: 1.45; margin-top: 4px; color: #333; }
         .qrs-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 11px; }
@@ -6142,27 +6184,27 @@ export default function SchedulingHub({ session, onSignOut }) {
         .tip-guard-tick input { width: 20px; height: 20px; flex: none; }
         /* Tip Sheet tap panels (components/TipPickers.jsx). Panel only — the
            sheet's own cells keep their size. Every target is >= 44px tall. */
-        .tip-picker { position: fixed; z-index: 200; width: min(440px, calc(100vw - 16px)); box-sizing: border-box; padding: 12px; border-radius: 12px; background: var(--s2, #141414); border: 1px solid var(--line2, #2a2a2a); color: var(--txt, #fff); box-shadow: 0 16px 40px rgba(0,0,0,0.55); font-family: 'Manrope', sans-serif; }
+        .tip-picker { position: fixed; z-index: 200; width: min(440px, calc(100vw - 16px)); box-sizing: border-box; padding: 12px; border-radius: 12px; background: var(--s2, var(--s2)); border: 1px solid var(--line2, var(--line2)); color: var(--txt, #fff); box-shadow: 0 16px 40px rgba(0,0,0,0.55); font-family: 'Manrope', sans-serif; }
         .tip-picker .tp-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
         .tip-picker .tp-title { font-family: 'Space Mono', monospace; font-weight: 700; font-size: 12px; letter-spacing: 0.6px; text-transform: uppercase; color: var(--txt2, #aaa); }
-        .tip-picker .tp-delta { font-size: 12.5px; color: var(--accent, #c8956c); white-space: nowrap; }
+        .tip-picker .tp-delta { font-size: 12.5px; color: var(--accent); white-space: nowrap; }
         .tip-picker .tp-row { display: flex; align-items: center; gap: 6px; }
         .tip-picker .tp-row + .tp-row { margin-top: 10px; }
         .tip-picker .tp-chips { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; flex: 1; min-width: 0; }
         .tip-picker .tp-chip { min-height: 44px; min-width: 0; padding: 0 2px; border-radius: 8px; border: 1.5px solid var(--line2, #333); background: transparent; color: inherit; font-family: inherit; font-size: 13px; font-weight: 600; white-space: nowrap; cursor: pointer; }
-        .tip-picker .tp-chip.sched { border-style: dashed; border-color: var(--accent, #c8956c); }
-        .tip-picker .tp-chip.on { background: var(--accent, #c8956c); border-color: var(--accent, #c8956c); color: #111; }
+        .tip-picker .tp-chip.sched { border-style: dashed; border-color: var(--accent); }
+        .tip-picker .tp-chip.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
         .tip-picker .tp-arrow { width: 44px; height: 44px; flex: none; display: inline-flex; align-items: center; justify-content: center; border-radius: 8px; border: 1px solid var(--line2, #333); background: transparent; color: inherit; cursor: pointer; }
         .tip-picker .tp-arrow:disabled { opacity: 0.3; cursor: default; }
         /* 16px stops iOS zooming the page when the field is focused. */
         .tip-picker .tp-type input { flex: 1; min-width: 0; height: 44px; box-sizing: border-box; padding: 0 12px; border-radius: 8px; border: 1px solid var(--line2, #333); background: var(--bg, #0c0c0c); color: inherit; font-family: inherit; font-size: 16px; }
-        .tip-picker .tp-type input:focus { outline: none; border-color: var(--accent, #c8956c); }
+        .tip-picker .tp-type input:focus { outline: none; border-color: var(--accent); }
         .tip-picker .tp-btn { min-height: 44px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--line2, #333); background: transparent; color: inherit; font-family: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
-        .tip-picker .tp-btn-main { background: var(--accent, #c8956c); border-color: var(--accent, #c8956c); color: #111; }
+        .tip-picker .tp-btn-main { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
         .tip-picker .tp-btn-quiet { color: var(--txt2, #aaa); margin-left: auto; }
         .tip-picker .tp-btn:disabled { opacity: 0.35; cursor: default; }
         .tip-picker .tp-note { margin-top: 8px; font-size: 12px; color: var(--txt2, #aaa); line-height: 1.4; }
-        .tip-picker .tp-warn { color: #e7b36a; }
+        .tip-picker .tp-warn { color: var(--warn-text); }
         .tip-picker .tp-foot { margin-top: 10px; }
         .manual-add-btn { margin-left: auto; font-family: 'Plus Jakarta Sans', sans-serif; font-weight: 700; font-size: 11.5px; padding: 5px 12px; border-radius: 8px; border: 1px solid rgba(47,52,50,0.15); background: #2F3432; color: #F5F0E3; cursor: pointer; text-transform: none; letter-spacing: 0; }
         .manual-field-label { display: block; font-family: 'Space Mono', monospace; font-size: 10.5px; letter-spacing: 0.6px; text-transform: uppercase; color: #85897F; margin: 12px 0 4px; }
@@ -6188,7 +6230,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         .notes-modal { background: #F5F0E3; color: #2B2A25; border-radius: 12px; padding: 18px 20px; width: min(560px, 94vw); max-height: 82vh; overflow-y: auto; box-shadow: 0 18px 48px rgba(0,0,0,0.45); animation: zoomIn 0.18s ease; }
         .notes-add { display: flex; gap: 8px; margin: 12px 0 14px; }
         .notes-input { flex: 1; font-family: 'Manrope', sans-serif; font-size: 12.5px; padding: 8px 10px; border: 1px solid #cfc7b4; border-radius: 7px; background: #fffdf7; color: #2B2A25; }
-        .notes-input:focus { outline: none; border-color: #c8956c; }
+        .notes-input:focus { outline: none; border-color: var(--accent); }
         .notes-empty { font-size: 12px; color: #7d7666; font-style: italic; padding: 10px 2px 4px; }
         .notes-list { display: flex; flex-direction: column; gap: 8px; }
         .notes-row { display: flex; align-items: flex-start; gap: 8px; background: #fffdf7; border: 1px solid #e2dbc9; border-radius: 8px; padding: 9px 10px; }
@@ -6262,11 +6304,14 @@ export default function SchedulingHub({ session, onSignOut }) {
            Layout/behaviour is untouched here; colors and surfaces only.
            ================================================================== */
         .hub {
-          --bg: #0c0c0c; --s1: #111111; --s2: #141414;
-          --line: #1e1e1e; --line2: #222222;
-          --txt: #ffffff; --txt2: #aaaaaa; --muted: #555555;
-          --accent: #c8956c;
-          background: #0c0c0c; color: #ffffff; padding: 0 0 60px;
+          /* Legacy aliases mapped onto the Copper & Sage tokens (defined on
+             :root at the end of this sheet, redesign round 2026-11-16).
+             --muted here is the old "dim label" role; --txt2 (secondary
+             text) is set on :root so there is no var() cycle. */
+          --s1: var(--glass-bg); --s2: var(--glass-inner); --s3: var(--raised);
+          --line: var(--line-soft); --line2: var(--border-strong);
+          --txt: var(--text); --muted: var(--dim);
+          background: transparent; color: var(--txt); padding: 0 0 60px;
         }
 
         /* ---- global header + tab bar ---- */
@@ -6302,7 +6347,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         .recon-title, .denom-header, .check-label, .nr-day-name { color: var(--muted); }
         .nr-row, .nr-log-row, .roster-row { border-color: var(--line); }
         .nr-day-num { color: var(--txt); }
-        .nr-day-today { background: rgba(200,149,108,0.14); }
+        .nr-day-today { background: var(--accent-soft); }
         .nr-day-today .nr-day-name, .nr-day-today .nr-day-num { color: var(--accent); }
         .nr-holiday-note, .nr-log-time { color: var(--muted); }
         .nr-log-neutral { color: var(--txt2); }
@@ -6317,7 +6362,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         .nr-manager-note::placeholder, .notes-input::placeholder, .tip-time-input::placeholder { color: var(--muted); }
         .nr-manager-note:focus, .notes-input:focus, .cell-select:focus { border-color: var(--accent); background: var(--s2); }
         .tip-time-input { color: var(--txt); border-bottom-color: var(--line2); }
-        .nr-btn-approve { background: var(--accent); color: #0c0c0c; }
+        .nr-btn-approve { background: var(--accent); color: var(--accent-ink); }
         .nr-btn-deny { background: var(--line); color: var(--txt2); }
         .nr-btn-partial { background: var(--line); color: var(--txt2); border-color: var(--line2); }
         .print-btn { background: var(--s2); color: var(--txt); border: 1px solid var(--line2); }
@@ -6325,36 +6370,36 @@ export default function SchedulingHub({ session, onSignOut }) {
         .print-btn.lock-active { background: #B23A2F; color: #fff; border-color: #B23A2F; }
         .print-btn.finalized-active { background: #5a8a6a; color: #fff; border-color: #5a8a6a; }
         .subtab-btn { border-color: var(--line2); color: var(--txt2); }
-        .subtab-btn.active { background: var(--accent); color: #0c0c0c; border-color: var(--accent); }
+        .subtab-btn.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
         .subtab-btn:hover:not(.active) { background: var(--line); color: var(--txt); }
         .back-btn { color: var(--txt2); }
         .back-btn:hover { color: var(--txt); }
-        .today-btn { background: var(--accent); border-color: var(--accent); color: #0c0c0c; }
+        .today-btn { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
         .today-btn:disabled { background: transparent; color: var(--muted); border-color: var(--line2); }
         .custom-toggle { background: var(--s2); border-color: var(--line2); color: var(--txt2); }
         .add-staff-btn { background: var(--s2); border-color: var(--line2); color: var(--txt2); }
         .add-staff-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
         .slot-remove-btn { color: var(--muted); }
-        .slot-remove-btn:hover { color: #e79289; background: rgba(178,58,47,0.16); }
-        .custom-toggle.on { background: var(--accent); border-color: var(--accent); color: #0c0c0c; }
+        .slot-remove-btn:hover { color: var(--danger-text); background: var(--danger-bg); }
+        .custom-toggle.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
         .add-payout-btn { color: var(--accent); border-color: var(--line2); }
         .tip-out-toggle.on { color: var(--accent); border-color: var(--line2); }
-        .tip-out-toggle:not(.on) { color: #e79289; }
+        .tip-out-toggle:not(.on) { color: var(--danger-text); }
         /* Lighter tint on the dark screen (#B23A2F is ~3.2:1 there); print and
            the PDF keep #B23A2F via their !important rules. */
-        .tip-out-na { color: #e79289; }
-        .week-range-current { background: rgba(200,149,108,0.18); color: var(--accent); }
+        .tip-out-na { color: var(--danger-text); }
+        .week-range-current { background: var(--accent-soft); color: var(--accent); }
 
         /* ---- calendar ---- */
         .cal-day { background: var(--s2); border-color: var(--line); }
         .cal-day:hover { box-shadow: 0 6px 14px rgba(0,0,0,0.5); }
         .cal-day-num { color: var(--txt); }
         .cal-day.today { border-color: var(--accent); }
-        .cal-day.today .cal-day-num { background: var(--accent); color: #0c0c0c; }
-        .today-pill { background: var(--accent); color: #0c0c0c; }
+        .cal-day.today .cal-day-num { background: var(--accent); color: var(--accent-ink); }
+        .today-pill { background: var(--accent); color: var(--accent-ink); }
         .cal-grid.multi-month .cal-month-label { color: var(--txt2); }
         .cal-grid.multi-month .cal-month-label.current { color: var(--accent); }
-        .week-table th.today-col, .week-table td.today-col { background: rgba(200,149,108,0.10); }
+        .week-table th.today-col, .week-table td.today-col { background: var(--accent-soft); }
         .week-table th.today-col { color: var(--accent); border-bottom-color: var(--accent); }
         .emp-name, .week-table td.shift-cell { border-color: var(--line); }
         .role-header { color: var(--accent); border-color: var(--line); }
@@ -6368,13 +6413,13 @@ export default function SchedulingHub({ session, onSignOut }) {
         .recon-row.final span { color: var(--accent); }
         .denom-table, .denom-row.totals { border-color: var(--line); color: var(--txt); }
         .payouts-block { border-color: var(--line); }
-        .check-box.match { background: rgba(90,138,106,0.14); border-color: #5a8a6a; }
-        .check-box.mismatch { background: rgba(200,149,108,0.14); border-color: var(--accent); }
-        .tip-finalized-banner { background: rgba(90,138,106,0.14); border-color: #5a8a6a; color: #8fce9f; }
-        .tip-locked-banner { background: rgba(178,58,47,0.16); border-color: #B23A2F; color: #e79289; }
-        .tip-off-note { background: rgba(200,149,108,0.14); border-color: var(--accent); color: var(--accent); }
+        .check-box.match { background: var(--ok-bg); border-color: #5a8a6a; }
+        .check-box.mismatch { background: var(--accent-soft); border-color: var(--accent); }
+        .tip-finalized-banner { background: var(--ok-bg); border-color: #5a8a6a; color: var(--ok-text); }
+        .tip-locked-banner { background: var(--danger-bg); border-color: #B23A2F; color: var(--danger-text); }
+        .tip-off-note { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
         .tip-out-why, .closing-sum-note { color: var(--txt2); }
-        .closing-sum-note.mismatch { background: rgba(200,149,108,0.14); border-color: var(--accent); color: var(--accent); }
+        .closing-sum-note.mismatch { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
         .tip-locked-banner .tip-finalized-sub { color: var(--txt2); }
         .tip-finalized-sub { color: var(--txt2); }
         .tip-locked input, .tip-locked .add-payout-btn, .tip-locked .custom-toggle { background: var(--line) !important; }
@@ -6413,13 +6458,13 @@ export default function SchedulingHub({ session, onSignOut }) {
         .rs-gmail-body { display: flex; flex-direction: column; align-items: flex-start; line-height: 1.2; }
         .rs-gmail-label { font-family: 'Space Mono', monospace; font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: var(--txt2); }
         .rs-gmail-sub { font-size: 9.5px; color: var(--muted); }
-        .rs-gmail-bad .rs-gmail-sub { color: #e79289; }
+        .rs-gmail-bad .rs-gmail-sub { color: var(--danger-text); }
         /* Shown only when Google rejected the stored token (or there is none). */
-        .rs-gmail-reconnect { font-family: 'Space Mono', monospace; font-size: 10px; letter-spacing: 1px; text-transform: uppercase; color: #e79289; border: 1px solid #B23A2F; border-radius: 5px; padding: 3px 7px; text-decoration: none; white-space: nowrap; }
-        .rs-gmail-reconnect:hover { background: rgba(178,58,47,0.16); }
+        .rs-gmail-reconnect { font-family: 'Space Mono', monospace; font-size: 10px; letter-spacing: 1px; text-transform: uppercase; color: var(--danger-text); border: 1px solid #B23A2F; border-radius: 5px; padding: 3px 7px; text-decoration: none; white-space: nowrap; }
+        .rs-gmail-reconnect:hover { background: var(--danger-bg); }
         /* Lets the Reconnect link drop below on a phone instead of overflowing. */
         .rs-head { flex-wrap: wrap; row-gap: 6px; }
-        .send-reconnect { display: flex; align-items: flex-start; gap: 7px; margin: 0 0 12px; padding: 9px 12px; border: 1px solid #B23A2F; background: rgba(178,58,47,0.16); color: #e79289; border-radius: 7px; font-size: 12px; line-height: 1.45; }
+        .send-reconnect { display: flex; align-items: flex-start; gap: 7px; margin: 0 0 12px; padding: 9px 12px; border: 1px solid #B23A2F; background: var(--danger-bg); color: var(--danger-text); border-radius: 7px; font-size: 12px; line-height: 1.45; }
         .send-reconnect a { color: inherit; font-weight: 700; }
 
         /* Tip sheet shortcut on the Rail (trial). A phone tool: every control
@@ -6430,14 +6475,14 @@ export default function SchedulingHub({ session, onSignOut }) {
         .rtp-bar-sub { font-size: 12px; flex: 1; min-width: 0; }
         .rtp-bar-open { color: var(--accent); font-weight: 700; font-size: 12px; }
         .rtp { padding: 14px 20px 18px; border-bottom: 1px solid var(--line); color: var(--txt); }
-        .rtp-failed { color: #e79289; font-size: 13px; }
+        .rtp-failed { color: var(--danger-text); font-size: 13px; }
         .rtp-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 10px; }
         .rtp-title { font-weight: 700; font-size: 15px; }
         .rtp-sub { font-size: 11.5px; color: var(--txt2); margin-top: 2px; }
         .rtp-btn { min-height: 44px; min-width: 44px; padding: 0 14px; background: var(--s2); color: var(--txt); border: 1px solid var(--line2); border-radius: 8px; font-family: inherit; font-weight: 700; font-size: 13px; cursor: pointer; }
         .rtp-btn-small { margin-left: 10px; }
-        .rtp-ro { background: rgba(178,58,47,0.16); border: 1px solid #B23A2F; color: #e79289; border-radius: 8px; padding: 10px 12px; font-size: 13px; margin-bottom: 10px; }
-        .rtp-warn { background: rgba(200,149,108,0.14); border: 1px solid var(--accent); color: var(--txt); border-radius: 8px; padding: 10px 12px; font-size: 13px; margin-bottom: 10px; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+        .rtp-ro { background: var(--danger-bg); border: 1px solid #B23A2F; color: var(--danger-text); border-radius: 8px; padding: 10px 12px; font-size: 13px; margin-bottom: 10px; }
+        .rtp-warn { background: var(--accent-soft); border: 1px solid var(--accent); color: var(--txt); border-radius: 8px; padding: 10px 12px; font-size: 13px; margin-bottom: 10px; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
         .rtp-section { display: flex; align-items: center; margin: 16px 0 8px; font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); font-weight: 700; }
         .rtp-hint { margin-left: 8px; text-transform: none; letter-spacing: 0; color: var(--txt2); font-weight: 400; }
         .rtp-empty { font-size: 13px; color: var(--txt2); }
@@ -6479,7 +6524,7 @@ export default function SchedulingHub({ session, onSignOut }) {
           font-family: inherit; font-size: 12.5px; padding: 6px 9px;
           background: var(--s2); border: 1px solid var(--line); border-radius: 7px; color: var(--txt);
         }
-        .rs-quicknote-date { flex-shrink: 0; color-scheme: dark; }
+        .rs-quicknote-date { flex-shrink: 0; }
         .rs-quicknote-text { flex: 1; min-width: 180px; }
         .rs-quicknote-date:focus, .rs-quicknote-text:focus { outline: none; border-color: var(--accent); }
         .rs-quicknote-text::placeholder { color: var(--muted); }
@@ -6514,14 +6559,14 @@ export default function SchedulingHub({ session, onSignOut }) {
            it still reads as a strip, not a row of controls. */
         .rs-day { flex: 1; text-align: center; padding: 7px 2px 5px; border-radius: 8px; background: none; border: none; font-family: inherit; cursor: pointer; }
         .rs-day:hover:not(.rs-day-today) { background: var(--s2); }
-        .rs-day-today { background: rgba(200,149,108,0.12); }
+        .rs-day-today { background: var(--accent-soft); }
         .rs-day-name { font-family: 'Space Mono', monospace; font-size: 9px; letter-spacing: 1px; text-transform: uppercase; color: var(--muted); }
         .rs-day-num { font-family: 'Space Mono', monospace; font-weight: 700; font-size: 14px; color: var(--txt); margin-top: 2px; }
         .rs-day-today .rs-day-name, .rs-day-today .rs-day-num { color: var(--accent); }
         .rs-day-marks { display: flex; justify-content: center; gap: 3px; height: 8px; margin-top: 3px; }
         .rs-mark { width: 5px; height: 5px; border-radius: 50%; display: inline-block; }
         .rs-mark-today { background: var(--accent); }
-        .rs-mark-pending { background: #4a7a9b; }
+        .rs-mark-pending { background: var(--dot2); }
         .rs-mark-holiday { background: #B23A2F; }
         .rs-holiday-note { padding: 8px 20px 0; font-size: 10.5px; color: var(--muted); text-align: center; }
 
@@ -6545,9 +6590,9 @@ export default function SchedulingHub({ session, onSignOut }) {
 
         .rs-q { display: flex; width: 100%; text-align: left; gap: 9px; align-items: center; background: var(--s2); border: 1px solid var(--line); border-left: 3px solid transparent; border-radius: 10px; padding: 9px 10px; margin-bottom: 7px; cursor: pointer; font-family: inherit; }
         .rs-q:hover { border-color: var(--line2); }
-        .rs-q-sel { background: #181818; border-left-width: 3px; border-left-style: solid; }
+        .rs-q-sel { background: var(--s3); border-left-width: 3px; border-left-style: solid; }
         .rs-q-done { opacity: 0.45; cursor: default; }
-        .rs-q-avatar { width: 26px; height: 26px; border-radius: 50%; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; color: #0c0c0c; font-weight: 800; font-size: 12px; }
+        .rs-q-avatar { width: 26px; height: 26px; border-radius: 50%; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; color: var(--accent-ink); font-weight: 800; font-size: 12px; }
         .rs-q-body { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
         .rs-q-name { font-size: 13px; font-weight: 700; color: var(--txt); display: flex; align-items: center; gap: 5px; }
         .rs-q-urgent { width: 6px; height: 6px; border-radius: 50%; background: #B23A2F; flex-shrink: 0; }
@@ -6568,7 +6613,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         .rs-q-menu-item { display: block; width: 100%; text-align: left; background: none; border: none; cursor: pointer; font-family: inherit; font-size: 12.5px; font-weight: 600; color: var(--txt); padding: 7px 9px; border-radius: 6px; }
         .rs-q-menu-item:hover { background: var(--line); }
         .rs-q-menu-danger { color: #B23A2F; }
-        .rs-q-menu-danger:hover { background: rgba(178,58,47,0.12); }
+        .rs-q-menu-danger:hover { background: var(--danger-bg); }
 
         /* ---- archived section ---- */
         .rs-archived { margin-top: 18px; }
@@ -6588,10 +6633,10 @@ export default function SchedulingHub({ session, onSignOut }) {
         .rs-detail-avatar { width: 34px; height: 34px; font-size: 15px; }
         .rs-detail-name { font-size: 18px; font-weight: 800; color: var(--txt); }
         .rs-detail-type { display: flex; align-items: center; gap: 7px; margin-top: 5px; flex-wrap: wrap; }
-        .rs-type-badge { font-family: 'Space Mono', monospace; font-size: 9.5px; letter-spacing: 1px; text-transform: uppercase; color: #0c0c0c; padding: 2px 8px; border-radius: 20px; font-weight: 700; }
+        .rs-type-badge { font-family: 'Space Mono', monospace; font-size: 9.5px; letter-spacing: 1px; text-transform: uppercase; color: var(--accent-ink); padding: 2px 8px; border-radius: 20px; font-weight: 700; }
         .rs-detail-dates { margin-left: auto; font-family: 'Space Mono', monospace; font-weight: 700; font-size: 16px; color: var(--txt); white-space: nowrap; }
         .rs-detail-meta { font-size: 11px; color: var(--muted); margin: 10px 0 0; text-transform: uppercase; letter-spacing: 0.5px; font-family: 'Space Mono', monospace; }
-        .rs-detail-note { font-size: 13px; color: var(--txt2); line-height: 1.55; margin: 12px 0 14px; padding: 11px 13px; background: #101010; border-radius: 9px; border: 1px solid var(--line); white-space: pre-wrap; }
+        .rs-detail-note { font-size: 13px; color: var(--txt2); line-height: 1.55; margin: 12px 0 14px; padding: 11px 13px; background: var(--s1); border-radius: 9px; border: 1px solid var(--line); white-space: pre-wrap; }
 
         .rs-clear { margin-left: auto; background: none; border: none; cursor: pointer; font-family: 'Space Mono', monospace; font-size: 9.5px; letter-spacing: 1px; text-transform: uppercase; color: var(--muted); padding: 0; }
         .rs-clear:hover { color: var(--txt2); }
@@ -6632,7 +6677,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         }
         .rs-note-btn:hover:not(:disabled) { color: var(--txt); border-color: var(--line2); }
         .rs-note-btn:disabled { opacity: 0.4; cursor: default; }
-        .rs-note-del:hover:not(:disabled) { color: #e79289; border-color: #B23A2F; }
+        .rs-note-del:hover:not(:disabled) { color: var(--danger-text); border-color: #B23A2F; }
         .rs-note-add { display: flex; gap: 6px; align-items: center; border-top: 1px solid var(--line); padding-top: 8px; }
         .rs-note-input {
           flex: 1; min-width: 0; font-family: inherit; font-size: 12.5px; padding: 7px 9px;
@@ -6643,8 +6688,8 @@ export default function SchedulingHub({ session, onSignOut }) {
 
         /* ---- remaining light surfaces ---- */
         .fm-chip { background: rgba(74,122,155,0.16); border-color: rgba(74,122,155,0.5); }
-        .fm-chip-day { color: #79a8c7; }
-        .fm-chip-name { color: #cfe2ee; }
+        .fm-chip-day { color: var(--info-text); }
+        .fm-chip-name { color: var(--info-text); }
         .fm-chip-empty { background: var(--s2); border-color: var(--line2); }
         .fm-chip-empty .fm-chip-day { color: var(--muted); }
         .fm-chip-empty .fm-chip-name { color: var(--muted); }
@@ -6654,29 +6699,29 @@ export default function SchedulingHub({ session, onSignOut }) {
         .day-popup-close:hover { color: var(--txt); }
         .day-popup-item { border-color: var(--line); }
         .day-popup-status-pending { color: var(--accent); }
-        .day-popup-status-approved { color: #7fb392; }
+        .day-popup-status-approved { color: var(--ok-text); }
         /* Set Schedule grid dropdowns. The option list needs styling explicitly:
            an unstyled <option> computes to a transparent background and Chrome
            then paints the popup with the OS light default, which is where the
            white was coming from. Role-tinted selects keep their inline
            background (inline wins) — only the popup list is forced dark. */
         .cell-select, .cell-select.shift-select, .cell-select.role-select {
-          background: #141414; border-color: #2a2a2a; color: #ffffff;
+          background: var(--s2); border-color: var(--line2); color: var(--txt);
         }
         .cell-select option, .manual-field option, .staff-section-select option,
         .staff-primary-select option, select.cell-select option {
-          background: #141414; color: #ffffff;
+          background: var(--s2); color: var(--txt);
         }
         .cell-select:disabled { color: var(--txt2); }
         .nr-empty { border-color: var(--line2); }
         .empty-decisions, .empty-rail { color: var(--muted); }
         .manual-add-btn { color: var(--accent); border-color: var(--line2); background: var(--s2); }
-        .hero-item { background: rgba(200,149,108,0.12); border-color: rgba(200,149,108,0.35); }
+        .hero-item { background: var(--accent-soft); border-color: var(--accent-line); }
         .hero-label { color: var(--accent); }
         .hero-value { color: var(--accent); }
-        .subject-preview { background: rgba(200,149,108,0.10); border-color: rgba(200,149,108,0.45); color: var(--accent); }
+        .subject-preview { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent); }
         .footer-note { color: var(--txt2); }
-        .point-reference { color: #e08a7d; }
+        .point-reference { color: var(--danger-text); }
 
         /* ---- staff tab ---- */
         .staff-add, .staff-profile { background: var(--s2); border-color: var(--line); }
@@ -6694,22 +6739,22 @@ export default function SchedulingHub({ session, onSignOut }) {
            beside the card, so the grid lays out exactly as it did before. */
         .sched-name { position: relative; display: inline-block; cursor: default; }
         .sched-name.has-note { cursor: help; }
-        .sched-flag { position: absolute; left: 100%; top: 50%; transform: translateY(-50%); margin-left: 3px; padding: 0 1px; background: none; border: 0; font-size: 9px; line-height: 1; color: #c8956c; cursor: pointer; }
+        .sched-flag { position: absolute; left: 100%; top: 50%; transform: translateY(-50%); margin-left: 3px; padding: 0 1px; background: none; border: 0; font-size: 9px; line-height: 1; color: var(--accent); cursor: pointer; }
         .sched-flag-add { opacity: 0; transition: opacity 0.12s; }
         .emp-name:hover .sched-flag-add { opacity: 0.35; }
         .sched-flag-add:hover, .sched-flag-add:focus-visible { opacity: 1 !important; }
         .sched-note-tip, .sched-note-editor {
           position: absolute; left: 0; top: calc(100% + 5px); z-index: 60;
-          background: #1a1a1a; border: 0.5px solid #c8956c; border-radius: 6px; padding: 7px 10px;
+          background: var(--s3); border: 0.5px solid var(--accent); border-radius: 6px; padding: 7px 10px;
           font-family: 'Inter', sans-serif; font-size: 10.5px; font-weight: 400; letter-spacing: 0; text-transform: none;
-          color: #ddd; white-space: nowrap; box-shadow: 0 4px 12px rgba(0,0,0,0.5); text-align: left;
+          color: var(--txt); white-space: nowrap; box-shadow: 0 4px 12px rgba(0,0,0,0.5); text-align: left;
         }
         .sched-note-tip { display: none; pointer-events: none; }
         .sched-name:hover .sched-note-tip { display: block; }
         .sched-note-editor { display: flex; flex-direction: column; gap: 5px; }
-        .sched-note-editor input { width: 380px; background: #0f0f0f; border: 0.5px solid #2a2a2a; border-radius: 4px; padding: 5px 7px; color: #fff; font-family: inherit; font-size: 11px; outline: none; }
-        .sched-note-editor input:focus { border-color: #c8956c; }
-        .sched-note-hint { font-size: 9.5px; color: #666; }
+        .sched-note-editor input { width: 380px; background: var(--s1); border: 0.5px solid var(--line2); border-radius: 4px; padding: 5px 7px; color: #fff; font-family: inherit; font-size: 11px; outline: none; }
+        .sched-note-editor input:focus { border-color: var(--accent); }
+        .sched-note-hint { font-size: 9.5px; color: var(--dim); }
 
         .sched-wrap { position: relative; }
         /* Card's right edge sits 28px inside the wrap (its side padding); the
@@ -6721,83 +6766,80 @@ export default function SchedulingHub({ session, onSignOut }) {
            the card's right edge into this column, and a pinned pad would sit
            on top of those cells — so there it stays at the top as before. */
         .sched-pad-rail { position: absolute; top: 0; bottom: 0; left: calc(100% - 14px); width: 160px; pointer-events: none; }
-        .sched-pad { pointer-events: auto; width: 160px; box-sizing: border-box; background: #141414; border: 0.5px solid #2a2a2a; border-radius: 10px; padding: 10px; font-family: 'Inter', sans-serif; }
+        .sched-pad { pointer-events: auto; width: 160px; box-sizing: border-box; background: var(--s2); border: 0.5px solid var(--line2); border-radius: 10px; padding: 10px; font-family: 'Inter', sans-serif; }
         @media (min-width: 1100px) { .sched-pad { position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow-y: auto; } }
         .sched-pad.collapsed { width: 20px; padding: 0; border-radius: 6px; }
-        .sched-pad-tab { display: flex; flex-direction: column; align-items: center; gap: 6px; width: 100%; padding: 8px 0; background: none; border: 0; color: #c8956c; cursor: pointer; }
-        .sched-pad-count { font-size: 10px; color: #aaa; font-family: 'Space Mono', monospace; }
-        .sched-pad-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: #c8956c; }
+        .sched-pad-tab { display: flex; flex-direction: column; align-items: center; gap: 6px; width: 100%; padding: 8px 0; background: none; border: 0; color: var(--accent); cursor: pointer; }
+        .sched-pad-count { font-size: 10px; color: var(--txt2); font-family: 'Space Mono', monospace; }
+        .sched-pad-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent); }
         .sched-pad-head span { display: inline-flex; align-items: center; gap: 5px; }
-        .sched-pad-collapse { background: none; border: 0; padding: 2px; color: #666; cursor: pointer; display: inline-flex; }
-        .sched-pad-collapse:hover { color: #c8956c; }
-        .sched-pad-input { width: 100%; box-sizing: border-box; background: #0f0f0f; border: 0.5px solid #2a2a2a; border-radius: 6px; padding: 6px 8px; color: #fff; font-family: inherit; font-size: 10.5px; outline: none; margin-bottom: 8px; }
-        .sched-pad-input:focus { border-color: #c8956c; }
-        .sched-pad-input::placeholder { color: #555; }
-        .sched-pad-msg { font-size: 10px; color: #e79289; margin-bottom: 8px; line-height: 1.4; }
+        .sched-pad-collapse { background: none; border: 0; padding: 2px; color: var(--dim); cursor: pointer; display: inline-flex; }
+        .sched-pad-collapse:hover { color: var(--accent); }
+        .sched-pad-input { width: 100%; box-sizing: border-box; background: var(--s1); border: 0.5px solid var(--line2); border-radius: 6px; padding: 6px 8px; color: #fff; font-family: inherit; font-size: 10.5px; outline: none; margin-bottom: 8px; }
+        .sched-pad-input:focus { border-color: var(--accent); }
+        .sched-pad-input::placeholder { color: var(--dim); }
+        .sched-pad-msg { font-size: 10px; color: var(--danger-text); margin-bottom: 8px; line-height: 1.4; }
         .sched-pad-list { display: flex; flex-direction: column; gap: 5px; }
-        .sched-pad-chip { position: relative; background: #1a1a1a; border-radius: 4px; padding: 6px 16px 6px 8px; font-size: 10.5px; line-height: 1.4; color: #aaa; cursor: text; overflow-wrap: anywhere; }
-        .sched-pad-edit { width: 100%; box-sizing: border-box; border: 0.5px solid #c8956c; font-family: inherit; resize: vertical; outline: none; padding-right: 8px; }
-        .sched-pad-x { position: absolute; top: 3px; right: 3px; background: none; border: 0; padding: 0 2px; color: #666; font-size: 12px; line-height: 1; cursor: pointer; opacity: 0; }
+        .sched-pad-chip { position: relative; background: var(--s3); border-radius: 4px; padding: 6px 16px 6px 8px; font-size: 10.5px; line-height: 1.4; color: var(--txt2); cursor: text; overflow-wrap: anywhere; }
+        .sched-pad-edit { width: 100%; box-sizing: border-box; border: 0.5px solid var(--accent); font-family: inherit; resize: vertical; outline: none; padding-right: 8px; }
+        .sched-pad-x { position: absolute; top: 3px; right: 3px; background: none; border: 0; padding: 0 2px; color: var(--dim); font-size: 12px; line-height: 1; cursor: pointer; opacity: 0; }
         .sched-pad-chip:hover .sched-pad-x, .sched-pad-x:focus-visible { opacity: 1; }
-        .sched-pad-x:hover { color: #e79289; }
+        .sched-pad-x:hover { color: var(--danger-text); }
         .staff-role-check input { accent-color: var(--accent); }
-        .staff-delete-btn { background: rgba(178,58,47,0.15); border-color: rgba(178,58,47,0.5); color: #e0796c; }
-        .staff-delete-btn:hover { background: rgba(178,58,47,0.28); }
+        .staff-delete-btn { background: var(--danger-bg); border-color: rgba(178,58,47,0.5); color: var(--danger-text); }
+        .staff-delete-btn:hover { background: var(--danger-bg); }
         .staff-profile-val { background: var(--s1); border-color: var(--line2); color: var(--txt); }
         .staff-profile-val:hover { border-color: var(--accent); }
         .staff-profile-empty { color: var(--muted); }
-        .staff-profile-status.reg-yes { color: #7fb392; }
+        .staff-profile-status.reg-yes { color: var(--ok-text); }
         .qr-btn { background: var(--s2); border-color: var(--line2); color: var(--txt2); }
         .qr-btn:hover { background: var(--line); color: var(--txt); }
         .qr-caption { color: var(--txt2); }
-        .qr-subject { background: rgba(200,149,108,0.12); color: var(--accent); }
-        .info-updates { background: rgba(200,149,108,0.10); border-color: rgba(200,149,108,0.35); }
+        .qr-subject { background: var(--accent-soft); color: var(--accent); }
+        .info-updates { background: var(--accent-soft); border-color: var(--accent-line); }
         .info-updates-title { color: var(--accent); }
-        .info-update-row { border-color: rgba(200,149,108,0.22); }
-        .cal-off-chip { background: rgba(74,122,155,0.20); color: #9dc0d6; }
+        .info-update-row { border-color: var(--accent-soft); }
+        .cal-off-chip { background: rgba(74,122,155,0.20); color: var(--info-text); }
 
         /* ================= MIDNIGHT SOLID (brief item 1) =================
            Calendar week view + Rail move to a near-black base where chips are a
            single solid tone and role identity lives in the text color only. */
-        .hub { --bg: #0a0a0a; background: #0a0a0a; }
-        /* The page itself, behind .hub: anything wider than the screen (the tab
-           bar on a phone, the schedule grid) or any zoom-out shows this, not
-           white. Only while the app is mounted (this <style> is the app's), so
-           the sign-in screen keeps its own look. Print resets it to white. */
-        html, body { background: #0a0a0a; }
+        /* The page itself, behind .hub: the theme's page colour (the glass
+           blobs float on top of it). Only while the app is mounted (this
+           <style> is the app's), so the sign-in screen keeps its own look.
+           Print resets it to white. */
+        html, body { background: var(--page); }
 
         /* ---- calendar week view ---- */
-        .cal-week-view { background: #0a0a0a; border-color: #141414; }
         .cal-week-view .week-table th,
-        .cal-week-view .week-table td { border-color: #141414; }
+        .cal-week-view .week-table td { border-color: var(--line); }
         .cal-week-view .week-table td.shift-cell,
-        .cal-week-view .emp-name { border-top: 0.5px solid #141414; }
-        .cal-week-view .role-header { border-bottom: 0.5px solid #141414; letter-spacing: 2.5px; font-size: 10px; }
+        .cal-week-view .emp-name { border-top: 0.5px solid var(--line); }
+        .cal-week-view .role-header { border-bottom: 0.5px solid var(--line); letter-spacing: 2.5px; font-size: 10px; }
         .cal-week-view .shift-chip { border-width: 0.5px; border-radius: 20px; font-size: 10px; padding: 5px 4px; }
-        .cal-week-off { display: inline-block; width: 100%; text-align: center; color: #222222; font-size: 15px; line-height: 1.4; user-select: none; }
+        .cal-week-off { display: inline-block; width: 100%; text-align: center; color: var(--dim); font-size: 15px; line-height: 1.4; user-select: none; }
         /* Today: orange underline on the header, faint warm tint down the column */
         .cal-week-view .week-table th.today-col { border-bottom: 2px solid var(--accent); color: var(--accent); background: transparent; }
-        .cal-week-view .week-table td.today-col { background: #131108; }
-        .cal-week-view .week-range { color: #ffffff; }
+        .cal-week-view .week-table td.today-col { background: var(--accent-soft); }
+        .cal-week-view .week-range { color: var(--txt); }
 
         /* ---- Rail ---- */
-        .rs-card { background: #0f0f0f; border-color: #141414; }
-        .rs-head, .rs-strip { border-color: #141414; }
-        .rs-q { background: #141414; border-color: #1a1a1a; }
-        .rs-q-sel { background: #1a1a1a; }
-        .rs-q-menu-btn:hover, .rs-q-menu-btn[aria-expanded="true"] { background: #1f1f1f; }
-        .rs-q-menu { background: #1a1a1a; border-color: #262626; box-shadow: 0 10px 24px rgba(0,0,0,0.6); }
-        .rs-q-menu-item:hover { background: #262626; }
-        .rs-q-menu-danger { color: #e07668; }
-        .rs-restore-btn { border-color: #262626; }
-        .rs-detail { background: #141414; border-color: #1a1a1a; }
-        .rs-detail-note { background: #0f0f0f; border-color: #1a1a1a; }
-        .rs-card .nr-panel { background: #141414; border-color: #1a1a1a; }
+        .rs-head, .rs-strip { border-color: var(--line); }
+        .rs-q { background: var(--s2); border-color: var(--s3); }
+        .rs-q-sel { background: var(--s3); }
+        .rs-q-menu-btn:hover, .rs-q-menu-btn[aria-expanded="true"] { background: var(--s3); }
+        .rs-q-menu { background: var(--s3); border-color: var(--line2); box-shadow: 0 10px 24px rgba(0,0,0,0.6); }
+        .rs-q-menu-item:hover { background: var(--line2); }
+        .rs-q-menu-danger { color: var(--danger-text); }
+        .rs-restore-btn { border-color: var(--line2); }
+        .rs-detail { background: var(--s2); border-color: var(--s3); }
+        .rs-detail-note { background: var(--s1); border-color: var(--s3); }
+        .rs-card .nr-panel { background: var(--s2); border-color: var(--s3); }
         /* Neutral chips only — the type badge and avatar keep their inline
            request-type color, which is the whole signal in the queue. */
-        .rs-card .nr-count { background: #1a1a1a; }
-        .rs-card .nr-row, .rs-card .nr-log-row { border-color: #1a1a1a; }
-        .rs-card .nr-empty { background: #141414; border-color: #1a1a1a; }
+        .rs-card .nr-count { background: var(--s3); }
+        .rs-card .nr-row, .rs-card .nr-log-row { border-color: var(--s3); }
+        .rs-card .nr-empty { background: var(--s2); border-color: var(--s3); }
         .rs-clear-block { display: block; margin: 8px 0 0 auto; }
         .rs-clear:disabled { opacity: 0.45; cursor: default; }
 
@@ -6808,8 +6850,8 @@ export default function SchedulingHub({ session, onSignOut }) {
         }
         .save-status-saved { color: #5a8a6a; }
         .save-status-saving { color: var(--accent); }
-        .save-status-dirty { color: #d9a441; }
-        .save-status-error { color: #e79289; }
+        .save-status-dirty { color: var(--warn-text); }
+        .save-status-error { color: var(--danger-text); }
 
         /* Tip Sheet action row — Save · Lock · Send · Save as PDF · Print. */
         .tip-actions { margin-top: 16px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
@@ -6841,13 +6883,13 @@ export default function SchedulingHub({ session, onSignOut }) {
         .send-rcpt-payout { font-family: 'Space Mono', monospace; font-size: 11.5px; color: var(--accent); }
         /* Still listed, so the manager can see who won't get it. */
         .send-rcpt-noemail { opacity: 0.55; cursor: default; }
-        .send-rcpt-noemail .send-rcpt-email { color: #e79289; font-style: italic; }
-        .send-error { margin-top: 12px; font-size: 12px; color: #e79289; }
+        .send-rcpt-noemail .send-rcpt-email { color: var(--danger-text); font-style: italic; }
+        .send-error { margin-top: 12px; font-size: 12px; color: var(--danger-text); }
         .send-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
         .publish-summary { font-size: 15px; font-weight: 700; color: var(--txt); margin: 2px 0 12px; }
-        .publish-summary-none { color: #e79289; }
+        .publish-summary-none { color: var(--danger-text); }
         .publish-group-label { font-family: 'Space Mono', monospace; font-size: 9.5px; letter-spacing: 1px; text-transform: uppercase; color: var(--muted); margin: 10px 0 4px; }
-        .publish-sent-tag { color: #7fb392; }
+        .publish-sent-tag { color: var(--ok-text); }
         .publish-section { border: 1px solid var(--line2); border-radius: 9px; padding: 8px 10px 10px; margin-top: 10px; }
         .publish-section-off { opacity: 0.55; }
         .publish-section-head { display: flex; align-items: center; gap: 8px; cursor: pointer; margin-bottom: 6px; }
@@ -6855,28 +6897,28 @@ export default function SchedulingHub({ session, onSignOut }) {
         .publish-section-title { font-weight: 700; font-size: 13px; color: var(--txt); }
         .publish-section-meta { margin-left: auto; font-size: 11px; color: var(--txt2); }
         .publish-section-reason { font-size: 11.5px; color: var(--txt2); font-style: italic; padding: 2px 0 0 24px; }
-        .update-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 10px 16px; margin-bottom: 12px; border: 1px solid rgba(224,168,92,0.55); background: rgba(224,168,92,0.12); color: #e0a85c; border-radius: 10px; font-size: 13px; }
+        .update-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 10px 16px; margin-bottom: 12px; border: 1px solid var(--warn-line); background: var(--warn-bg); color: var(--warn-text); border-radius: 10px; font-size: 13px; }
         @media print { .update-banner { display: none !important; } }
         .tip-calc-blocked { display: flex; flex-direction: column; gap: 16px; align-items: flex-start; }
         .tip-blocked-nav { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-        .tip-blocked-msg { display: flex; gap: 10px; align-items: flex-start; color: #e0a85c; font-size: 14px; line-height: 1.5; max-width: 640px; }
-        .publish-section-warn { color: #e0a85c; font-style: normal; font-weight: 600; }
+        .tip-blocked-msg { display: flex; gap: 10px; align-items: flex-start; color: var(--warn-text); font-size: 14px; line-height: 1.5; max-width: 640px; }
+        .publish-section-warn { color: var(--warn-text); font-style: normal; font-weight: 600; }
         .publish-past-toggle { background: none; border: none; padding: 6px 0 2px; color: var(--muted); font-family: 'Space Mono', monospace; font-size: 9.5px; letter-spacing: 1px; text-transform: uppercase; cursor: pointer; text-align: left; }
         .publish-past-toggle:hover { color: var(--txt2); }
         .publish-past { opacity: 0.8; }
         .published-partial { opacity: 0.85; }
-        .publish-test-ok { display: flex; align-items: center; gap: 6px; margin-top: 12px; font-size: 12px; color: #7fb392; }
+        .publish-test-ok { display: flex; align-items: center; gap: 6px; margin-top: 12px; font-size: 12px; color: var(--ok-text); }
 
         /* ---- Manage Shifts (item 3) ---- */
         .shift-mgmt { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
         .shift-mgmt-row { display: flex; align-items: flex-start; gap: 12px; padding: 8px 2px; border-top: 1px solid var(--line); flex-wrap: wrap; }
         .shift-mgmt-role { font-family: 'Space Mono', monospace; font-size: 10.5px; letter-spacing: 1.5px; text-transform: uppercase; font-weight: 700; width: 120px; flex-shrink: 0; padding-top: 4px; }
         .shift-mgmt-opts { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex: 1; min-width: 0; }
-        .shift-mgmt-chip { display: inline-flex; align-items: center; gap: 3px; background: #1a1a1a; border: 1px solid var(--line2); border-radius: 20px; padding: 3px 5px 3px 11px; font-family: 'Space Mono', monospace; font-size: 10.5px; color: var(--txt2); }
+        .shift-mgmt-chip { display: inline-flex; align-items: center; gap: 3px; background: var(--s3); border: 1px solid var(--line2); border-radius: 20px; padding: 3px 5px 3px 11px; font-family: 'Space Mono', monospace; font-size: 10.5px; color: var(--txt2); }
         /* Chips are buttons that open the shift editor; OFF tags an off state. */
         .shift-chip-btn { cursor: pointer; padding-right: 11px; }
         .shift-chip-btn:hover { border-color: var(--accent); color: var(--txt); }
-        .shift-off-tag { display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 4px; background: rgba(200,149,108,0.18); color: var(--accent); font-family: 'Space Mono', monospace; font-size: 8.5px; font-weight: 700; letter-spacing: 0.8px; line-height: 15px; }
+        .shift-off-tag { display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 4px; background: var(--accent-soft); color: var(--accent); font-family: 'Space Mono', monospace; font-size: 8.5px; font-weight: 700; letter-spacing: 0.8px; line-height: 15px; }
         .shift-editor { width: min(420px, calc(100vw - 32px)); }
         .shift-editor-toggle { display: flex; align-items: center; gap: 8px; margin-top: 14px; font-weight: 700; font-size: 13px; color: var(--txt); cursor: pointer; }
         .shift-editor-toggle input { accent-color: var(--accent); width: 15px; height: 15px; }
@@ -6902,7 +6944,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         .duty-item:hover .duty-actions, .duty-actions:focus-within { opacity: 1; }
         .duty-btn { background: none; border: 1px solid var(--line2); border-radius: 4px; color: var(--txt2); font-size: 11px; line-height: 1; padding: 3px 6px; cursor: pointer; }
         .duty-btn:disabled { opacity: 0.3; cursor: default; }
-        .duty-del:hover { color: #e79289; border-color: #e79289; }
+        .duty-del:hover { color: var(--danger-text); border-color: var(--danger-text); }
         .duty-add { display: flex; gap: 8px; }
         .duty-add .notes-input { flex: 1; }
         /* The duties print sheet: rendered only while printing, never on screen. */
@@ -6926,11 +6968,11 @@ export default function SchedulingHub({ session, onSignOut }) {
         .shift-off-check { display: inline-flex; align-items: center; gap: 3px; margin-left: 6px; padding-left: 7px; border-left: 1px solid var(--line2); font-size: 9px; letter-spacing: 0.3px; color: var(--muted); cursor: pointer; white-space: nowrap; }
         .shift-mgmt-chip.is-off .shift-off-check { color: var(--accent); }
         .shift-off-check input { accent-color: var(--accent); margin: 0; width: 11px; height: 11px; cursor: pointer; }
-        .shift-off-hint { font-size: 9px; color: #e0b36c; margin-left: 4px; white-space: nowrap; }
+        .shift-off-hint { font-size: 9px; color: var(--warn-text); margin-left: 4px; white-space: nowrap; }
         .shift-mgmt-x { background: none; border: none; cursor: pointer; color: var(--muted); padding: 0 2px; display: inline-flex; align-items: center; }
-        .shift-mgmt-x:hover { color: #e0796c; }
-        .shift-mgmt-add { background: rgba(90,138,106,0.16); border: 1px solid rgba(90,138,106,0.5); color: #7fb392; border-radius: 20px; padding: 4px 12px; font-family: 'Manrope', sans-serif; font-weight: 700; font-size: 11px; cursor: pointer; }
-        .shift-mgmt-add:hover { background: rgba(90,138,106,0.28); }
+        .shift-mgmt-x:hover { color: var(--danger-text); }
+        .shift-mgmt-add { background: var(--ok-bg); border: 1px solid var(--ok); color: var(--ok-text); border-radius: 20px; padding: 4px 12px; font-family: 'Manrope', sans-serif; font-weight: 700; font-size: 11px; cursor: pointer; }
+        .shift-mgmt-add:hover { background: var(--ok-bg); }
         .shift-mgmt-input { max-width: 190px; padding: 4px 10px; border-radius: 20px; font-size: 11.5px; }
 
         /* ---- Today at a Glance swap (item 5) ---- */
@@ -6948,12 +6990,12 @@ export default function SchedulingHub({ session, onSignOut }) {
         .cal-note-row { display: flex; align-items: flex-start; gap: 8px; padding: 5px 0; border-bottom: 1px dashed var(--line); font-size: 12.5px; }
         .cal-note-text { flex: 1; color: var(--txt2); line-height: 1.4; word-break: break-word; }
         .cal-note-del { background: none; border: none; cursor: pointer; color: var(--muted); padding: 2px; flex-shrink: 0; }
-        .cal-note-del:hover { color: #e0796c; }
+        .cal-note-del:hover { color: var(--danger-text); }
         .cal-note-add { display: flex; gap: 7px; margin-top: 9px; }
 
         /* ---- item 6: two-step delete arm ---- */
         .staff-delete-arm { display: flex; align-items: center; gap: 10px; margin: 14px 0 4px; flex-wrap: wrap; }
-        .staff-delete-arm-on { background: rgba(178,58,47,0.15) !important; border-color: rgba(178,58,47,0.5) !important; color: #e0796c !important; }
+        .staff-delete-arm-on { background: var(--danger-bg) !important; border-color: rgba(178,58,47,0.5) !important; color: var(--danger-text) !important; }
         .staff-delete-arm-note { font-size: 11.5px; color: var(--txt2); font-style: italic; }
 
         /* ---- item 10: readable 3-month cells ---- */
@@ -6970,106 +7012,322 @@ export default function SchedulingHub({ session, onSignOut }) {
           .cal-grid.multi-month { grid-template-columns: repeat(3, minmax(300px, 1fr)); }
           .cal-multi-scroll { overflow-x: auto; }
         }
+
+        /* ==================================================================
+           COPPER & SAGE · LIQUID GLASS · SIDEBAR (redesign round, 2026-11-16)
+           Screen-only skin at the very end of the sheet, so it wins over
+           everything above. @media print and .tip-pdf-mode keep their
+           !important restores, so paper and PDFs are untouched. Tokens live
+           on :root and flip with <html data-theme="light">; .hub maps its
+           older aliases (--s1/--s2/--line/--txt/--muted) onto them.
+           ================================================================== */
+        :root {
+          color-scheme: dark;
+          --page: #0b0907;
+          --bg: #0a0a0a; --surface: #111111; --inner: #171717; --border: #232323;
+          --text: #f5f5f5; --muted: #a3a3a3; --dim: #525252;
+          --accent: #d9a07a; --accent-soft: rgba(217,160,122,0.13);
+          --primary: #4a7350; --primary-ink: #f2f7f2;
+          --dot2: #6b9bc3; --chip: #1d1d1d; --chip-text: #e5e5e5;
+          --ro-bg: rgba(251,191,36,0.16); --ro-text: #fcd34d;
+          /* derived */
+          --txt2: var(--muted);
+          --accent-ink: #1b1008; --accent-line: rgba(217,160,122,0.5); --ro-line: rgba(251,191,36,0.45);
+          --border-strong: rgba(255,255,255,0.14); --line-soft: rgba(255,255,255,0.08); --raised: rgba(255,255,255,0.08);
+          --danger: #B23A2F; --danger-text: #e79289; --danger-bg: rgba(178,58,47,0.16);
+          --ok: #5a8a6a; --ok-text: #7fb392; --ok-bg: rgba(90,138,106,0.14);
+          --warn-text: #e0a85c; --warn-bg: rgba(224,168,92,0.12); --warn-line: rgba(224,168,92,0.55);
+          --info-text: #9dc0d6;
+          --glass-bg: rgba(255,255,255,0.055); --glass-border: rgba(255,255,255,0.12);
+          --glass-shadow: inset 0 1px 0 rgba(255,255,255,0.10), 0 10px 40px rgba(0,0,0,0.45);
+          --glass-inner: rgba(255,255,255,0.04); --glass-inner-border: rgba(255,255,255,0.08);
+          --blob1: rgba(217,160,122,0.40); --blob2: rgba(79,122,85,0.45); --blob3: rgba(107,155,195,0.35);
+          --scrim: rgba(0,0,0,0.55);
+        }
+        [data-theme="light"] {
+          color-scheme: light;
+          --page: #efe9e2;
+          --bg: #f6f3ef; --surface: #ffffff; --inner: #faf8f5; --border: #e8e2da;
+          --text: #1c1917; --muted: #57534e; --dim: #a8a29e;
+          --accent: #9a5b2e; --accent-soft: rgba(154,91,46,0.10);
+          --primary: #3f6b46; --primary-ink: #ffffff;
+          --dot2: #3b6e99; --chip: #f0ebe4; --chip-text: #292524;
+          --ro-bg: #fef3c7; --ro-text: #92400e;
+          --accent-ink: #ffffff; --accent-line: rgba(154,91,46,0.45); --ro-line: rgba(146,64,14,0.35);
+          --border-strong: rgba(28,25,23,0.16); --line-soft: rgba(28,25,23,0.09); --raised: rgba(28,25,23,0.05);
+          --danger-text: #a8322a; --danger-bg: rgba(178,58,47,0.10);
+          --ok-text: #3f6b46; --ok-bg: rgba(63,107,70,0.12);
+          --warn-text: #92400e; --warn-bg: rgba(251,191,36,0.16); --warn-line: rgba(146,64,14,0.4);
+          --info-text: #2f5f85;
+          --glass-bg: rgba(255,255,255,0.55); --glass-border: rgba(255,255,255,0.85);
+          --glass-shadow: inset 0 1px 0 rgba(255,255,255,0.95), 0 10px 40px rgba(20,30,40,0.10);
+          --glass-inner: rgba(255,255,255,0.5); --glass-inner-border: rgba(255,255,255,0.9);
+          --blob1: rgba(217,160,122,0.50); --blob2: rgba(127,170,130,0.45); --blob3: rgba(150,190,225,0.45);
+          --scrim: rgba(40,30,20,0.35);
+        }
+        /* The old "dim label" role (section labels, log times, placeholders)
+           needs a little more ink than --dim gives on glass over the colour
+           blobs. --dim itself stays as specified for off-chips. */
+        .hub { --muted: #727272; }
+        [data-theme="light"] .hub { --muted: #857e76; }
+
+        /* ---- page layout: sidebar | main ---- */
+        .hub {
+          display: flex; align-items: flex-start; gap: 18px;
+          min-height: 100vh; padding: 18px; box-sizing: border-box;
+          background: transparent; color: var(--txt);
+        }
+        .glass-bg { position: fixed; inset: 0; z-index: 0; pointer-events: none; overflow: hidden; }
+        .glass-blob { position: absolute; border-radius: 50%; filter: blur(96px); transform: translateZ(0); }
+        .glass-blob-1 { width: 600px; height: 600px; top: -180px; left: -160px; background: var(--blob1); }
+        .glass-blob-2 { width: 560px; height: 560px; top: 14%; right: -200px; background: var(--blob2); }
+        .glass-blob-3 { width: 620px; height: 620px; bottom: -260px; left: 36%; background: var(--blob3); }
+        .hub-main { position: relative; z-index: 1; flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+
+        /* Glass: the big panels only — blur is costly, so rows and inner
+           cards get a lighter pane instead (next rule). */
+        .sidebar, .hub-header, .nr-card, .cal-card {
+          background: var(--glass-bg);
+          border: 1px solid var(--glass-border);
+          border-radius: 20px;
+          box-shadow: var(--glass-shadow);
+          -webkit-backdrop-filter: blur(28px) saturate(170%);
+          backdrop-filter: blur(28px) saturate(170%);
+        }
+        .nr-item, .nr-panel, .nr-empty, .rs-detail, .cal-day, .cash-recon, .staff-add, .staff-profile,
+        .duty-role, .publish-section, .saved-item, .notes-row {
+          background: var(--glass-inner); border-color: var(--glass-inner-border);
+        }
+        .cal-day:hover { box-shadow: 0 6px 14px rgba(0,0,0,0.18); }
+
+        /* ---- sidebar ---- */
+        .sidebar {
+          position: sticky; top: 18px; z-index: 5; align-self: flex-start;
+          width: 248px; height: calc(100vh - 36px); flex: 0 0 auto;
+          display: flex; flex-direction: column; box-sizing: border-box;
+          padding: 16px 12px 14px; overflow: hidden;
+          transition: width 0.22s ease, padding 0.22s ease;
+        }
+        .sidebar-collapsed { width: 76px; padding: 16px 10px 14px; }
+        .sb-brand { display: flex; align-items: center; gap: 10px; padding: 2px 6px 14px; }
+        .sb-logo { height: 30px; width: auto; flex-shrink: 0; }
+        .sb-word { font-family: 'Space Mono', monospace; font-weight: 700; font-size: 15px; letter-spacing: 4px; color: var(--txt); white-space: nowrap; overflow: hidden; }
+        .sb-collapse {
+          margin-left: auto; width: 32px; height: 32px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center;
+          background: none; border: 1px solid transparent; border-radius: 8px; color: var(--txt2); cursor: pointer; padding: 0;
+        }
+        .sb-collapse:hover { background: var(--s3); color: var(--txt); }
+        .sb-nav { display: flex; flex-direction: column; gap: 4px; flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+        .sb-item {
+          display: flex; align-items: center; gap: 12px; width: 100%; min-height: 42px; padding: 0 12px;
+          border-radius: 12px; border: 1px solid transparent; background: none; color: var(--txt2);
+          font-family: 'Manrope', sans-serif; font-weight: 700; font-size: 13.5px; cursor: pointer; text-align: left; white-space: nowrap;
+        }
+        .sb-item:hover { color: var(--txt); background: var(--s3); }
+        .sb-item-active, .sb-item-active:hover { background: var(--accent-soft); color: var(--accent); }
+        .sb-icon { position: relative; display: inline-flex; width: 22px; height: 22px; align-items: center; justify-content: center; flex-shrink: 0; }
+        .sb-badge {
+          margin-left: auto; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 10px;
+          background: var(--accent); color: var(--accent-ink); font-family: 'Space Mono', monospace; font-size: 10.5px; font-weight: 700;
+          display: inline-flex; align-items: center; justify-content: center;
+        }
+        .sb-dot { display: none; position: absolute; top: -2px; right: -3px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+        .sb-foot { display: flex; flex-direction: column; gap: 10px; padding-top: 12px; border-top: 1px solid var(--line); }
+        .sb-theme { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 3px; border-radius: 11px; background: var(--s2); border: 1px solid var(--line); }
+        .sb-theme-btn {
+          display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 32px;
+          border-radius: 8px; border: none; background: none; color: var(--txt2);
+          font-family: 'Manrope', sans-serif; font-weight: 700; font-size: 12px; cursor: pointer;
+        }
+        .sb-theme-btn.on { background: var(--accent-soft); color: var(--accent); }
+        .sb-theme-one {
+          width: 100%; min-height: 36px; border-radius: 10px; border: 1px solid var(--line); background: var(--s2);
+          color: var(--txt2); display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
+        }
+        .sb-theme-one:hover { color: var(--accent); }
+        .sb-user { display: flex; align-items: center; gap: 8px; padding: 0 4px; min-width: 0; }
+        .sb-user-name { flex: 1; min-width: 0; font-family: 'Space Mono', monospace; font-size: 10.5px; letter-spacing: 0.5px; color: var(--txt2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .sb-signout {
+          width: 30px; height: 30px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center;
+          border-radius: 8px; border: 1px solid var(--line2); background: none; color: var(--txt2); cursor: pointer; padding: 0;
+        }
+        .sb-signout:hover { color: var(--txt); border-color: var(--txt2); }
+        /* Collapsed: icon rail. Labels and the count go, the badge becomes a
+           dot, the theme switch is one button (see Sidebar.jsx). */
+        .sidebar-collapsed .sb-brand { flex-direction: column; gap: 8px; padding: 2px 0 12px; }
+        .sidebar-collapsed .sb-word, .sidebar-collapsed .sb-label, .sidebar-collapsed .sb-badge, .sidebar-collapsed .sb-user-name { display: none; }
+        .sidebar-collapsed .sb-collapse { margin-left: 0; }
+        .sidebar-collapsed .sb-item { justify-content: center; padding: 0; }
+        .sidebar-collapsed .sb-dot { display: block; }
+        .sidebar-collapsed .sb-user { justify-content: center; padding: 0; }
+
+        /* ---- content header ---- */
+        .hub-header {
+          max-width: none; margin: 0 0 16px; padding: 12px 20px;
+          display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+        }
+        .hub-header-left { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; min-width: 0; }
+        .hub-page-title { font-family: 'Space Mono', monospace; font-weight: 700; font-size: 15px; letter-spacing: 3px; text-transform: uppercase; color: var(--txt); }
+        .hub-date { color: var(--txt2); }
+        .hub-header-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+        .hub-header-right .rs-gmail { margin-left: 0; }
+        .hub-load-error { margin: 0 0 16px; padding: 10px 14px; border-radius: 12px; background: var(--danger-bg); border: 1px solid var(--danger); color: var(--danger-text); font-size: 12.5px; }
+        .update-banner { margin-bottom: 16px; }
+        /* The main column supplies the side spacing now. The Set Schedule
+           wrap keeps its right padding: the notes pad is positioned off it. */
+        .nr-wrap, .cal-wrap, .hub-grid { padding: 0; }
+        .sched-wrap { padding-right: 28px; }
+
+        /* ---- buttons in the new palette ---- */
+        .publish-btn, .btn-approve, .custom-toggle.on, .publish-btn-sent { background: var(--primary); color: var(--primary-ink); border-color: var(--primary); }
+        .published-badge, .staff-msg, .rs-quicknote-msg, .save-status-saved { color: var(--ok-text); }
+        .rs-gmail-ok .rs-gmail-dot, .week-finalized-dot, .staff-reg-dot.reg-yes { background: var(--ok); }
+        .print-btn.finalized-active { background: var(--ok); border-color: var(--ok); }
+        .rs-q-menu-danger, .rs-note-del:hover:not(:disabled), .remove-payout-btn, .cal-note-del:hover, .shift-mgmt-x:hover, .duty-del:hover { color: var(--danger-text); }
+        .delete-confirm-btn { background: var(--danger); color: #fff; }
+
+        /* ---- popups and modals are solid, never glass (readability) ---- */
+        .notes-modal, .qr-modal, .delete-modal, .day-popup, .staff-edit-modal, .send-modal, .tip-picker,
+        .rs-q-menu, .sched-note-tip, .sched-note-editor, .sched-pad {
+          --s1: var(--surface); --s2: var(--inner); --s3: var(--raised); --line: var(--border); --line2: var(--border-strong);
+          background: var(--surface); color: var(--txt); border-color: var(--border-strong);
+        }
+        .sched-note-editor input, .sched-pad-input { background: var(--inner); color: var(--txt); border-color: var(--border-strong); }
+        .sched-pad-chip { background: var(--raised); color: var(--txt2); }
+        .day-popup-backdrop { background: var(--scrim); }
+        /* Dropdowns: solid surface so the option list is readable in both
+           themes; a cell with a chip colour keeps its inline background. */
+        .cell-select, .cell-select.shift-select, .cell-select.role-select { background: var(--surface); border-color: var(--border-strong); color: var(--txt); }
+        .cell-select option, .manual-field option, .staff-section-select option, .staff-primary-select option, select.cell-select option,
+        .manual-field, .staff-section-select, .staff-primary-select { background: var(--surface); color: var(--txt); }
+        .manual-field { border-color: var(--border-strong); }
+        input[type="date"], input[type="time"] { color-scheme: inherit; }
+
+        /* ---- phone / iPad portrait: the sidebar becomes a top bar ---- */
+        @media (max-width: 900px) {
+          .hub { flex-direction: column; align-items: stretch; gap: 12px; padding: 10px; }
+          /* Row 1: brand left, theme + sign-out right. Row 2: the tabs, one
+             icon row that scrolls sideways if it must — the bar itself never
+             grows past the screen. */
+          .sidebar, .sidebar.sidebar-collapsed {
+            position: static; width: 100%; max-width: 100%; height: auto; padding: 8px 10px; box-sizing: border-box;
+            flex-direction: row; align-items: center; flex-wrap: wrap; gap: 6px 8px; overflow: hidden;
+          }
+          .sidebar .sb-brand, .sidebar.sidebar-collapsed .sb-brand { flex-direction: row; gap: 8px; padding: 0 6px 0 2px; order: 1; }
+          .sidebar .sb-word, .sidebar.sidebar-collapsed .sb-word { display: inline-block; font-size: 13px; letter-spacing: 3px; }
+          .sidebar .sb-logo { height: 24px; }
+          .sidebar .sb-collapse { display: none; }
+          .sidebar .sb-nav { order: 3; flex: 1 1 100%; min-width: 0; flex-direction: row; gap: 2px; overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch; }
+          .sidebar .sb-item, .sidebar.sidebar-collapsed .sb-item { width: auto; min-height: 38px; padding: 0 10px; gap: 7px; font-size: 12px; justify-content: center; }
+          .sidebar .sb-item .sb-label { display: none; }
+          .sidebar .sb-item-active .sb-label { display: inline; }
+          .sidebar .sb-badge, .sidebar.sidebar-collapsed .sb-badge { display: inline-flex; margin-left: 0; min-width: 18px; height: 18px; font-size: 10px; }
+          .sidebar .sb-dot { display: none; }
+          .sidebar .sb-foot, .sidebar.sidebar-collapsed .sb-foot { order: 2; flex-direction: row; align-items: center; gap: 8px; border-top: none; padding-top: 0; margin-left: auto; }
+          .sidebar .sb-theme-btn .sb-label { display: none; }
+          .sidebar .sb-theme-btn { min-width: 36px; }
+          .sidebar .sb-user-name, .sidebar.sidebar-collapsed .sb-user-name { display: none; }
+          .hub-header { padding: 10px 14px; }
+          .sched-wrap { padding-right: 0; }
+        }
       `}</style>
 
-      <UpdateBanner />
-      <div className="hub-header">
-        <div className="hub-brand">
-          <img src={HAENYEO_ICON} alt="Haenyeo" className="hub-icon" />
-          {/* Brand is the mark plus the name — nothing else (brief item 1). */}
-          <div className="hub-title">HAENYEO</div>
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-          <div className="hub-date">TODAY — {TODAY_HEADER}</div>
-          {session?.user?.email && (
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <span className="hub-date" style={{ color: "#555555" }}>{session.user.email}</span>
-              <button
-                onClick={onSignOut}
-                title="Sign out"
-                className="hub-signout"
-                style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "1px solid rgba(237,231,217,0.18)", borderRadius: 6, color: "#A79E8C", fontFamily: "'Space Mono', monospace", fontSize: 10, letterSpacing: 1, textTransform: "uppercase", padding: "5px 9px", cursor: "pointer" }}
-              >
-                <LogOut size={12} /> Sign out
-              </button>
-            </div>
-          )}
-        </div>
+      {/* Liquid Glass backdrop: three soft colour blobs, fixed behind every
+          panel (screen only — @media print hides them). */}
+      <div className="glass-bg" aria-hidden="true">
+        <span className="glass-blob glass-blob-1" />
+        <span className="glass-blob glass-blob-2" />
+        <span className="glass-blob glass-blob-3" />
       </div>
+
+      {/* Left sidebar: the old tab bar's buttons, same `tab` state and setTab.
+          The Rail badge is the Pending Decisions count. */}
+      <Sidebar
+        tab={tab}
+        onTab={setTab}
+        pendingCount={pending.length}
+        collapsed={sidebarCollapsed}
+        onToggleCollapsed={toggleSidebar}
+        theme={theme}
+        onTheme={setTheme}
+        icon={HAENYEO_ICON}
+        email={session?.user?.email}
+        onSignOut={onSignOut}
+      />
+
+      {/* Everything right of the sidebar. The tab blocks below keep their
+          original indentation — only this wrapper is new. */}
+      <div className="hub-main">
+      <UpdateBanner />
+      <header className="hub-header">
+        <div className="hub-header-left">
+          <div className="hub-page-title">{NAV_ITEMS.find((n) => n.key === tab)?.label || ""}</div>
+          <div className="hub-date">TODAY — {TODAY_HEADER}</div>
+        </div>
+        <div className="hub-header-right">
+          {/* Gmail status (moved here from the top of the Rail card — same
+              data, same control: the whole thing is the Check-now button). */}
+          {(() => {
+            const st = gmailStatus;
+            const connected = !!st?.connected;
+            // Green only when the mailbox is actually connected. Anything
+            // else — disconnected, never set up, still checking — is a
+            // problem the manager should see, and shows no "last checked"
+            // line because the time would be reassuring and wrong.
+            const ok = connected;
+            const last = ok && st?.lastPollAt ? new Date(st.lastPollAt) : null;
+            const detail = st == null
+              ? "Checking Gmail…"
+              : connected
+              ? `Connected${st.email ? ` as ${st.email}` : ""}`
+              : st.configured
+              ? `Disconnected${st.lastError ? ` — ${st.lastError}` : ""}`
+              : "Not set up";
+            return (
+              <>
+              <button
+                type="button"
+                className={`rs-gmail ${ok ? "rs-gmail-ok" : "rs-gmail-bad"}`}
+                onClick={checkGmailNow}
+                disabled={gmailChecking || !session?.access_token}
+                title={`${detail}${session?.access_token ? " · click to check now" : " · sign in to check"}`}
+              >
+                <span className="rs-gmail-dot" />
+                <span className="rs-gmail-body">
+                  <span className="rs-gmail-label">Gmail</span>
+                  {gmailChecking
+                    ? <span className="rs-gmail-sub">checking…</span>
+                    : gmailDisconnected
+                    ? <span className="rs-gmail-sub">disconnected — reconnect</span>
+                    : last && <span className="rs-gmail-sub">last checked {last.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</span>}
+                </span>
+              </button>
+              {gmailDisconnected && (
+                <a
+                  className="rs-gmail-reconnect"
+                  href={gmailReconnectUrl}
+                  target="_blank"
+                  rel="noopener"
+                  title="Sign into the scheduling Gmail account and grant access again"
+                >Reconnect</a>
+              )}
+              </>
+            );
+          })()}
+        </div>
+      </header>
       {loadError && (
-        <div style={{ maxWidth: 1180, margin: "0 auto 16px", padding: "10px 14px", borderRadius: 8, background: "rgba(178,58,47,0.12)", border: "1px solid rgba(178,58,47,0.4)", color: "#E0917F", fontSize: 12.5 }}>
+        <div className="hub-load-error">
           Couldn’t load live data from Supabase: {loadError} — showing seed data. Check that this account has access (RLS) and the tables are reachable.
         </div>
       )}
 
-      <div className="tabs">
-        {/* Order per brief: RAIL · CALENDAR · TIP SHEET · SET SCHEDULE · STAFF · INVOICES · MENU */}
-        <button className={`tab-btn ${tab === "rail" ? "active" : ""}`} onClick={() => setTab("rail")}>Rail</button>
-        <button className={`tab-btn ${tab === "calendar" ? "active" : ""}`} onClick={() => setTab("calendar")}>Calendar</button>
-        <button className={`tab-btn ${tab === "tips" ? "active" : ""}`} onClick={() => setTab("tips")}>Tip Sheet</button>
-        <button className={`tab-btn ${tab === "template" ? "active" : ""}`} onClick={() => setTab("template")}>Set Schedule</button>
-        <button className={`tab-btn ${tab === "staff" ? "active" : ""}`} onClick={() => setTab("staff")}>Staff</button>
-        <button className={`tab-btn ${tab === "invoices" ? "active" : ""}`} onClick={() => setTab("invoices")}>Invoices</button>
-        <button className={`tab-btn ${tab === "menu" ? "active" : ""}`} onClick={() => setTab("menu")}>Menu</button>
-      </div>
-
       {tab === "rail" && (
         <div className="nr-wrap">
           <div className="nr-card rs-card">
-            {/* ---- brand row: icon + HAENYEO, Gmail status top-right ----
-                 The pending count moved into the Pending Decisions header
-                 (brief item 3), and Gmail took the corner it left behind. */}
-            <div className="rs-head">
-              <img src={HAENYEO_ICON} alt="" className="rs-head-icon" />
-              <span className="rs-head-word">HAENYEO</span>
-              {(() => {
-                const st = gmailStatus;
-                const connected = !!st?.connected;
-                // Green only when the mailbox is actually connected. Anything
-                // else — disconnected, never set up, still checking — is a
-                // problem the manager should see, and shows no "last checked"
-                // line because the time would be reassuring and wrong.
-                const ok = connected;
-                const last = ok && st?.lastPollAt ? new Date(st.lastPollAt) : null;
-                const detail = st == null
-                  ? "Checking Gmail…"
-                  : connected
-                  ? `Connected${st.email ? ` as ${st.email}` : ""}`
-                  : st.configured
-                  ? `Disconnected${st.lastError ? ` — ${st.lastError}` : ""}`
-                  : "Not set up";
-                return (
-                  <>
-                  <button
-                    type="button"
-                    className={`rs-gmail ${ok ? "rs-gmail-ok" : "rs-gmail-bad"}`}
-                    onClick={checkGmailNow}
-                    disabled={gmailChecking || !session?.access_token}
-                    title={`${detail}${session?.access_token ? " · click to check now" : " · sign in to check"}`}
-                  >
-                    <span className="rs-gmail-dot" />
-                    <span className="rs-gmail-body">
-                      <span className="rs-gmail-label">Gmail</span>
-                      {gmailChecking
-                        ? <span className="rs-gmail-sub">checking…</span>
-                        : gmailDisconnected
-                        ? <span className="rs-gmail-sub">disconnected — reconnect</span>
-                        : last && <span className="rs-gmail-sub">last checked {last.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</span>}
-                    </span>
-                  </button>
-                  {gmailDisconnected && (
-                    <a
-                      className="rs-gmail-reconnect"
-                      href={gmailReconnectUrl}
-                      target="_blank"
-                      rel="noopener"
-                      title="Sign into the scheduling Gmail account and grant access again"
-                    >Reconnect</a>
-                  )}
-                  </>
-                );
-              })()}
-            </div>
+            {/* The brand row that used to open the card (icon + HAENYEO,
+                 Gmail top-right) is gone: the brand lives in the sidebar and
+                 the Gmail status in the content header. */}
 
             {/* ---- 7-day strip: pick a day to load it below (brief item 7).
                  The selected day carries the highlight; today keeps its dot
@@ -7948,8 +8206,8 @@ export default function SchedulingHub({ session, onSignOut }) {
                           const isOff = shift.type === "OFF";
                           const chipStyle =
                             shift.type === "GAP"
-                              ? { color: "#e0796c", borderColor: "#5c2a24", background: MIDNIGHT.chip }
-                              : calChipStyle(roleForCell(shift.type, p.role));
+                              ? GAP_CHIP_STYLE
+                              : cutChipStyle(shiftLabelForType(shift.type));
                           return (
                             <td key={d.iso} className={`shift-cell ${d.isToday ? "today-col" : ""}`}>
                               {isOff ? (
@@ -8207,7 +8465,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                                         value={value}
                                         disabled={scheduleFrozen}
                                         title={dead?.title}
-                                        style={dead ? DEAD_CELL_STYLE : value === "OFF" ? undefined : roleCellStyle(workedRole)}
+                                        style={dead ? DEAD_CELL_STYLE : value === "OFF" ? undefined : cutChipStyle(shiftLabelForType(value))}
                                         onChange={(e) => setCellShift(p.name, weekday, e.target.value)}
                                       >
                                         {dead && <option value={dead.code}>{dead.label}</option>}
@@ -8331,7 +8589,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                                       value={value}
                                       disabled={scheduleFrozen}
                                       title={dead?.title}
-                                      style={dead ? DEAD_CELL_STYLE : value === "OFF" ? undefined : roleCellStyle(workedRole)}
+                                      style={dead ? DEAD_CELL_STYLE : value === "OFF" ? undefined : cutChipStyle(shiftLabelForType(value))}
                                       onChange={(e) => setPlaceholderShift("management", idx, realWeekday, e.target.value)}
                                     >
                                       {dead && <option value={dead.code}>{dead.label}</option>}
@@ -8357,7 +8615,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                                 {dayOfFlag(personName, realWeekday)}
                                 <button
                                   className="shift-chip chip-btn"
-                                  style={type === "OFF" ? OFF_CHIP_DARK : roleCellStyle(cellRole)}
+                                  style={type === "OFF" ? OFF_CHIP_DARK : cutChipStyle(shiftLabelForType(type))}
                                   onClick={() => toggleManagementCell(idx, realWeekday)}
                                 >
                                   {SHIFT_META[type] ? meta.label : shiftLabelForType(type)}
@@ -9314,8 +9572,8 @@ export default function SchedulingHub({ session, onSignOut }) {
         <div className="cal-wrap" key="invoices">
           <div className="cal-card" style={{ textAlign: "center", padding: "56px 24px 64px" }}>
             <img src={HAENYEO_LOGO} alt="Haenyeo" style={{ maxWidth: 220, maxHeight: 84, objectFit: "contain" }} />
-            <h2 style={{ fontFamily: "'Space Mono', monospace", fontSize: 22, letterSpacing: 1, color: "#2B2A25", margin: "20px 0 8px" }}>Invoices</h2>
-            <div style={{ fontFamily: "'Manrope', sans-serif", fontSize: 13.5, color: "#85897F" }}>Invoice tracking coming soon.</div>
+            <h2 style={{ fontFamily: "'Space Mono', monospace", fontSize: 22, letterSpacing: 1, color: "var(--txt)", margin: "20px 0 8px" }}>Invoices</h2>
+            <div style={{ fontFamily: "'Manrope', sans-serif", fontSize: 13.5, color: "var(--txt2)" }}>Invoice tracking coming soon.</div>
           </div>
         </div>
       )}
@@ -9324,8 +9582,8 @@ export default function SchedulingHub({ session, onSignOut }) {
         <div className="cal-wrap" key="menu">
           <div className="cal-card" style={{ textAlign: "center", padding: "56px 24px 64px" }}>
             <img src={HAENYEO_LOGO} alt="Haenyeo" style={{ maxWidth: 220, maxHeight: 84, objectFit: "contain" }} />
-            <h2 style={{ fontFamily: "'Space Mono', monospace", fontSize: 22, letterSpacing: 1, color: "#2B2A25", margin: "20px 0 8px" }}>Menu</h2>
-            <div style={{ fontFamily: "'Manrope', sans-serif", fontSize: 13.5, color: "#85897F" }}>Coming soon.</div>
+            <h2 style={{ fontFamily: "'Space Mono', monospace", fontSize: 22, letterSpacing: 1, color: "var(--txt)", margin: "20px 0 8px" }}>Menu</h2>
+            <div style={{ fontFamily: "'Manrope', sans-serif", fontSize: 13.5, color: "var(--txt2)" }}>Coming soon.</div>
           </div>
         </div>
       )}
@@ -10290,6 +10548,8 @@ export default function SchedulingHub({ session, onSignOut }) {
           </div>
         </div>
       )}
+
+      </div>{/* end .hub-main */}
 
       {/* Print-only mount for the branded schedule sheet (direct child of .hub —
           shown only when body.printing-schedule is set, see @media print rules).

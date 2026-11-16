@@ -5,8 +5,21 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Haenyeo — Scheduling Hub</title>
     <style>
+      /* Page colour per theme, here so the very first paint is already right. */
+      html { background: #0b0907; color-scheme: dark; }
+      html[data-theme="light"] { background: #efe9e2; color-scheme: light; }
       body { margin: 0; }
     </style>
+    <script>
+      // Light/Dark before first paint, so there is no flash: the app saves the
+      // choice under this key (src/App.jsx), dark is the default, and
+      // localStorage may be unavailable (private mode), so this never throws.
+      (function () {
+        var theme = "dark";
+        try { if (localStorage.getItem("hmng-theme") === "light") theme = "light"; } catch (e) { /* stay dark */ }
+        document.documentElement.setAttribute("data-theme", theme);
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
