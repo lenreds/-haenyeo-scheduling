@@ -5,12 +5,13 @@
 // Expanded: logo + wordmark, one row per tab (icon, label, pending badge on
 // Rail), and at the bottom the Light/Dark switch and the signed-in manager.
 // Collapsed: an icon-only rail — labels hide, the badge becomes a dot, the
-// theme switch becomes one button that flips to the other theme.
+// theme switch becomes one button that flips to the other theme. The logo
+// itself is the collapse/expand button (round 2, item 7).
 // Below ~900px the stylesheet lays the same markup out as a top bar.
 import React from "react";
 import {
   Inbox, CalendarDays, Receipt, Table2, Users, FileText, UtensilsCrossed,
-  PanelLeft, Sun, Moon, LogOut,
+  Sun, Moon, LogOut,
 } from "lucide-react";
 
 // Same tabs, same order, same keys as the old tab bar.
@@ -31,21 +32,21 @@ export default function Sidebar({
   icon, email, onSignOut,
 }) {
   const otherTheme = theme === "light" ? "dark" : "light";
+  const collapseLabel = collapsed ? "Expand sidebar" : "Collapse sidebar";
   return (
     <aside className={`sidebar ${collapsed ? "sidebar-collapsed" : ""}`} aria-label="Main navigation">
       <div className="sb-brand">
-        <img src={icon} alt="Haenyeo" className="sb-logo" />
-        <span className="sb-word">HAENYEO</span>
         <button
           type="button"
-          className="sb-collapse"
+          className="sb-logo-btn"
           onClick={onToggleCollapsed}
           aria-expanded={!collapsed}
-          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          aria-label={collapseLabel}
+          title={collapseLabel}
         >
-          <PanelLeft size={18} />
+          <img src={icon} alt="" className="sb-logo" />
         </button>
+        <span className="sb-word">HAENYEO</span>
       </div>
 
       <nav className="sb-nav">

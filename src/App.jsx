@@ -352,7 +352,7 @@ function roleForCell(code, fallbackRole) {
 // ROLE_COLOR directly and are unaffected.
 const CUT_CHIP_STYLE = {
   chip: { color: "var(--chip-text)", borderColor: "var(--line2)", background: "var(--chip)" },
-  cl: { color: "var(--accent)", borderColor: "var(--accent-line)", background: "var(--accent-soft)" },
+  cl: { color: "var(--cl-text)", borderColor: "var(--cl-line)", background: "var(--cl-bg)" },
   ro: { color: "var(--ro-text)", borderColor: "var(--ro-line)", background: "var(--ro-bg)" },
 };
 // Does a shift label carry the tag as a token of its own ("5pm-CL", "RO",
@@ -1361,7 +1361,21 @@ export default function SchedulingHub({ session, onSignOut }) {
     setThemeState(t);
     try { localStorage.setItem(THEME_KEY, t); } catch { /* choice not remembered */ }
   }
+  // Under 1200px the sidebar collapses on its own (round 2, item 4). The
+  // button still overrides it for that window size; the saved choice comes
+  // back once the window is wide again.
+  const [narrow, setNarrow] = useState(() => typeof window !== "undefined" && window.matchMedia("(max-width: 1199px)").matches);
+  const [narrowExpanded, setNarrowExpanded] = useState(false);
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 1199px)");
+    const onChange = (e) => { setNarrow(e.matches); setNarrowExpanded(false); };
+    if (mq.addEventListener) mq.addEventListener("change", onChange);
+    else mq.addListener(onChange); // older iPad Safari
+    return () => { if (mq.removeEventListener) mq.removeEventListener("change", onChange); else mq.removeListener(onChange); };
+  }, []);
+  const sidebarIsCollapsed = narrow ? !narrowExpanded : sidebarCollapsed;
   function toggleSidebar() {
+    if (narrow) { setNarrowExpanded((v) => !v); return; }
     const next = !sidebarCollapsed;
     setSidebarCollapsed(next);
     try { localStorage.setItem(SIDEBAR_KEY, next ? "1" : "0"); } catch { /* choice not remembered */ }
@@ -5918,12 +5932,15 @@ export default function SchedulingHub({ session, onSignOut }) {
              panel shadow, and the content column prints as a plain block. */
           .sidebar, .glass-bg { display: none !important; }
           .hub { display: block !important; }
-          .hub-main { display: block !important; padding: 0 !important; }
-          .nr-card, .cal-card, .hub-header {
+          .hub-main, .nr-card, .cal-card, .hub-header {
             -webkit-backdrop-filter: none !important; backdrop-filter: none !important;
             box-shadow: none !important;
           }
-          .cal-card { border-radius: 10px !important; }
+          .hub-main { display: block !important; padding: 0 !important; min-height: 0 !important; background: #fff !important; border: 0 !important; border-radius: 0 !important; }
+          /* The card prints with the hairline and corners it had before the
+             glass skin. */
+          .cal-card { border: 1px solid rgba(43,42,37,0.2) !important; border-radius: 10px !important; overflow: visible !important; }
+          .sched-wrap { display: block !important; }
           .cal-card { box-shadow: none !important; }
           /* Tip Sheet print: hide helper text, buttons, navigation, finalized banner; outline-only boxes; fit one page */
           .footer-note, .recon-note, .fm-banner, .week-header, .screen-only { display: none !important; }
@@ -6022,7 +6039,16 @@ export default function SchedulingHub({ session, onSignOut }) {
         /* The capture must look as it did before the glass skin: the card's
            old 1px #1e1e1e hairline and 10px corners, no blur, no shadow. */
         .tip-pdf-mode, .tip-pdf-mode .cal-card {
-          border-color: #1e1e1e !important; border-radius: 10px !important;
+          border: 1px solid #1e1e1e !important; border-radius: 10px !important;
+          -webkit-backdrop-filter: none !important; backdrop-filter: none !important; box-shadow: none !important;
+        }
+        /* The Management sub-tab's Save as PDF captures the live card
+           (exportNodeAsPdf sets data-pdf-root on it for the capture). Pin the
+           look that capture had before the glass skin — the dark card — so
+           the PDF is unchanged by the redesign. */
+        .sched-wrap .cal-card[data-pdf-root="1"] {
+          background: #111111 !important; color: #ffffff !important;
+          border: 1px solid #1e1e1e !important; border-radius: 10px !important;
           -webkit-backdrop-filter: none !important; backdrop-filter: none !important; box-shadow: none !important;
         }
         .tip-pdf-mode .emp-name, .tip-pdf-mode .tip-stat, .tip-pdf-mode .check-value,
@@ -7028,7 +7054,7 @@ export default function SchedulingHub({ session, onSignOut }) {
           --text: #f5f5f5; --muted: #a3a3a3; --dim: #525252;
           --accent: #d9a07a; --accent-soft: rgba(217,160,122,0.13);
           --primary: #4a7350; --primary-ink: #f2f7f2;
-          --dot2: #6b9bc3; --chip: #1d1d1d; --chip-text: #e5e5e5;
+          --dot2: #6b9bc3; --chip: rgba(255,255,255,0.09); --chip-text: #e5e5e5;
           --ro-bg: rgba(251,191,36,0.16); --ro-text: #fcd34d;
           /* derived */
           --txt2: var(--muted);
@@ -7043,15 +7069,20 @@ export default function SchedulingHub({ session, onSignOut }) {
           --glass-inner: rgba(255,255,255,0.04); --glass-inner-border: rgba(255,255,255,0.08);
           --blob1: rgba(217,160,122,0.40); --blob2: rgba(79,122,85,0.45); --blob3: rgba(107,155,195,0.35);
           --scrim: rgba(0,0,0,0.55);
+          /* round 2: glass controls, glass modals, sage-glass buttons, CL chips */
+          --control-bg: rgba(255,255,255,0.07); --control-border: rgba(255,255,255,0.16);
+          --glass-modal: rgba(26,23,20,0.80);
+          --primary-glass: rgba(74,115,80,0.55); --primary-glass-edge: rgba(255,255,255,0.28);
+          --cl-bg: rgba(217,160,122,0.24); --cl-text: #f1c7a3; --cl-line: rgba(217,160,122,0.6);
         }
         [data-theme="light"] {
           color-scheme: light;
-          --page: #efe9e2;
+          --page: #ece6dd;
           --bg: #f6f3ef; --surface: #ffffff; --inner: #faf8f5; --border: #e8e2da;
           --text: #1c1917; --muted: #57534e; --dim: #a8a29e;
           --accent: #9a5b2e; --accent-soft: rgba(154,91,46,0.10);
           --primary: #3f6b46; --primary-ink: #ffffff;
-          --dot2: #3b6e99; --chip: #f0ebe4; --chip-text: #292524;
+          --dot2: #3b6e99; --chip: rgba(255,255,255,0.5); --chip-text: #292524;
           --ro-bg: #fef3c7; --ro-text: #92400e;
           --accent-ink: #ffffff; --accent-line: rgba(154,91,46,0.45); --ro-line: rgba(146,64,14,0.35);
           --border-strong: rgba(28,25,23,0.16); --line-soft: rgba(28,25,23,0.09); --raised: rgba(28,25,23,0.05);
@@ -7059,17 +7090,21 @@ export default function SchedulingHub({ session, onSignOut }) {
           --ok-text: #3f6b46; --ok-bg: rgba(63,107,70,0.12);
           --warn-text: #92400e; --warn-bg: rgba(251,191,36,0.16); --warn-line: rgba(146,64,14,0.4);
           --info-text: #2f5f85;
-          --glass-bg: rgba(255,255,255,0.55); --glass-border: rgba(255,255,255,0.85);
-          --glass-shadow: inset 0 1px 0 rgba(255,255,255,0.95), 0 10px 40px rgba(20,30,40,0.10);
-          --glass-inner: rgba(255,255,255,0.5); --glass-inner-border: rgba(255,255,255,0.9);
-          --blob1: rgba(217,160,122,0.50); --blob2: rgba(127,170,130,0.45); --blob3: rgba(150,190,225,0.45);
+          --glass-bg: rgba(255,255,255,0.38); --glass-border: rgba(255,255,255,0.75);
+          --glass-shadow: inset 0 1px 0 rgba(255,255,255,0.9), 0 10px 40px rgba(20,30,40,0.10);
+          --glass-inner: rgba(255,255,255,0.42); --glass-inner-border: rgba(255,255,255,0.8);
+          --blob1: rgba(217,160,122,0.25); --blob2: rgba(127,170,130,0.22); --blob3: rgba(150,190,225,0.22);
           --scrim: rgba(40,30,20,0.35);
+          --control-bg: rgba(255,255,255,0.45); --control-border: rgba(28,25,23,0.18);
+          --glass-modal: rgba(255,255,255,0.82);
+          --primary-glass: rgba(63,107,70,0.85); --primary-glass-edge: rgba(255,255,255,0.45);
+          --cl-bg: rgba(154,91,46,0.18); --cl-text: #6e3d17; --cl-line: rgba(154,91,46,0.5);
         }
         /* The old "dim label" role (section labels, log times, placeholders)
            needs a little more ink than --dim gives on glass over the colour
            blobs. --dim itself stays as specified for off-chips. */
-        .hub { --muted: #727272; }
-        [data-theme="light"] .hub { --muted: #857e76; }
+        .hub { --muted: #969696; }
+        [data-theme="light"] .hub { --muted: #675f58; }
 
         /* ---- page layout: sidebar | main ---- */
         .hub {
@@ -7082,11 +7117,17 @@ export default function SchedulingHub({ session, onSignOut }) {
         .glass-blob-1 { width: 600px; height: 600px; top: -180px; left: -160px; background: var(--blob1); }
         .glass-blob-2 { width: 560px; height: 560px; top: 14%; right: -200px; background: var(--blob2); }
         .glass-blob-3 { width: 620px; height: 620px; bottom: -260px; left: 36%; background: var(--blob3); }
-        .hub-main { position: relative; z-index: 1; flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+        /* One panel per page (round 2, item 1): the main column IS the glass
+           panel — header row on top, the tab's content under it, full width
+           beside the sidebar. The tab cards inside are flat. */
+        .hub-main {
+          position: relative; z-index: 1; flex: 1 1 auto; min-width: 0;
+          display: flex; flex-direction: column; min-height: calc(100vh - 36px);
+        }
 
         /* Glass: the big panels only — blur is costly, so rows and inner
            cards get a lighter pane instead (next rule). */
-        .sidebar, .hub-header, .nr-card, .cal-card {
+        .sidebar, .hub-main {
           background: var(--glass-bg);
           border: 1px solid var(--glass-border);
           border-radius: 20px;
@@ -7094,6 +7135,7 @@ export default function SchedulingHub({ session, onSignOut }) {
           -webkit-backdrop-filter: blur(28px) saturate(170%);
           backdrop-filter: blur(28px) saturate(170%);
         }
+        .nr-card, .cal-card { background: transparent; border: 0; border-radius: 0; box-shadow: none; }
         .nr-item, .nr-panel, .nr-empty, .rs-detail, .cal-day, .cash-recon, .staff-add, .staff-profile,
         .duty-role, .publish-section, .saved-item, .notes-row {
           background: var(--glass-inner); border-color: var(--glass-inner-border);
@@ -7112,11 +7154,13 @@ export default function SchedulingHub({ session, onSignOut }) {
         .sb-brand { display: flex; align-items: center; gap: 10px; padding: 2px 6px 14px; }
         .sb-logo { height: 30px; width: auto; flex-shrink: 0; }
         .sb-word { font-family: 'Space Mono', monospace; font-weight: 700; font-size: 15px; letter-spacing: 4px; color: var(--txt); white-space: nowrap; overflow: hidden; }
-        .sb-collapse {
-          margin-left: auto; width: 32px; height: 32px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center;
-          background: none; border: 1px solid transparent; border-radius: 8px; color: var(--txt2); cursor: pointer; padding: 0;
+        /* The logo is the collapse/expand button (round 2, item 7). */
+        .sb-logo-btn {
+          flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center;
+          width: 38px; height: 38px; padding: 0; background: none; border: 1px solid transparent; border-radius: 10px; cursor: pointer;
         }
-        .sb-collapse:hover { background: var(--s3); color: var(--txt); }
+        .sb-logo-btn:hover { background: var(--s3); border-color: var(--line); }
+        .sb-logo-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
         .sb-nav { display: flex; flex-direction: column; gap: 4px; flex: 1 1 auto; min-height: 0; overflow-y: auto; }
         .sb-item {
           display: flex; align-items: center; gap: 12px; width: 100%; min-height: 42px; padding: 0 12px;
@@ -7154,16 +7198,16 @@ export default function SchedulingHub({ session, onSignOut }) {
         .sb-signout:hover { color: var(--txt); border-color: var(--txt2); }
         /* Collapsed: icon rail. Labels and the count go, the badge becomes a
            dot, the theme switch is one button (see Sidebar.jsx). */
-        .sidebar-collapsed .sb-brand { flex-direction: column; gap: 8px; padding: 2px 0 12px; }
+        .sidebar-collapsed .sb-brand { justify-content: center; padding: 2px 0 12px; }
         .sidebar-collapsed .sb-word, .sidebar-collapsed .sb-label, .sidebar-collapsed .sb-badge, .sidebar-collapsed .sb-user-name { display: none; }
-        .sidebar-collapsed .sb-collapse { margin-left: 0; }
         .sidebar-collapsed .sb-item { justify-content: center; padding: 0; }
         .sidebar-collapsed .sb-dot { display: block; }
         .sidebar-collapsed .sb-user { justify-content: center; padding: 0; }
 
         /* ---- content header ---- */
         .hub-header {
-          max-width: none; margin: 0 0 16px; padding: 12px 20px;
+          max-width: none; margin: 0; padding: 14px 22px;
+          background: none; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; box-shadow: none;
           display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap;
         }
         .hub-header-left { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; min-width: 0; }
@@ -7171,37 +7215,89 @@ export default function SchedulingHub({ session, onSignOut }) {
         .hub-date { color: var(--txt2); }
         .hub-header-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
         .hub-header-right .rs-gmail { margin-left: 0; }
-        .hub-load-error { margin: 0 0 16px; padding: 10px 14px; border-radius: 12px; background: var(--danger-bg); border: 1px solid var(--danger); color: var(--danger-text); font-size: 12.5px; }
-        .update-banner { margin-bottom: 16px; }
-        /* The main column supplies the side spacing now. The Set Schedule
-           wrap keeps its right padding: the notes pad is positioned off it. */
-        .nr-wrap, .cal-wrap, .hub-grid { padding: 0; }
-        .sched-wrap { padding-right: 28px; }
+        .hub-load-error { margin: 14px 22px 0; padding: 10px 14px; border-radius: 12px; background: var(--danger-bg); border: 1px solid var(--danger); color: var(--danger-text); font-size: 12.5px; }
+        .update-banner { margin: 14px 22px 0; }
+        /* Every tab fills the panel's width. */
+        .nr-wrap, .cal-wrap, .hub-grid { max-width: none; margin: 0; padding: 0; }
 
-        /* ---- buttons in the new palette ---- */
-        .publish-btn, .btn-approve, .custom-toggle.on, .publish-btn-sent { background: var(--primary); color: var(--primary-ink); border-color: var(--primary); }
+        /* ---- buttons: sage glass (round 2, item 8) ---- */
+        .publish-btn, .btn-approve, .custom-toggle.on, .publish-btn-sent, .nr-btn-approve {
+          background: var(--primary-glass); color: #ffffff; border: 1px solid var(--primary-glass-edge);
+          box-shadow: inset 0 1px 0 var(--primary-glass-edge);
+          -webkit-backdrop-filter: blur(12px) saturate(140%); backdrop-filter: blur(12px) saturate(140%);
+        }
+        .publish-btn:hover:not(:disabled), .btn-approve:hover:not(:disabled), .nr-btn-approve:hover:not(:disabled), .publish-btn-sent:hover:not(:disabled) { filter: brightness(1.12); }
+        .publish-btn:active:not(:disabled), .btn-approve:active:not(:disabled), .nr-btn-approve:active:not(:disabled) { filter: brightness(1.22); }
+        .publish-btn:disabled, .nr-btn-approve:disabled { opacity: 0.5; }
         .published-badge, .staff-msg, .rs-quicknote-msg, .save-status-saved { color: var(--ok-text); }
         .rs-gmail-ok .rs-gmail-dot, .week-finalized-dot, .staff-reg-dot.reg-yes { background: var(--ok); }
         .print-btn.finalized-active { background: var(--ok); border-color: var(--ok); }
         .rs-q-menu-danger, .rs-note-del:hover:not(:disabled), .remove-payout-btn, .cal-note-del:hover, .shift-mgmt-x:hover, .duty-del:hover { color: var(--danger-text); }
         .delete-confirm-btn { background: var(--danger); color: #fff; }
 
-        /* ---- popups and modals are solid, never glass (readability) ---- */
+        /* ---- popups and modals: denser glass, still blurred (round 2) ---- */
         .notes-modal, .qr-modal, .delete-modal, .day-popup, .staff-edit-modal, .send-modal, .tip-picker,
-        .rs-q-menu, .sched-note-tip, .sched-note-editor, .sched-pad {
-          --s1: var(--surface); --s2: var(--inner); --s3: var(--raised); --line: var(--border); --line2: var(--border-strong);
-          background: var(--surface); color: var(--txt); border-color: var(--border-strong);
+        .rs-q-menu, .sched-note-tip, .sched-note-editor {
+          background: var(--glass-modal); color: var(--txt); border: 1px solid var(--glass-border);
+          box-shadow: var(--glass-shadow);
+          -webkit-backdrop-filter: blur(28px) saturate(170%); backdrop-filter: blur(28px) saturate(170%);
         }
-        .sched-note-editor input, .sched-pad-input { background: var(--inner); color: var(--txt); border-color: var(--border-strong); }
-        .sched-pad-chip { background: var(--raised); color: var(--txt2); }
         .day-popup-backdrop { background: var(--scrim); }
-        /* Dropdowns: solid surface so the option list is readable in both
-           themes; a cell with a chip colour keeps its inline background. */
-        .cell-select, .cell-select.shift-select, .cell-select.role-select { background: var(--surface); border-color: var(--border-strong); color: var(--txt); }
-        .cell-select option, .manual-field option, .staff-section-select option, .staff-primary-select option, select.cell-select option,
-        .manual-field, .staff-section-select, .staff-primary-select { background: var(--surface); color: var(--txt); }
-        .manual-field { border-color: var(--border-strong); }
+
+        /* ---- form controls are glass, never solid (round 2, item 2) ----
+           Selects, inputs and textareas across every tab; the Tip Sheet's
+           underline time cells keep their underline look. A cell with a chip
+           colour keeps its inline chip background. The native option list
+           stays solid: that popup is drawn by the browser. */
+        .hub select, .hub textarea,
+        .hub input:not([type="checkbox"]):not([type="radio"]):not(.tip-time-input) {
+          background: var(--control-bg); border-color: var(--control-border); color: var(--txt);
+        }
+        .hub select:focus, .hub textarea:focus, .hub input:not([type="checkbox"]):not([type="radio"]):focus { border-color: var(--accent); }
+        .cell-select, .cell-select.shift-select, .cell-select.role-select { background: var(--control-bg); border-color: var(--control-border); color: var(--txt); }
+        .cell-select option, .manual-field option, .staff-section-select option, .staff-primary-select option, select.cell-select option { background: var(--surface); color: var(--text); }
+        .sched-pad { background: var(--glass-inner); border: 1px solid var(--glass-inner-border); color: var(--txt); }
+        .tip-picker .tp-type input { background: var(--control-bg); border-color: var(--control-border); }
+        .sched-pad-chip { background: var(--raised); color: var(--txt2); }
+        .sched-pad-head { color: var(--accent); }
         input[type="date"], input[type="time"] { color-scheme: inherit; }
+
+        /* ---- readability (round 2, item 3) ---- */
+        /* Scoped to the schedule grids: the Tip Sheet's table is captured
+           live for its PDF, so its headers keep their weight. */
+        .sched-wrap .week-table th, .cal-week-view .week-table th { color: var(--txt2); font-weight: 700; }
+        .sched-wrap .week-table th.today-col, .cal-week-view .week-table th.today-col { color: var(--accent); }
+        .fm-banner-label { color: var(--txt2); font-weight: 700; }
+        .fm-chip { background: rgba(107,155,195,0.20); border: 1px solid rgba(107,155,195,0.6); }
+        .fm-chip-day { color: var(--info-text); font-weight: 700; }
+        .fm-chip-name { color: var(--txt); }
+        .fm-chip-empty { background: var(--control-bg); border-color: var(--control-border); }
+        .fm-chip-empty .fm-chip-day, .fm-chip-empty .fm-chip-name { color: var(--txt2); }
+        .rs-glance-group, .sched-wrap .role-header, .cal-week-view .role-header { color: var(--accent); font-weight: 700; }
+        .rs-glance-group { font-size: 9.5px; }
+        .cal-holiday-label, .day-popup-holiday { color: var(--danger-text); font-weight: 800; }
+        .nr-label, .col-label, .cal-weekday, .rs-day-name, .rs-detail-meta, .tip-field label, .recon-title, .denom-header, .check-label { color: var(--muted); }
+
+        /* ---- Set Schedule fit (round 2, item 4) ----
+           Toolbar buttons never break their text; the row wraps instead. The
+           grid scrolls inside its card only if the window is too narrow. The
+           notes pad sits BELOW the grid, and beside it only when there is
+           room (>= 1500px), so it is never cut off. */
+        .print-header { flex-wrap: wrap; gap: 8px 10px; }
+        .print-header > div { flex-wrap: wrap; row-gap: 8px; }
+        .print-btn, .publish-btn, .custom-toggle, .today-btn, .past-week-tag, .add-staff-btn { white-space: nowrap; }
+        .sched-wrap { display: flex; flex-direction: column; gap: 14px; padding: 0; }
+        .sched-wrap > .cal-card { flex: 1 1 auto; min-width: 0; overflow-x: auto; }
+        .sched-pad-rail { position: static; width: auto; pointer-events: auto; padding: 0 22px 22px; }
+        .sched-pad { position: static; width: 100%; max-width: none; max-height: none; }
+        .sched-pad.collapsed { width: auto; padding: 0; display: inline-block; }
+        .sched-pad-tab { flex-direction: row; justify-content: flex-start; gap: 8px; padding: 8px 12px; }
+        @media (min-width: 1500px) {
+          .sched-wrap { flex-direction: row; align-items: flex-start; }
+          .sched-pad-rail { flex: 0 0 182px; padding: 0 22px 22px 0; }
+          .sched-pad { position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow-y: auto; }
+          .sched-pad.collapsed { width: 100%; display: block; }
+        }
 
         /* ---- phone / iPad portrait: the sidebar becomes a top bar ---- */
         @media (max-width: 900px) {
@@ -7216,7 +7312,7 @@ export default function SchedulingHub({ session, onSignOut }) {
           .sidebar .sb-brand, .sidebar.sidebar-collapsed .sb-brand { flex-direction: row; gap: 8px; padding: 0 6px 0 2px; order: 1; }
           .sidebar .sb-word, .sidebar.sidebar-collapsed .sb-word { display: inline-block; font-size: 13px; letter-spacing: 3px; }
           .sidebar .sb-logo { height: 24px; }
-          .sidebar .sb-collapse { display: none; }
+          .sidebar .sb-logo-btn { width: 30px; height: 30px; pointer-events: none; }
           .sidebar .sb-nav { order: 3; flex: 1 1 100%; min-width: 0; flex-direction: row; gap: 2px; overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch; }
           .sidebar .sb-item, .sidebar.sidebar-collapsed .sb-item { width: auto; min-height: 38px; padding: 0 10px; gap: 7px; font-size: 12px; justify-content: center; }
           .sidebar .sb-item .sb-label { display: none; }
@@ -7228,7 +7324,7 @@ export default function SchedulingHub({ session, onSignOut }) {
           .sidebar .sb-theme-btn { min-width: 36px; }
           .sidebar .sb-user-name, .sidebar.sidebar-collapsed .sb-user-name { display: none; }
           .hub-header { padding: 10px 14px; }
-          .sched-wrap { padding-right: 0; }
+          .hub-main { min-height: 0; }
         }
       `}</style>
 
@@ -7246,7 +7342,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         tab={tab}
         onTab={setTab}
         pendingCount={pending.length}
-        collapsed={sidebarCollapsed}
+        collapsed={sidebarIsCollapsed}
         onToggleCollapsed={toggleSidebar}
         theme={theme}
         onTheme={setTheme}
@@ -8390,8 +8486,6 @@ export default function SchedulingHub({ session, onSignOut }) {
                   <span className="legend-item">This is the default that fills every week automatically.</span>
                   <span className="legend-item" style={{ marginLeft: "auto" }}>Pick a shift from each cell's dropdown — people with more than one role pick the role first. (FC = first cut, SC = second cut, CL = close)</span>
                 </div>
-                <img src={HAENYEO_ICON} alt="Haenyeo" className="template-icon" />
-
                 <div className="fm-banner">
                   <span className="fm-banner-label">Manager on</span>
                   {WEEKDAY_LABELS.map((w, wi) => {
