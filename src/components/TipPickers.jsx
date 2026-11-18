@@ -1,12 +1,26 @@
 // Tip Sheet tap panels: TIME IN / TIME OUT and the cash rows. Screen only.
 //
-// The panel is rendered at the top level of the hub (like the app's modals),
-// never inside the sheet card, and fixed-positioned from the tapped cell's
-// rect. So no ancestor's overflow can clip it, nothing under it moves, and the
-// PDF capture (the card) and @media print (.screen-only) never see it.
+// The panel is portalled into .hub itself — never inside the sheet card and
+// never inside .hub-main — and fixed-positioned from the tapped cell's rect.
+// .hub-main is the blurred glass panel, and an element with backdrop-filter
+// becomes the box that position:fixed children are placed against, so a panel
+// drawn inside it landed one sidebar-width too far right (off the iPad's
+// screen, iPad fixes 2026-11-18). .hub has no filter or transform, so here
+// fixed means the screen, and the theme tokens .hub sets still apply.
+// No ancestor's overflow can clip it, nothing under it moves, and the PDF
+// capture (the card) and @media print (.screen-only) never see it.
+//
+// Two placements:
+// - 1100px and wider: a popover under (or over) the tapped cell, clamped so
+//   every edge stays on screen.
+// - Under 1100px (iPad either way round, phones): a bottom sheet, centred and
+//   docked to the bottom of what's visible (above the on-screen keyboard when
+//   it's up). If the sheet would cover the tapped cell, the page scrolls up
+//   once so the row being entered stays in sight.
 // Choices live in lib/tipPickers.js, which is tested against what the sheet pays.
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { formatTime, parsePickerTime } from "../lib/tipTimes.js";
 import {
@@ -16,31 +30,69 @@ import {
 
 const GAP = 6;
 const EDGE = 8;
+const SHEET_QUERY = "(max-width: 1099px)";
 
 // Desktop (a mouse) gets the type field focused straight away; a touch screen
 // doesn't, so the iPad keyboard only comes up when the field is tapped.
 const finePointer = () => typeof window !== "undefined" && !!window.matchMedia?.("(pointer: fine)").matches;
+const sheetWidth = () => typeof window !== "undefined" && !!window.matchMedia?.(SHEET_QUERY).matches;
+// lo wins when the panel is bigger than the room (top/left edge stays visible).
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(v, hi));
 
 export function PickerPanel({ anchor, onClose, label, children }) {
   const ref = useRef(null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
   const [pos, setPos] = useState(null);
+  const [sheet, setSheet] = useState(sheetWidth);
+  const revealedFor = useRef(null); // the cell already scrolled clear of the sheet
+
+  // Turning the iPad (or resizing a window) across 1100px switches placement.
+  useEffect(() => {
+    const mq = window.matchMedia?.(SHEET_QUERY);
+    if (!mq) return undefined;
+    const onChange = () => setSheet(mq.matches);
+    if (mq.addEventListener) mq.addEventListener("change", onChange);
+    else mq.addListener(onChange); // older iPad Safari
+    return () => { if (mq.removeEventListener) mq.removeEventListener("change", onChange); else mq.removeListener(onChange); };
+  }, []);
 
   useLayoutEffect(() => {
     function place() {
       const el = ref.current;
       if (!el || !anchor?.isConnected) return;
       const r = anchor.getBoundingClientRect();
+      // The visible part of the page, in the same coordinates as `r` and as
+      // position:fixed (pinch-zoom and the iPad keyboard shrink it).
       const vv = window.visualViewport;
-      const vw = vv ? vv.width + vv.offsetLeft : window.innerWidth;
-      const vh = vv ? vv.height + vv.offsetTop : window.innerHeight;
+      const minX = vv ? vv.offsetLeft : 0;
+      const minY = vv ? vv.offsetTop : 0;
+      const maxX = minX + (vv ? vv.width : window.innerWidth);
+      const maxY = minY + (vv ? vv.height : window.innerHeight);
       const w = el.offsetWidth;
       const h = el.offsetHeight;
-      const left = Math.max(EDGE, Math.min(r.left + r.width / 2 - w / 2, vw - w - EDGE));
-      let top = r.bottom + GAP;
-      if (top + h > vh - EDGE && r.top - h - GAP >= EDGE) top = r.top - h - GAP; // no room below: open above
-      setPos({ left, top });
+      let left;
+      let top;
+      if (sheet) {
+        // Home-indicator room on iPads without a home button (0 elsewhere);
+        // CSS gives the sheet a margin-bottom of env(safe-area-inset-bottom).
+        const safe = parseFloat(getComputedStyle(el).marginBottom) || 0;
+        left = clamp(minX + (maxX - minX - w) / 2, minX + EDGE, maxX - w - EDGE);
+        top = clamp(maxY - h - EDGE - safe, minY + EDGE, maxY - h - EDGE);
+        if (revealedFor.current !== anchor) {
+          revealedFor.current = anchor;
+          const covered = r.bottom + GAP - top;
+          // Instant, not smooth: a smooth scroll is cancelled by the type
+          // field's autofocus (mouse screens) and never finishes in a hidden tab.
+          if (covered > 0) window.scrollBy(0, covered);
+        }
+      } else {
+        left = clamp(r.left + r.width / 2 - w / 2, minX + EDGE, maxX - w - EDGE);
+        top = r.bottom + GAP;
+        if (top + h > maxY - EDGE && r.top - h - GAP >= minY + EDGE) top = r.top - h - GAP; // no room below: open above
+        top = clamp(top, minY + EDGE, maxY - h - EDGE); // no room either way: stay on screen
+      }
+      setPos((p) => (p && p.left === left && p.top === top ? p : { left, top }));
     }
     place();
     const ro = new ResizeObserver(place);
@@ -56,7 +108,7 @@ export function PickerPanel({ anchor, onClose, label, children }) {
       window.visualViewport?.removeEventListener("resize", place);
       window.visualViewport?.removeEventListener("scroll", place);
     };
-  }, [anchor]);
+  }, [anchor, sheet]);
 
   // Tapping outside closes (tapping another cell closes this, then opens that
   // one — one panel at a time). Escape closes.
@@ -74,10 +126,10 @@ export function PickerPanel({ anchor, onClose, label, children }) {
     };
   }, [anchor]);
 
-  return (
+  const panel = (
     <div
       ref={ref}
-      className="tip-picker screen-only"
+      className={`tip-picker screen-only${sheet ? " tp-sheet" : ""}`}
       role="dialog"
       aria-label={label}
       style={{ left: pos?.left ?? 0, top: pos?.top ?? 0, visibility: pos ? "visible" : "hidden" }}
@@ -85,6 +137,8 @@ export function PickerPanel({ anchor, onClose, label, children }) {
       {children}
     </div>
   );
+  const host = anchor?.closest?.(".hub") || document.body;
+  return createPortal(panel, host);
 }
 
 function Arrows({ onPrev, onNext, prevDisabled, children, what }) {

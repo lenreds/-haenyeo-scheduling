@@ -6253,6 +6253,10 @@ export default function SchedulingHub({ session, onSignOut }) {
         .tip-picker .tp-note { margin-top: 8px; font-size: 12px; color: var(--txt2, #aaa); line-height: 1.4; }
         .tip-picker .tp-warn { color: var(--warn-text); }
         .tip-picker .tp-foot { margin-top: 10px; }
+        /* Under 1100px the panel is a bottom sheet (TipPickers.jsx places it).
+           The margin is never laid out (the sheet is fixed with an explicit
+           top) — PickerPanel reads it to keep clear of the home indicator. */
+        .tip-picker.tp-sheet { width: min(520px, calc(100vw - 16px)); padding: 14px; border-radius: 16px; margin-bottom: env(safe-area-inset-bottom, 0px); box-shadow: 0 -10px 40px rgba(0,0,0,0.45), 0 16px 40px rgba(0,0,0,0.55); }
         .manual-add-btn { margin-left: auto; font-family: 'Plus Jakarta Sans', sans-serif; font-weight: 700; font-size: 11.5px; padding: 5px 12px; border-radius: 8px; border: 1px solid rgba(47,52,50,0.15); background: #2F3432; color: #F5F0E3; cursor: pointer; text-transform: none; letter-spacing: 0; }
         .manual-field-label { display: block; font-family: 'Space Mono', monospace; font-size: 10.5px; letter-spacing: 0.6px; text-transform: uppercase; color: #85897F; margin: 12px 0 4px; }
         .manual-field { width: 100%; box-sizing: border-box; font-family: 'Plus Jakarta Sans', sans-serif; font-size: 13px; color: #2B2A25; background: #FDFBF4; border: 1px solid #d8d2c2; border-radius: 7px; padding: 8px 10px; }
@@ -7088,7 +7092,9 @@ export default function SchedulingHub({ session, onSignOut }) {
           --glass-bg: rgba(255,255,255,0.055); --glass-border: rgba(255,255,255,0.12);
           --glass-shadow: inset 0 1px 0 rgba(255,255,255,0.10), 0 10px 40px rgba(0,0,0,0.45);
           --glass-inner: rgba(255,255,255,0.04); --glass-inner-border: rgba(255,255,255,0.08);
-          --blob1: rgba(217,160,122,0.40); --blob2: rgba(79,122,85,0.45); --blob3: rgba(107,155,195,0.35);
+          /* blob3 was blue rgba(107,155,195,0.35) — read teal-blue on iPad;
+             deep sage now, a touch under the 0.40 asked for (iPad fixes). */
+          --blob1: rgba(217,160,122,0.40); --blob2: rgba(79,122,85,0.45); --blob3: rgba(52,110,78,0.36);
           --scrim: rgba(0,0,0,0.55);
           /* round 2: glass controls, glass modals, sage-glass buttons, CL chips */
           --control-bg: rgba(255,255,255,0.07); --control-border: rgba(255,255,255,0.16);
@@ -7172,9 +7178,21 @@ export default function SchedulingHub({ session, onSignOut }) {
           width: 248px; height: calc(100vh - 36px); flex: 0 0 auto;
           display: flex; flex-direction: column; box-sizing: border-box;
           padding: 16px 12px 14px; overflow: hidden;
-          transition: width 0.22s ease, padding 0.22s ease;
+          /* No width transition (iPad fixes 2026-11-18). Animating the width
+             made the main glass panel resize every frame, and iPad Safari
+             re-rendered its backdrop blur each time — the page smeared and
+             text doubled. Now the sidebar and the main column change size in
+             one step; only the sidebar's own labels fade in (below), and not
+             at all on touch screens. */
         }
         .sidebar-collapsed { width: 76px; padding: 16px 10px 14px; }
+        @keyframes sb-labels-in { from { opacity: 0; } to { opacity: 1; } }
+        @media (min-width: 901px) and (hover: hover) and (pointer: fine) and (prefers-reduced-motion: no-preference) {
+          .sidebar:not(.sidebar-collapsed) .sb-word,
+          .sidebar:not(.sidebar-collapsed) .sb-label,
+          .sidebar:not(.sidebar-collapsed) .sb-badge,
+          .sidebar:not(.sidebar-collapsed) .sb-user-name { animation: sb-labels-in 0.18s ease-out both; }
+        }
         .sb-brand { display: flex; align-items: center; gap: 10px; padding: 2px 6px 14px; }
         .sb-logo { height: 30px; width: auto; flex-shrink: 0; }
         .sb-word { font-family: 'Space Mono', monospace; font-weight: 700; font-size: 15px; letter-spacing: 4px; color: var(--txt); white-space: nowrap; overflow: hidden; }
