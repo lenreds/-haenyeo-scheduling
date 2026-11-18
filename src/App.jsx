@@ -2,6 +2,7 @@ import React, { useState, useMemo, useEffect, useRef } from "react";
 import { flushSync } from "react-dom";
 import { Check, X, AlertTriangle, Users, Package, Clock, ChevronLeft, ChevronRight, ChevronDown, Printer, FileDown, Calendar, CalendarDays, CalendarPlus, StickyNote, Receipt, Lock, Unlock, FolderOpen, UserPlus } from "lucide-react";
 import Sidebar, { NAV_ITEMS } from "./components/Sidebar.jsx";
+import DialogLayer from "./components/DialogLayer.jsx";
 import {
   fetchInitial,
   fetchRailRequests,
@@ -7379,6 +7380,42 @@ export default function SchedulingHub({ session, onSignOut }) {
         }
         .day-popup-backdrop { background: var(--scrim); }
 
+        /* ---- dialogs over the whole screen (dialog-fixes 2026-11-18) ----
+           DialogLayer draws every backdrop into .hub (not inside the glass
+           panel) and sizes it to the visible screen. The dialog is centred
+           in it, never wider or taller than it; a taller one scrolls inside
+           itself. Only when it scrolls (.dlg-scrolls) its header (close
+           button) and its button row are pinned, reaching the dialog's
+           edges through its own padding (--dlg-*), on the same glass. */
+        .day-popup-backdrop {
+          position: fixed; inset: 0; z-index: 60; box-sizing: border-box;
+          padding: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right))
+                   max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+        }
+        .day-popup-backdrop > * {
+          max-width: 100%; max-height: 100%; flex: 0 1 auto;
+          overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
+        }
+        /* Add Request used to inherit the Rail's font from .nr-wrap. */
+        .manual-modal { font-family: 'Plus Jakarta Sans', sans-serif; }
+        .dlg-scrolls > .day-popup-head:first-child,
+        .dlg-scrolls > :is(.delete-modal-actions, .send-actions, .dialog-actions):last-child {
+          position: sticky; z-index: 2;
+          margin-left: calc(-1 * var(--dlg-pl, 0px)); margin-right: calc(-1 * var(--dlg-pr, 0px));
+          padding-left: var(--dlg-pl, 0px); padding-right: var(--dlg-pr, 0px);
+          background: linear-gradient(var(--glass-modal), var(--glass-modal)), linear-gradient(var(--glass-modal), var(--glass-modal));
+        }
+        .dlg-scrolls > .day-popup-head:first-child {
+          /* Sticky offsets count from inside the dialog's padding, so the
+             negative top/bottom puts the bar on the dialog's very edge. */
+          top: calc(-1 * var(--dlg-pt, 0px)); margin-top: calc(-1 * var(--dlg-pt, 0px)); padding-top: var(--dlg-pt, 0px); padding-bottom: 8px;
+          border-bottom: 1px solid var(--line);
+        }
+        .dlg-scrolls > :is(.delete-modal-actions, .send-actions, .dialog-actions):last-child {
+          bottom: calc(-1 * var(--dlg-pb, 0px)); margin-bottom: calc(-1 * var(--dlg-pb, 0px)); padding-bottom: var(--dlg-pb, 0px); padding-top: 12px;
+          border-top: 1px solid var(--line);
+        }
+
         /* ---- form controls are glass, never solid (round 2, item 2) ----
            Selects, inputs and textareas across every tab; the Tip Sheet's
            underline time cells keep their underline look. A cell with a chip
@@ -8263,8 +8300,8 @@ export default function SchedulingHub({ session, onSignOut }) {
           </div>
 
           {manualOpen && (
-            <div className="day-popup-backdrop" onClick={() => !manualBusy && setManualOpen(false)}>
-              <div className="delete-modal" onClick={(e) => e.stopPropagation()}>
+            <DialogLayer className="day-popup-backdrop" onClick={() => !manualBusy && setManualOpen(false)}>
+              <div className="delete-modal manual-modal" onClick={(e) => e.stopPropagation()}>
                 <div className="delete-modal-title">Add Request</div>
                 <div className="delete-modal-body">
                   Log a scheduling request made in person. A paper-trail copy goes to the scheduling inbox, and the staff member gets a confirmation email if they're registered.
@@ -8317,7 +8354,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                   </button>
                 </div>
               </div>
-            </div>
+            </DialogLayer>
           )}
         </div>
       )}
@@ -10085,7 +10122,7 @@ export default function SchedulingHub({ session, onSignOut }) {
           {qrModal && (() => {
             const spec = QR_CODES.find((q) => q.key === qrModal);
             return (
-              <div className="day-popup-backdrop" onClick={() => setQrModal(null)}>
+              <DialogLayer className="day-popup-backdrop" onClick={() => setQrModal(null)}>
                 <div className="qr-modal" onClick={(e) => e.stopPropagation()}>
                   <div className="day-popup-head">
                     <div className="day-popup-date">{spec?.label}</div>
@@ -10100,12 +10137,12 @@ export default function SchedulingHub({ session, onSignOut }) {
                     <div className="qr-warn">⚠ VITE_STAFF_REGISTER_CODE isn't set — this QR has a placeholder code. Set it in Vercel and redeploy.</div>
                   )}
                 </div>
-              </div>
+              </DialogLayer>
             );
           })()}
 
           {deleteTarget && (
-            <div className="day-popup-backdrop" onClick={() => !deleting && setDeleteTarget(null)}>
+            <DialogLayer className="day-popup-backdrop" onClick={() => !deleting && setDeleteTarget(null)}>
               <div className="delete-modal" onClick={(e) => e.stopPropagation()}>
                 <div className="delete-modal-title">Delete {deleteTarget.name}?</div>
                 <div className="delete-modal-body">
@@ -10121,7 +10158,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                   </button>
                 </div>
               </div>
-            </div>
+            </DialogLayer>
           )}
         </div>
       )}
@@ -10149,7 +10186,7 @@ export default function SchedulingHub({ session, onSignOut }) {
       {editingStaffId && (() => {
         const staff = staffList.find((s) => s.id === editingStaffId);
         return staff ? (
-          <div className="day-popup-backdrop" onClick={() => setEditingStaffId(null)}>
+          <DialogLayer className="day-popup-backdrop" onClick={() => setEditingStaffId(null)}>
             <div className="staff-edit-modal" onClick={(e) => e.stopPropagation()}>
               <div style={{ marginBottom: 16 }}>
                 <div style={{ fontFamily: "'Space Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: "#8c8574", marginBottom: 4 }}>Staff Member</div>
@@ -10181,12 +10218,12 @@ export default function SchedulingHub({ session, onSignOut }) {
 
               <div style={{ fontSize: 11, color: "#8c8574", fontStyle: "italic", marginBottom: 16 }}>Contact info will be saved and staff will be marked as Registered.</div>
 
-              <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <div className="dialog-actions" style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
                 <button className="nr-btn nr-btn-deny" onClick={() => setEditingStaffId(null)}>Cancel</button>
                 <button className="publish-btn" onClick={handleSaveStaffProfile}>Save</button>
               </div>
             </div>
-          </div>
+          </DialogLayer>
         ) : null;
       })()}
 
@@ -10197,7 +10234,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         const isDelete = mode === "delete";
         const close = () => { if (!railActionBusy) setRailConfirm(null); };
         return (
-          <div className="day-popup-backdrop" onClick={close}>
+          <DialogLayer className="day-popup-backdrop" onClick={close}>
             <div className="delete-modal" onClick={(e) => e.stopPropagation()}>
               <div className="delete-modal-title">{isDelete ? "Delete request" : "Archive request"}</div>
               <div className="delete-modal-body">
@@ -10226,12 +10263,12 @@ export default function SchedulingHub({ session, onSignOut }) {
                 )}
               </div>
             </div>
-          </div>
+          </DialogLayer>
         );
       })()}
 
       {timeOffBlock && (
-        <div className="day-popup-backdrop" onClick={() => setTimeOffBlock(null)}>
+        <DialogLayer className="day-popup-backdrop" onClick={() => setTimeOffBlock(null)}>
           <div className="delete-modal" onClick={(e) => e.stopPropagation()}>
             <div className="delete-modal-title">Approved time off</div>
             <div className="delete-modal-body">
@@ -10242,7 +10279,7 @@ export default function SchedulingHub({ session, onSignOut }) {
               <button className="delete-confirm-btn" onClick={() => { const fn = timeOffBlock.onOverride; setTimeOffBlock(null); fn && fn(); }}>Override</button>
             </div>
           </div>
-        </div>
+        </DialogLayer>
       )}
 
       {/* Today at a Glance swap dialog (brief item 5). Writes schedule_overrides
@@ -10256,7 +10293,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         const dateLabel = new Date(`${swapModal.dateIso || TODAY_ISO}T00:00:00`)
           .toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
         return (
-          <div className="day-popup-backdrop" onClick={() => !swapBusy && setSwapModal(null)}>
+          <DialogLayer className="day-popup-backdrop" onClick={() => !swapBusy && setSwapModal(null)}>
             <div className="delete-modal" onClick={(e) => e.stopPropagation()}>
               <div className="delete-modal-title">{swapForm.removeOnly ? "Remove from shift" : "Swap shift"}</div>
 
@@ -10346,7 +10383,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                 </button>
               </div>
             </div>
-          </div>
+          </DialogLayer>
         );
       })()}
 
@@ -10367,7 +10404,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         const shiftLabel = dayOfForm.shift ? roleShiftText(role, dayOfForm.shift) : "";
         const ready = isAdd ? !!(dayOfForm.name && role && dayOfForm.shift && !full) : true;
         return (
-          <div className="day-popup-backdrop" onClick={() => !dayOfBusy && setDayOfModal(null)}>
+          <DialogLayer className="day-popup-backdrop" onClick={() => !dayOfBusy && setDayOfModal(null)}>
             <div className="delete-modal" onClick={(e) => e.stopPropagation()}>
               <div className="delete-modal-title">{isAdd ? "Add staff" : "Remove from shift"}</div>
 
@@ -10447,7 +10484,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                 </button>
               </div>
             </div>
-          </div>
+          </DialogLayer>
         );
       })()}
 
@@ -10484,7 +10521,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         const verb = action === "lock" ? "Lock" : "Send";
         const canGo = !blocks.length && ticked.length >= zeroes.length;
         return (
-          <div className="day-popup-backdrop screen-only">
+          <DialogLayer className="day-popup-backdrop screen-only">
             <div className="delete-modal tip-guard-modal" role="alertdialog" aria-labelledby="tip-guard-title">
               <div className="delete-modal-title" id="tip-guard-title">
                 {blocks.length ? `Can't ${verb.toLowerCase()} ${shortDate(tipDateIso)} yet` : `Check before you ${verb.toLowerCase()}`}
@@ -10518,7 +10555,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                 )}
               </div>
             </div>
-          </div>
+          </DialogLayer>
         );
       })()}
 
@@ -10528,7 +10565,7 @@ export default function SchedulingHub({ session, onSignOut }) {
           optional note are all editable here; the email only goes out on
           Confirm & Send. */}
       {tipSendOpen && (
-        <div className="day-popup-backdrop" onClick={() => !tipSendBusy && setTipSendOpen(false)}>
+        <DialogLayer className="day-popup-backdrop" onClick={() => !tipSendBusy && setTipSendOpen(false)}>
           <div className="send-modal" onClick={(e) => e.stopPropagation()}>
             <div className="day-popup-head">
               <div className="day-popup-date">Send Tip Sheet — {tipSendDayLabel}</div>
@@ -10638,7 +10675,7 @@ export default function SchedulingHub({ session, onSignOut }) {
               </button>
             </div>
           </div>
-        </div>
+        </DialogLayer>
       )}
 
       {/* Publish dialog. Nothing is emailed until Confirm & Send; the test goes
@@ -10673,7 +10710,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         const weekStatus = (w) => PUBLISH_SECTIONS.map((sec) =>
           `${sec.key === "foh" ? "FOH" : "BOH & Kitchen"} ${pendingPublish[sec.key].includes(w) ? "pending" : "sent"}`).join(" · ");
         return (
-          <div className="day-popup-backdrop" onClick={close}>
+          <DialogLayer className="day-popup-backdrop" onClick={close}>
             <div className="send-modal" onClick={(e) => e.stopPropagation()}>
               <div className="day-popup-head">
                 <div className="day-popup-date">Publish schedule</div>
@@ -10828,7 +10865,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                 </button>
               </div>
             </div>
-          </div>
+          </DialogLayer>
         );
       })()}
 
@@ -10840,7 +10877,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         const close = () => { if (!ed.busy) setShiftEditor(null); };
         const hint = !ed.isOff && looksLikeOffLabel(ed.label);
         return (
-          <div className="day-popup-backdrop" onClick={close}>
+          <DialogLayer className="day-popup-backdrop" onClick={close}>
             <div className="delete-modal shift-editor" onClick={(e) => e.stopPropagation()}>
               <div className="day-popup-head">
                 <div className="day-popup-date">{isNew ? `Add a ${ed.role} shift` : `Edit ${ed.role} shift`}</div>
@@ -10912,7 +10949,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                 </button>
               </div>
             </div>
-          </div>
+          </DialogLayer>
         );
       })()}
 
@@ -10927,7 +10964,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         const where = `${SAVED_SECTION_LABEL[m.section]}, week of ${shortDate(m.ws)}`;
         const p = m.preview;
         return (
-          <div className="day-popup-backdrop" onClick={close}>
+          <DialogLayer className="day-popup-backdrop" onClick={close}>
             <div className="delete-modal saved-sched-modal" onClick={(e) => e.stopPropagation()}>
               <div className="day-popup-head">
                 <div className="day-popup-date">{p ? `Apply "${p.template.name}"` : `Saved schedules — ${SAVED_SECTION_LABEL[m.section]}`}</div>
@@ -11027,12 +11064,12 @@ export default function SchedulingHub({ session, onSignOut }) {
                 </>
               )}
             </div>
-          </div>
+          </DialogLayer>
         );
       })()}
 
       {notesWeek && (
-        <div className="day-popup-backdrop" onClick={() => { setNotesWeek(null); setNoteEditId(null); }}>
+        <DialogLayer className="day-popup-backdrop" onClick={() => { setNotesWeek(null); setNoteEditId(null); }}>
           <div className="notes-modal" onClick={(e) => e.stopPropagation()}>
             <div className="day-popup-head">
               <div className="day-popup-date">
@@ -11101,7 +11138,7 @@ export default function SchedulingHub({ session, onSignOut }) {
               </div>
             )}
           </div>
-        </div>
+        </DialogLayer>
       )}
 
       </div>{/* end .hub-main */}
