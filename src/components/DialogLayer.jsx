@@ -94,3 +94,61 @@ export default function DialogLayer({ children, ...props }) {
   const host = typeof document !== "undefined" ? document.querySelector(".hub") : null;
   return host ? createPortal(layer, host) : layer;
 }
+
+// The click-away layer behind a small menu ("•••", Print / PDF, Saved
+// schedules, the status pill), covering the whole screen (clock-wheel round,
+// 2026-11-18). Two layers, one handler:
+// - .rs-q-menu-scrim where it's written, inside the glass panel, under the
+//   open menu, as before. The panel's blur makes the panel the box fixed is
+//   measured from, so inset: 0 only covered the panel. It's now sized to the
+//   whole page instead (in the panel's coordinates, so it scrolls with the
+//   page and never makes the page any bigger) — that also covers anything
+//   that sticks out past the panel's edge (the Set Schedule grid does at
+//   768px). While a menu is open, .hub gets data-menu-open and CSS lifts the
+//   panel above the sidebar, so this layer covers the sidebar too and the
+//   menu stays on top of everything.
+// - Its twin, drawn in .hub, is a plain full-screen layer under the lifted
+//   panel: a second net for anything outside it.
+// A tap anywhere outside the menu lands on one of them and closes it, and
+// nothing underneath picks the tap up. React treats both as children of the
+// menu, so the click reaches the same handlers the old layer's did.
+export function MenuScrim({ onClose }) {
+  const ref = useRef(null);
+  const host = typeof document !== "undefined" ? document.querySelector(".hub") : null;
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return undefined;
+    // An attribute React doesn't manage, counted in case two are ever open.
+    const hub = el.closest(".hub");
+    if (hub) hub.dataset.menuOpen = String((Number(hub.dataset.menuOpen) || 0) + 1);
+    const fit = () => {
+      for (const p of ["inset", "top", "left", "width", "height"]) el.style.removeProperty(p);
+      const cb = el.getBoundingClientRect(); // with inset: 0, the box fixed is measured from
+      const root = document.documentElement;
+      const isScreen = Math.abs(cb.left) < 1 && Math.abs(cb.top) < 1 &&
+        Math.abs(cb.width - root.clientWidth) < 1 && Math.abs(cb.height - root.clientHeight) < 1;
+      if (isScreen) return; // a real full-screen layer already
+      const se = document.scrollingElement || root;
+      el.style.inset = "auto";
+      el.style.left = `${-(cb.left + window.scrollX)}px`;
+      el.style.top = `${-(cb.top + window.scrollY)}px`;
+      el.style.width = `${Math.floor(se.scrollWidth)}px`;
+      el.style.height = `${Math.floor(se.scrollHeight)}px`;
+    };
+    fit();
+    window.addEventListener("resize", fit);
+    return () => {
+      window.removeEventListener("resize", fit);
+      if (hub) {
+        const n = (Number(hub.dataset.menuOpen) || 1) - 1;
+        if (n > 0) hub.dataset.menuOpen = String(n); else delete hub.dataset.menuOpen;
+      }
+    };
+  }, []);
+  return (
+    <>
+      <div ref={ref} className="rs-q-menu-scrim" onClick={onClose} />
+      {host && createPortal(<div className="rs-q-menu-scrim rs-q-menu-scrim-out" onClick={onClose} />, host)}
+    </>
+  );
+}

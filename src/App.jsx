@@ -2,7 +2,7 @@ import React, { useState, useMemo, useEffect, useRef } from "react";
 import { flushSync } from "react-dom";
 import { Check, X, AlertTriangle, Users, Package, Clock, ChevronLeft, ChevronRight, ChevronDown, Printer, FileDown, Calendar, CalendarDays, CalendarPlus, StickyNote, Receipt, Lock, Unlock, FolderOpen, UserPlus } from "lucide-react";
 import Sidebar, { NAV_ITEMS } from "./components/Sidebar.jsx";
-import DialogLayer from "./components/DialogLayer.jsx";
+import DialogLayer, { MenuScrim } from "./components/DialogLayer.jsx";
 import {
   fetchInitial,
   fetchRailRequests,
@@ -102,7 +102,7 @@ import { calcTips, sheetCalcVersion } from "./lib/tipMath.js";
 import { ackEntry, tipSheetProblems, zeroesAllAcked } from "./lib/tipGuard.js";
 import { pickerMayOpen, scheduledStartMins } from "./lib/tipPickers.js";
 import { planApply, undoConflicts, SECTION_GROUPS } from "./lib/scheduleTemplates.js";
-import { BankWheel, BankWheelIdle, PickerPanel, TimePickerBody } from "./components/TipPickers.jsx";
+import { BankWheel, BankWheelIdle, ClockWheel, PickerPanel } from "./components/TipPickers.jsx";
 import RailTipPanel, { PanelBoundary } from "./components/RailTipPanel.jsx";
 import UpdateBanner from "./components/UpdateBanner.jsx";
 import QRCode from "qrcode";
@@ -1564,9 +1564,14 @@ export default function SchedulingHub({ session, onSignOut }) {
   const [zeroTipAcks, setZeroTipAcks] = useState([]);
   // The Lock / Send stop: { action: "lock" | "send", blocks, zeroes, ticked }.
   const [tipGuard, setTipGuard] = useState(null);
-  // The open time panel: { kind: "time", slotId, field, name, scheduled,
-  // anchor }. null = none. (Bank counts use the wheel below, not a panel.)
+  // The open Clock In / Clock Out wheel (clock-wheel, 2026-11-18):
+  // { kind: "time", slotId, field, name, scheduled, anchor, beside, dateIso }.
+  // null = none. Screen only — the person's row is highlighted and the wheel
+  // floats beside the table (or, on narrow screens, opens as a bottom sheet).
+  // clockFlushRef saves a spin that hasn't settled yet; see ClockWheel in
+  // components/TipPickers.jsx.
   const [tipPicker, setTipPicker] = useState(null);
+  const clockFlushRef = useRef(null);
   // The bank cell the count wheel is on (iPad fixes, 2026-11-18):
   // { which: "open" | "close", denom, anchor, dateIso }. null = none. Screen
   // only — the row is highlighted and the wheel sits beside the table (or, on
@@ -2570,14 +2575,27 @@ export default function SchedulingHub({ session, onSignOut }) {
   const tipPickerAllowed = pickerMayOpen({ locked: tipLocked, finalized: tipFinalized });
   function openTimePicker(e, p, field) {
     if (!pickerMayOpen({ locked: tipLocked, finalized: tipFinalized, hasPerson: !!p.name })) return;
+    const cell = e.currentTarget;
+    clockFlushRef.current?.(); // an unsettled spin on the previous time still counts
+    closeBankWheel(); // one wheel at a time
+    // Beside the table or a bottom sheet is decided at the tap, as for the
+    // bank wheel, even if a rotation's resize event was missed.
+    setBankNarrow(window.matchMedia("(max-width: 899px)").matches);
     const w = tipWorking.working.find((x) => x.name === p.name);
     const scheduled = w ? scheduledStartMins(normalizeShiftCode(w.code, w.role)) : null;
-    setTipPicker({ kind: "time", slotId: p.id, field, name: p.name, scheduled, anchor: e.currentTarget });
+    // The table the wheel floats beside: the Rail panel's times list, or the
+    // Tip Sheet table's scroll box (its visible width).
+    const beside = cell.closest(".rtp-times") || cell.closest("table")?.parentElement || null;
+    setTipPicker({ kind: "time", slotId: p.id, field, name: p.name, scheduled, anchor: cell, beside, dateIso: tipDateIso });
+  }
+  function closeClockWheel() {
+    clockFlushRef.current?.();
+    setTipPicker(null);
   }
   function openCashPicker(e, which, denom) {
     if (!tipPickerAllowed) return;
     bankFlushRef.current?.(); // an unsettled spin on the previous cell still counts
-    setTipPicker(null);
+    closeClockWheel();
     // Re-read the width at the tap too: beside the table or a bottom sheet is
     // decided now, even if a rotation's resize event was missed.
     setBankNarrow(window.matchMedia("(max-width: 899px)").matches);
@@ -2783,9 +2801,10 @@ export default function SchedulingHub({ session, onSignOut }) {
   // the selection, which drops an unsettled spin instead of saving it).
   const tipDateRef = useRef(tipDateIso);
   tipDateRef.current = tipDateIso;
-  useEffect(() => { setBankSel(null); }, [tab, tipDateIso]);
+  useEffect(() => { setBankSel(null); setTipPicker(null); }, [tab, tipDateIso]);
   // The Tip Sheet's own lock rule; on the Rail, its stricter read-only rule.
   const bankWheelAllowed = tipPickerAllowed && !(tab === "rail" && railTipReadOnlyWhy);
+  const clockWheelAllowed = bankWheelAllowed;
   // Tip Sheet tab: the wheel column beside the Cash table (wide screens, sheet
   // editable, and not while the PDF is being drawn).
   const tipWheelBeside = !bankNarrow && tipPickerAllowed && !tipPdfBusy;
@@ -2809,7 +2828,7 @@ export default function SchedulingHub({ session, onSignOut }) {
   }
   function toggleRailTip() {
     if (!railTipOpen) setTipDateIso(railTipIso);
-    setTipPicker(null);
+    closeClockWheel();
     closeBankWheel();
     setRailTipOpen((o) => !o);
   }
@@ -3984,16 +4003,22 @@ export default function SchedulingHub({ session, onSignOut }) {
   // saved page. It throws on failure — the send path must not email without it.
   const tipSheetPdfFilename = `Haenyeo-TipSheet-${tipDateIso}.pdf`;
   async function renderTipSheetPdf() {
-    setTipPicker(null); // never in the capture (it sits outside the card anyway)
-    // The bank count wheel sits INSIDE the card. Close it synchronously, saving
-    // an unsettled spin first, so no wheel, no typed-amount field and no copper
-    // highlight is in the DOM when the capture starts. (The capture pairs live
-    // inputs with the clone's by position after stripping .screen-only, so an
-    // input inside the wheel would shift every value after it.)
-    // tipPdfBusy also takes the wheel column and its screen-only widths out
-    // for the capture, so the card is laid out exactly as it was before the
-    // wheel existed.
-    flushSync(() => { bankFlushRef.current?.(); setBankSel(null); setTipPdfBusy(true); });
+    // Both wheels close synchronously, each saving an unsettled spin first, so
+    // no wheel, no typed field and no copper highlight is in the DOM when the
+    // capture starts. The bank count wheel sits INSIDE the card; the clock
+    // wheel floats outside it, but its row and cell highlight are inside.
+    // (The capture pairs live inputs with the clone's by position after
+    // stripping .screen-only, so an input inside a wheel would shift every
+    // value after it.) tipPdfBusy also takes the bank wheel column and its
+    // screen-only widths out for the capture, so the card is laid out exactly
+    // as it was before the wheels existed.
+    flushSync(() => {
+      clockFlushRef.current?.();
+      bankFlushRef.current?.();
+      setTipPicker(null);
+      setBankSel(null);
+      setTipPdfBusy(true);
+    });
     const card = tipCardRef.current;
     if (!card) throw new Error("the Tip Sheet isn't on screen");
     const origW = card.style.width;
@@ -6735,6 +6760,14 @@ export default function SchedulingHub({ session, onSignOut }) {
         .rs-q-menu-btn { position: absolute; top: 8px; right: 6px; z-index: 2; border: none; background: transparent; color: var(--muted); font-size: 13px; line-height: 1; letter-spacing: 1px; padding: 3px 5px; border-radius: 5px; cursor: pointer; }
         .rs-q-menu-btn:hover, .rs-q-menu-btn[aria-expanded="true"] { color: var(--txt); background: var(--line); }
         .rs-q-menu-scrim { position: fixed; inset: 0; z-index: 3; }
+        /* The click-away layer covers the whole screen (clock-wheel round;
+           MenuScrim in components/DialogLayer.jsx). The one above sits inside
+           .hub-main and is sized to the whole page; while a menu is open
+           (data-menu-open) .hub-main is lifted above the sidebar so that
+           layer covers it too and the menu stays on top. The twin in .hub is
+           a full-screen second net under the lifted panel. */
+        .rs-q-menu-scrim-out { z-index: 6; }
+        .hub[data-menu-open] > .hub-main { z-index: 7; }
         .rs-q-menu { position: absolute; top: 26px; right: 6px; z-index: 4; min-width: 132px; background: var(--s2); border: 1px solid var(--line2); border-radius: 9px; padding: 4px; box-shadow: 0 8px 20px rgba(0,0,0,0.25); }
         .rs-q-menu-item { display: block; width: 100%; text-align: left; background: none; border: none; cursor: pointer; font-family: inherit; font-size: 12.5px; font-weight: 600; color: var(--txt); padding: 7px 9px; border-radius: 6px; }
         .rs-q-menu-item:hover { background: var(--line); }
@@ -7593,6 +7626,34 @@ export default function SchedulingHub({ session, onSignOut }) {
         @media (max-height: 560px) { .bw { --row: 34px; } .tip-picker .bw { gap: 6px; } }
         .tip-picker.tp-sheet { max-height: calc(100vh - 16px); overflow-y: auto; }
 
+        /* ---- Clock In / Clock Out wheel (clock-wheel, 2026-11-18) ----
+           Same drum, band and type as the bank wheel above. On wide screens
+           it floats beside the table (.tp-side), level with the tapped row;
+           under 900px it's the bottom sheet. Screen only: the panel is
+           .screen-only and outside the card, the highlight rules are @media
+           screen, and the PDF capture closes the wheel first. */
+        .tip-picker.tp-side { width: 236px; padding: 12px; border-radius: 16px; overflow-y: auto; overscroll-behavior: contain; }
+        /* Room below the page while a bottom sheet is open, so the last rows
+           can scroll clear of it (PickerPanel sets --tp-room). Screen only. */
+        @media screen { body { padding-bottom: var(--tp-room, 0px); } }
+        .bw-clock .bw-title { overflow-wrap: anywhere; }
+        .bw-links { display: flex; justify-content: center; align-items: center; gap: 18px; flex-wrap: wrap; }
+        .bw-link:disabled { opacity: 0.35; cursor: default; }
+        .bw-link-quiet { color: var(--txt2); }
+        .bw-hint { font-size: 11.5px; line-height: 1.35; color: var(--txt2); }
+        /* The scheduled start: a small copper dot after the time. */
+        .bw-item.bw-sched::after { content: ""; width: 5px; height: 5px; margin-left: 7px; border-radius: 50%; background: var(--accent); flex: none; }
+        @media screen {
+          .rtp-person.time-row-sel { background: var(--accent-soft); box-shadow: 0 0 0 4px var(--accent-soft); border-radius: 8px; }
+          .rtp-person.time-row-sel .rtp-name { color: var(--accent); }
+          .rtp-person .rtp-cell.time-cell-sel { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+          .week-table tr.time-row-sel > td { background: var(--accent-soft); }
+          .week-table tr.time-row-sel > td.tip-position { color: var(--accent); }
+          .week-table .tip-time-input.time-cell-sel { box-shadow: 0 0 0 1.5px var(--accent); border-radius: 4px; }
+        }
+        .tip-pdf-mode .week-table tr.time-row-sel > td { background: none !important; color: inherit !important; }
+        .tip-pdf-mode .week-table .tip-time-input.time-cell-sel { box-shadow: none !important; }
+
         /* ---- round 3: Set Schedule toolbar menus + status pill (item 7) ---- */
         .tb-menu-wrap { position: relative; display: inline-flex; }
         .tb-icon-btn { display: inline-flex; align-items: center; gap: 3px; padding: 7px 9px; }
@@ -7865,6 +7926,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                 slots={displaySlots}
                 getTimes={getTimes}
                 onTimeTap={(e, s, f) => openTimePicker(e, s, f)}
+                timeSel={tipPicker ? { slotId: tipPicker.slotId, field: tipPicker.field } : null}
                 denoms={DENOMS}
                 denomLabel={denomLabel}
                 openingCounts={openingCounts}
@@ -8137,7 +8199,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                         <>
                           {/* Click-away layer — closes the menu without the card
                               underneath picking the click up as a selection. */}
-                          <div className="rs-q-menu-scrim" onClick={() => setRailMenuId(null)} />
+                          <MenuScrim onClose={() => setRailMenuId(null)} />
                           <div className="rs-q-menu" role="menu">
                             <button
                               type="button"
@@ -8720,7 +8782,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                   ><FolderOpen size={14} /><ChevronDown size={12} /></button>
                   {schedMenu === "saved" && (
                     <>
-                      <div className="rs-q-menu-scrim" onClick={() => setSchedMenu(null)} />
+                      <MenuScrim onClose={() => setSchedMenu(null)} />
                       <div className="rs-q-menu tb-menu" role="menu">
                         <button
                           type="button"
@@ -8744,7 +8806,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                   ><Printer size={14} /><ChevronDown size={12} /></button>
                   {schedMenu === "print" && (
                     <>
-                      <div className="rs-q-menu-scrim" onClick={() => setSchedMenu(null)} />
+                      <MenuScrim onClose={() => setSchedMenu(null)} />
                       <div className="rs-q-menu tb-menu" role="menu">
                         <button type="button" role="menuitem" className="rs-q-menu-item" onClick={() => { setSchedMenu(null); printSchedule(); }}>
                           <Printer size={13} /> Print
@@ -8780,7 +8842,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                     </button>
                     {schedMenu === "status" && (
                       <>
-                        <div className="rs-q-menu-scrim" onClick={() => setSchedMenu(null)} />
+                        <MenuScrim onClose={() => setSchedMenu(null)} />
                         <div className="rs-q-menu tb-menu" role="menu">
                           <button
                             type="button"
@@ -9512,8 +9574,10 @@ export default function SchedulingHub({ session, onSignOut }) {
                     <tbody>
                       {finalSlots.map((p) => {
                         const t = getTimes(p.id);
+                        // The clock wheel's row and cell, in copper (screen only).
+                        const sel = tipPicker?.slotId === p.id ? tipPicker.field : null;
                         return (
-                          <tr key={p.id}>
+                          <tr key={p.id} className={sel ? "time-row-sel" : undefined}>
                             <td className="tip-position">{p.label}</td>
                             <td className="shift-cell" style={{ textAlign: "left" }}>
                               {customMode ? (
@@ -9539,8 +9603,8 @@ export default function SchedulingHub({ session, onSignOut }) {
                                 </span>
                               )}
                             </td>
-                            <td className="shift-cell"><input type="text" className="tip-time-input" placeholder="4:00 PM" value={t.in} readOnly inputMode="none" onClick={(e) => openTimePicker(e, p, "in")} onKeyDown={(e) => pickerKey(e, () => openTimePicker(e, p, "in"))} disabled={!p.name} /></td>
-                            <td className="shift-cell"><input type="text" className="tip-time-input" placeholder="9:00 PM" value={t.out} readOnly inputMode="none" onClick={(e) => openTimePicker(e, p, "out")} onKeyDown={(e) => pickerKey(e, () => openTimePicker(e, p, "out"))} disabled={!p.name} /></td>
+                            <td className="shift-cell"><input type="text" className={`tip-time-input${sel === "in" ? " time-cell-sel" : ""}`} placeholder="4:00 PM" value={t.in} readOnly inputMode="none" onClick={(e) => openTimePicker(e, p, "in")} onKeyDown={(e) => pickerKey(e, () => openTimePicker(e, p, "in"))} disabled={!p.name} /></td>
+                            <td className="shift-cell"><input type="text" className={`tip-time-input${sel === "out" ? " time-cell-sel" : ""}`} placeholder="9:00 PM" value={t.out} readOnly inputMode="none" onClick={(e) => openTimePicker(e, p, "out")} onKeyDown={(e) => pickerKey(e, () => openTimePicker(e, p, "out"))} disabled={!p.name} /></td>
                             <td className="shift-cell">{p.name ? p.hours.toFixed(2) : ""}</td>
                             <td className="shift-cell">
                               {!p.name ? (
@@ -10488,18 +10552,30 @@ export default function SchedulingHub({ session, onSignOut }) {
         );
       })()}
 
-      {/* The open tap panel, floating over the sheet. Outside the card, so the
-          PDF never captures it; .screen-only keeps it off paper. Gone if the
-          cell left the screen (another tab) or the sheet was locked. */}
-      {tipPicker && tipPicker.anchor.isConnected && tipPickerAllowed && (
-        <PickerPanel anchor={tipPicker.anchor} onClose={() => setTipPicker(null)} label={`${tipPicker.name} ${tipPicker.field === "in" ? "time in" : "time out"}`}>
-          <TimePickerBody
-            key={`${tipPicker.slotId}-${tipPicker.field}`}
+      {/* The Clock In / Clock Out wheel, floating beside the table (bottom
+          sheet under 900px). Outside the card, so the PDF never captures it;
+          .screen-only keeps it off paper. Gone if the cell left the screen
+          (another tab) or the sheet was locked. It saves through setSlotTime,
+          the setter the typed field uses, and only into the sheet it was
+          opened on. */}
+      {tipPicker && tipPicker.anchor.isConnected && clockWheelAllowed && (
+        <PickerPanel
+          anchor={tipPicker.anchor}
+          beside={tipPicker.beside}
+          sheetQuery="(max-width: 899px)"
+          onClose={closeClockWheel}
+          label={`${tipPicker.name} ${tipPicker.field === "in" ? "time in" : "time out"}`}
+        >
+          <ClockWheel
+            key={`${tipPicker.dateIso}-${tipPicker.slotId}-${tipPicker.field}`}
             field={tipPicker.field}
+            personName={tipPicker.name}
             value={getTimes(tipPicker.slotId)[tipPicker.field]}
             scheduled={tipPicker.scheduled}
-            personName={tipPicker.name}
-            onSet={(text) => { setSlotTime(tipPicker.slotId, tipPicker.field, text); setTipPicker(null); }}
+            inText={getTimes(tipPicker.slotId).in}
+            onSet={(text) => { if (tipPicker.dateIso === tipDateRef.current) setSlotTime(tipPicker.slotId, tipPicker.field, text); }}
+            flushRef={clockFlushRef}
+            onDone={closeClockWheel}
           />
         </PickerPanel>
       )}

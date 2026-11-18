@@ -7,7 +7,7 @@
 // Cash panel: five chips that are multiples of the row's denomination. All
 // arithmetic is whole cents; nothing here touches the sheet's totals.
 
-import { formatTime, parseTimeInput, roundToQuarter } from "./tipTimes.js";
+import { formatTime, hoursBetween, parseTimeInput, roundToQuarter } from "./tipTimes.js";
 
 const DAY = 1440;
 const wrap = (m) => ((m % DAY) + DAY) % DAY;
@@ -205,6 +205,91 @@ export function wheelCaption(denom, row, denomLabel) {
   if (row.cents % d !== 0) return `${wheelMoney(row.cents, d)} isn't a whole number of ${denomLabel} ${unit}s`;
   const n = row.cents / d;
   return `${n} × ${denomLabel} ${unit}${n === 1 ? "" : "s"}`;
+}
+
+// ---- Clock wheel (Clock In / Clock Out, clock-wheel 2026-11-18) -----------
+// One column of times, 3:00 PM to 2:00 AM in 15-minute steps. A row's `value`
+// is formatTime's text ("5:45 PM", "12:30 AM"): exactly what the typed field
+// stores for the same time, so a wheel save and a typed save are the same
+// text, and the frozen parseTimeInput reads it back as the minute shown (the
+// round-trip test in tipTimes.test.js covers every minute of the day).
+// Nothing here touches hours or tips.
+
+export const CLOCK_FIRST = 15 * 60; // 3:00 PM
+export const CLOCK_LAST = 26 * 60; // 2:00 AM, the next morning
+export const CLOCK_STEP = 15;
+
+// The night's order: 3:00 PM … 11:45 PM, then 12:00 AM onwards. Midnight to
+// 7:59 AM counts as after midnight (sorted after 11:59 PM); 8:00 AM to
+// 2:59 PM sorts before the list.
+function nightPos(mins) {
+  return mins < 8 * 60 ? mins + DAY : mins;
+}
+
+// The wheel's rows. A stored time the list doesn't have (before 3:00 PM,
+// after 2:00 AM, off the 15-minute steps, or text that isn't a time) gets a
+// row of its own, in order, shown and stored exactly as it is — never
+// rewritten unless the wheel is moved off it. "On the list" is judged by the
+// frozen parser, the one the sheet pays on: a stored "5pm" sits on 5:00 PM.
+export function clockRows(storedText) {
+  const rows = [];
+  for (let t = CLOCK_FIRST; t <= CLOCK_LAST; t += CLOCK_STEP) {
+    const mins = t % DAY;
+    rows.push({ pos: t, mins, label: formatTime(mins), value: formatTime(mins), asIs: false });
+  }
+  const raw = String(storedText ?? "").trim();
+  if (raw === "") return rows;
+  const mins = parseTimeInput(raw);
+  if (mins != null && rows.some((r) => r.pos === nightPos(mins))) return rows;
+  const asIs = { pos: mins == null ? null : nightPos(mins), mins, label: raw, value: String(storedText), asIs: true };
+  if (mins == null) return [asIs, ...rows];
+  const at = rows.findIndex((r) => r.pos > asIs.pos);
+  if (at === -1) rows.push(asIs);
+  else rows.splice(at, 0, asIs);
+  return rows;
+}
+
+// The stored time's row, or -1 when the box is empty.
+export function clockStoredIndex(rows, storedText) {
+  const raw = String(storedText ?? "").trim();
+  if (raw === "") return -1;
+  const asIs = rows.findIndex((r) => r.asIs);
+  if (asIs !== -1) return asIs;
+  const pos = nightPos(parseTimeInput(raw));
+  return rows.findIndex((r) => r.pos === pos);
+}
+
+// Where the wheel opens: the box's own time when it has one. Empty: TIME IN on
+// the scheduled start, TIME OUT on now rounded to the nearest 15 minutes —
+// either one only if it's on the list, otherwise 3:00 PM.
+export function clockOpenIndex(rows, storedText, { field, scheduled = null, nowMins = null }) {
+  const stored = clockStoredIndex(rows, storedText);
+  if (stored !== -1) return stored;
+  const want = field === "in" ? scheduled : nowMins == null ? null : roundToQuarter(nowMins) % DAY;
+  if (want != null) {
+    const i = rows.findIndex((r) => !r.asIs && r.pos === nightPos(want));
+    if (i !== -1) return i;
+  }
+  return rows.findIndex((r) => !r.asIs && r.pos === CLOCK_FIRST);
+}
+
+// The line under the wheel, for the row in the band. TIME IN says how it sits
+// against the schedule; TIME OUT says the hours it makes with this person's
+// TIME IN — hoursBetween, the sheet's own sum, so it matches the HRS column.
+// A stored time off the 15-minute steps also says what it's paid as.
+export function clockCaption({ field, row, scheduled = null, inText = "" }) {
+  if (!row) return "";
+  if (row.mins == null) return `"${row.value}" isn't a time — spin, or use Custom time`;
+  const parts = [];
+  const paid = roundToQuarter(row.mins) % DAY;
+  if (row.asIs && paid !== row.mins) parts.push(`Paid as ${formatTime(paid)}`);
+  if (field === "in") {
+    const d = scheduleDelta(row.value, scheduled);
+    if (d) parts.push(d === "on schedule" ? "On schedule" : d);
+  } else if (parseTimeInput(String(inText ?? "").trim()) != null) {
+    parts.push(`${hoursBetween(inText, row.value).toFixed(2)} hrs`);
+  }
+  return parts.join(" · ");
 }
 
 // ---- When a panel may open ---------------------------------------------

@@ -54,7 +54,7 @@ export class PanelBoundary extends React.Component {
 export default function RailTipPanel(p) {
   const {
     open, onToggle, dateLabel, readOnly, readOnlyWhy, saveLabel, conflictMsg, onDismissConflict,
-    slots, getTimes, onTimeTap, denoms, denomLabel, openingCounts, closingCounts, onCashTap,
+    slots, getTimes, onTimeTap, timeSel, denoms, denomLabel, openingCounts, closingCounts, onCashTap,
     bankSel, bankWheel,
     openingTotal, closingTotal, money,
     fields, payouts, onAddPayout, onPayout, onRemovePayout,
@@ -114,8 +114,10 @@ export default function RailTipPanel(p) {
           <div className="rtp-times">
             {people.map((s) => {
               const t = getTimes(s.id);
+              // The clock wheel's row and cell, in copper (App's ClockWheel).
+              const sel = timeSel?.slotId === s.id ? timeSel.field : null;
               return (
-                <div className="rtp-person" key={s.id}>
+                <div className={`rtp-person${sel ? " time-row-sel" : ""}`} key={s.id}>
                   <div className="rtp-name">{s.name}<span className="rtp-pos">{s.label}</span></div>
                   {["in", "out"].map((f) => (
                     <div
@@ -123,7 +125,8 @@ export default function RailTipPanel(p) {
                       role="button"
                       tabIndex={readOnly ? -1 : 0}
                       aria-disabled={readOnly}
-                      className={`rtp-cell ${t[f] ? "" : "rtp-cell-empty"}`}
+                      aria-pressed={sel === f}
+                      className={`rtp-cell ${t[f] ? "" : "rtp-cell-empty"}${sel === f ? " time-cell-sel" : ""}`}
                       onClick={(e) => !readOnly && onTimeTap(e, s, f)}
                       onKeyDown={(e) => !readOnly && key(e, (ev) => onTimeTap(ev, s, f))}
                     >

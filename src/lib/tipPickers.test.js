@@ -240,3 +240,117 @@ test("wheel: count line", () => {
   assert.equal(wheelCaption(0.25, wheelRows(0.25, "")[3], "25¢"), "3 × 25¢ coins");
   assert.equal(wheelCaption(0.05, wheelRows(0.05, "")[1], "5¢"), "1 × 5¢ coin");
 });
+
+// ---- Clock wheel (Clock In / Clock Out) ----
+import { clockRows, clockStoredIndex, clockOpenIndex, clockCaption, CLOCK_FIRST, CLOCK_LAST } from "./tipPickers.js";
+import { normalizeTimeEntry } from "./tipTimes.js";
+
+test("clock wheel: 3:00 PM to 2:00 AM in 15-minute steps", () => {
+  const rows = clockRows("");
+  assert.equal(rows.length, (CLOCK_LAST - CLOCK_FIRST) / 15 + 1);
+  assert.equal(rows.length, 45);
+  assert.deepEqual(rows.slice(0, 3).map((r) => r.label), ["3:00 PM", "3:15 PM", "3:30 PM"]);
+  assert.deepEqual(rows.slice(34, 38).map((r) => r.label), ["11:30 PM", "11:45 PM", "12:00 AM", "12:15 AM"]);
+  assert.equal(rows[rows.length - 1].label, "2:00 AM");
+  rows.forEach((r) => assert.equal(r.asIs, false));
+});
+
+test("clock wheel: every row stores the text the typed field stores, and pays the minute shown", () => {
+  for (const r of clockRows("")) {
+    assert.equal(parseTimeInput(r.value), r.mins, r.label);
+    // Typed as the bare clock ("10:45", "12:30", "1:15") it stores the same
+    // text: in TIME OUT from 4:00 PM on (typed there, 3:00–3:59 means after
+    // midnight, so a 3 PM finish needs the wheel or "pm"), and in TIME IN for
+    // every PM row.
+    const bare = r.label.replace(/ (AM|PM)$/, "");
+    if (r.mins >= 16 * 60 || r.mins < 15 * 60) assert.equal(normalizeTimeEntry(bare, "out"), r.value, `out "${bare}"`);
+    else assert.equal(normalizeTimeEntry(bare, "out"), formatTime(r.mins - 12 * 60), `out "${bare}" is after midnight`);
+    if (r.mins >= 12 * 60) assert.equal(normalizeTimeEntry(bare, "in"), r.value, `in "${bare}"`);
+    // Typed with its am/pm, either field stores the same text.
+    for (const field of ["in", "out"]) assert.equal(normalizeTimeEntry(r.label, field), r.value, `${field} "${r.label}"`);
+  }
+});
+
+test("clock wheel: after midnight counts across midnight exactly as typed times do", () => {
+  const rows = clockRows("");
+  const at = (label) => rows.find((r) => r.label === label).value;
+  for (const [inT, outLabel, typedOut, hrs] of [
+    ["5:00 PM", "12:00 AM", "12", 7],
+    ["5:00 PM", "12:30 AM", "1230", 7.5],
+    ["4:30 PM", "1:15 AM", "1:15", 8.75],
+    ["6:00 PM", "2:00 AM", "2", 8],
+    ["11:45 PM", "12:15 AM", "12:15", 0.5],
+  ]) {
+    const wheel = at(outLabel);
+    const typed = normalizeTimeEntry(typedOut, "out");
+    assert.equal(wheel, typed, `${outLabel} vs typed "${typedOut}"`);
+    assert.equal(hoursBetween(inT, wheel), hrs, `${inT} -> ${outLabel}`);
+    assert.equal(hoursBetween(inT, wheel), hoursBetween(inT, typed));
+  }
+});
+
+test("clock wheel: a stored time off the list shows as it is, in order, unchanged", () => {
+  // Off the 15-minute steps: between its neighbours.
+  let rows = clockRows("5:07 PM");
+  let i = clockStoredIndex(rows, "5:07 PM");
+  assert.equal(rows.length, 46);
+  assert.equal(rows[i].asIs, true);
+  assert.equal(rows[i].value, "5:07 PM");
+  assert.deepEqual([rows[i - 1].label, rows[i + 1].label], ["5:00 PM", "5:15 PM"]);
+  assert.equal(clockCaption({ field: "in", row: rows[i], scheduled: 17 * 60 }), "Paid as 5:00 PM · On schedule");
+  // Before 3:00 PM: first. After 2:00 AM: last. Not a time at all: first.
+  rows = clockRows("2:45 PM");
+  assert.equal(clockStoredIndex(rows, "2:45 PM"), 0);
+  assert.equal(rows[0].value, "2:45 PM");
+  rows = clockRows("2:30 AM");
+  assert.equal(clockStoredIndex(rows, "2:30 AM"), rows.length - 1);
+  rows = clockRows("12:50 AM");
+  i = clockStoredIndex(rows, "12:50 AM");
+  assert.deepEqual([rows[i - 1].label, rows[i + 1].label], ["12:45 AM", "1:00 AM"]);
+  rows = clockRows("abc");
+  assert.equal(clockStoredIndex(rows, "abc"), 0);
+  assert.match(clockCaption({ field: "out", row: rows[0] }), /isn't a time/);
+  // The stored text is kept exactly, spaces and all.
+  rows = clockRows(" 5:07pm ");
+  assert.equal(rows[clockStoredIndex(rows, " 5:07pm ")].value, " 5:07pm ");
+});
+
+test("clock wheel: a stored time on the list adds no row and opens on it", () => {
+  for (const [text, label] of [["5:00 PM", "5:00 PM"], ["5pm", "5:00 PM"], ["6:15", "6:15 PM"], ["12:30 AM", "12:30 AM"], ["2:00 AM", "2:00 AM"], ["3:00 PM", "3:00 PM"]]) {
+    const rows = clockRows(text);
+    assert.equal(rows.length, 45, text);
+    const i = clockStoredIndex(rows, text);
+    assert.equal(rows[i].label, label, text);
+    assert.equal(clockOpenIndex(rows, text, { field: "in", scheduled: 18 * 60 }), i, text);
+  }
+  assert.equal(clockStoredIndex(clockRows(""), ""), -1);
+});
+
+test("clock wheel: empty TIME IN opens on the scheduled start, empty TIME OUT on now to the nearest 15", () => {
+  const rows = clockRows("");
+  const open = (o) => rows[clockOpenIndex(rows, "", o)].label;
+  assert.equal(open({ field: "in", scheduled: scheduledStartMins("SV_5SC") }), "5:00 PM");
+  assert.equal(open({ field: "in", scheduled: scheduledStartMins("HOST_4") }), "4:00 PM");
+  assert.equal(open({ field: "in", scheduled: null }), "3:00 PM");
+  assert.equal(open({ field: "in", scheduled: scheduledStartMins("SV_12") }), "3:00 PM"); // noon: not on the list
+  assert.equal(open({ field: "out", nowMins: 22 * 60 + 7 }), "10:00 PM");
+  assert.equal(open({ field: "out", nowMins: 22 * 60 + 8 }), "10:15 PM");
+  assert.equal(open({ field: "out", nowMins: 23 * 60 + 53 }), "12:00 AM");
+  assert.equal(open({ field: "out", nowMins: 60 + 40 }), "1:45 AM");
+  assert.equal(open({ field: "out", nowMins: 2 * 60 + 10 }), "3:00 PM"); // 2:15 AM: past the list
+  assert.equal(open({ field: "out", nowMins: 11 * 60 }), "3:00 PM"); // morning: before the list
+  // A stored time always wins.
+  const r2 = clockRows("9:30 PM");
+  assert.equal(r2[clockOpenIndex(r2, "9:30 PM", { field: "out", nowMins: 22 * 60 })].label, "9:30 PM");
+});
+
+test("clock wheel: line under the wheel", () => {
+  const rows = clockRows("");
+  const row = (label) => rows.find((r) => r.label === label);
+  assert.equal(clockCaption({ field: "in", row: row("5:00 PM"), scheduled: 17 * 60 }), "On schedule");
+  assert.equal(clockCaption({ field: "in", row: row("5:15 PM"), scheduled: 17 * 60 }), "+15 min vs schedule");
+  assert.equal(clockCaption({ field: "in", row: row("5:15 PM"), scheduled: null }), "");
+  assert.equal(clockCaption({ field: "out", row: row("12:30 AM"), inText: "5:00 PM" }), "7.50 hrs");
+  assert.equal(clockCaption({ field: "out", row: row("10:00 PM"), inText: "4pm" }), "6.00 hrs");
+  assert.equal(clockCaption({ field: "out", row: row("10:00 PM"), inText: "" }), "");
+});
