@@ -167,3 +167,76 @@ test("panels: a sent sheet, unlocked, opens a time panel and takes a new value",
   // Re-locking closes the panels again.
   assert.equal(pickerMayOpen({ ...reopened, locked: true }), false);
 });
+
+// ---- Bank count wheel ----
+import { wheelRows, wheelIndexFor, wheelCaption, wheelMoney, WHEEL_MAX_COUNT } from "./tipPickers.js";
+
+const DENOM_LIST = [100, 50, 20, 10, 5, 1, 0.25, 0.1, 0.05];
+
+test("wheel: 0 to 100 of the denomination, stored exactly as the chips stored it", () => {
+  for (const d of DENOM_LIST) {
+    const rows = wheelRows(d, "");
+    assert.equal(rows.length, WHEEL_MAX_COUNT + 1, `${d}`);
+    rows.forEach((r, k) => {
+      assert.equal(r.cents, k * Math.round(d * 100));
+      assert.equal(r.value, centsToStored(r.cents));
+      assert.equal(Math.round(parseFloat(r.value) * 100), r.cents, `${d} x ${k} reads back to the cent`);
+    });
+  }
+  // A wheel save is the same text the old chips saved.
+  assert.equal(wheelRows(20, "")[8].value, cashChips(20, 1)[2].value);
+  assert.equal(wheelRows(0.25, "")[3].value, cashChips(0.25, 0)[2].value);
+});
+
+test("wheel: labels as the brief writes them", () => {
+  assert.deepEqual(wheelRows(20, "").slice(0, 4).map((r) => r.label), ["$0", "$20", "$40", "$60"]);
+  assert.deepEqual(wheelRows(0.25, "").slice(0, 3).map((r) => r.label), ["$0.00", "$0.25", "$0.50"]);
+  assert.equal(wheelRows(100, "")[100].label, "$10,000");
+  assert.equal(wheelRows(0.05, "")[100].label, "$5.00");
+  assert.equal(wheelMoney(2050, 2000), "$20.50");
+});
+
+test("wheel: a stored amount that is not a whole multiple shows as entered, in order, unchanged", () => {
+  const rows = wheelRows(20, "21");
+  const i = wheelIndexFor(rows, "21");
+  assert.equal(rows.length, WHEEL_MAX_COUNT + 2);
+  assert.equal(rows[i].asIs, true);
+  assert.equal(rows[i].value, "21"); // the stored text itself, not centsToStored
+  assert.equal(rows[i].label, "$21");
+  assert.equal(rows[i - 1].cents, 2000);
+  assert.equal(rows[i + 1].cents, 4000);
+  assert.match(wheelCaption(20, rows[i], "$20"), /\$21 isn.t a whole number of \$20 bills/);
+  // Coins: 1.10 in quarters sits between 1.00 and 1.25.
+  const q = wheelRows(0.25, "1.10");
+  const qi = wheelIndexFor(q, "1.10");
+  assert.deepEqual([q[qi - 1].cents, q[qi].cents, q[qi + 1].cents], [100, 110, 125]);
+  assert.equal(q[qi].value, "1.10");
+});
+
+test("wheel: more than 100 goes at the end, text that is not an amount at the start", () => {
+  const over = wheelRows(20, "2500");
+  assert.equal(over[over.length - 1].asIs, true);
+  assert.equal(wheelIndexFor(over, "2500"), over.length - 1);
+  assert.equal(wheelCaption(20, over[over.length - 1], "$20"), "125 × $20 bills");
+  const bad = wheelRows(5, "abc");
+  assert.equal(bad[0].asIs, true);
+  assert.equal(wheelIndexFor(bad, "abc"), 0);
+  assert.match(wheelCaption(5, bad[0], "$5"), /not an amount/);
+});
+
+test("wheel: opens on the stored row; a clean multiple adds no extra row", () => {
+  for (const [d, text, k] of [[20, "40", 2], [20, "40.00", 2], [0.25, "0.50", 2], [0.1, "0.30", 3], [100, "", 0], [1, "100", 100], [0.05, "0", 0]]) {
+    const rows = wheelRows(d, text);
+    assert.equal(rows.length, WHEEL_MAX_COUNT + 1, `${d} ${text}`);
+    assert.equal(wheelIndexFor(rows, text), k, `${d} ${text}`);
+  }
+});
+
+test("wheel: count line", () => {
+  const r = wheelRows(20, "");
+  assert.equal(wheelCaption(20, r[2], "$20"), "2 × $20 bills");
+  assert.equal(wheelCaption(20, r[1], "$20"), "1 × $20 bill");
+  assert.equal(wheelCaption(1, wheelRows(1, "")[0], "$1"), "0 × $1 bills");
+  assert.equal(wheelCaption(0.25, wheelRows(0.25, "")[3], "25¢"), "3 × 25¢ coins");
+  assert.equal(wheelCaption(0.05, wheelRows(0.05, "")[1], "5¢"), "1 × 5¢ coin");
+});

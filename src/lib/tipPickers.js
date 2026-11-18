@@ -143,6 +143,70 @@ export function cashCheck(denom, text, denomLabel) {
   };
 }
 
+// ---- Bank count wheel (replaces the cash chips, iPad fixes 2026-11-18) ----
+// The wheel steps in the row's denomination, 0 to 100 of the bill or coin.
+// Whole cents throughout; a row's `value` is exactly the text the cell stores
+// (centsToStored), so a wheel save is the same text the chips used to save.
+
+export const WHEEL_MAX_COUNT = 100;
+
+function groupThousands(n) {
+  return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+// "$0", "$20", "$1,000" on bill rows; "$0.00", "$0.25", "$1.50" on coin rows.
+// An odd amount on a bill row keeps its cents ("$20.50").
+export function wheelMoney(c, d) {
+  const whole = `$${groupThousands(Math.floor(c / 100))}`;
+  if (d >= 100 && c % 100 === 0) return whole;
+  return `${whole}.${String(c % 100).padStart(2, "0")}`;
+}
+
+// The wheel's rows. When the stored text isn't one of the 0..100 steps (not a
+// whole multiple, more than 100, or not an amount at all) it gets a row of its
+// own, in order, labelled and stored exactly as entered — never rounded.
+export function wheelRows(denom, storedText) {
+  const d = denomCents(denom);
+  const rows = [];
+  for (let k = 0; k <= WHEEL_MAX_COUNT; k++) {
+    const c = k * d;
+    rows.push({ cents: c, label: wheelMoney(c, d), value: centsToStored(c), asIs: false });
+  }
+  const raw = String(storedText ?? "").trim();
+  if (raw === "") return rows;
+  const c = parseCents(raw);
+  if (c != null && c % d === 0 && c / d <= WHEEL_MAX_COUNT) return rows;
+  const asIs = { cents: c, label: c == null ? raw : wheelMoney(c, d), value: String(storedText), asIs: true };
+  if (c == null) return [asIs, ...rows];
+  const at = rows.findIndex((r) => r.cents > c);
+  if (at === -1) rows.push(asIs);
+  else rows.splice(at, 0, asIs);
+  return rows;
+}
+
+// Where the wheel opens: the stored amount's row ($0 when nothing is stored).
+export function wheelIndexFor(rows, storedText) {
+  const raw = String(storedText ?? "").trim();
+  if (raw === "") return 0;
+  const asIs = rows.findIndex((r) => r.asIs);
+  if (asIs !== -1) return asIs;
+  const c = parseCents(raw);
+  const i = rows.findIndex((r) => r.cents === c);
+  return i === -1 ? 0 : i;
+}
+
+// The line under the wheel: "2 × $20 bills", "1 × 25¢ coin". An amount that
+// isn't a whole number of them is named as it is, never corrected.
+export function wheelCaption(denom, row, denomLabel) {
+  if (!row) return "";
+  if (row.cents == null) return `Stored as "${row.value}" — not an amount`;
+  const d = denomCents(denom);
+  const unit = d >= 100 ? "bill" : "coin";
+  if (row.cents % d !== 0) return `${wheelMoney(row.cents, d)} isn't a whole number of ${denomLabel} ${unit}s`;
+  const n = row.cents / d;
+  return `${n} × ${denomLabel} ${unit}${n === 1 ? "" : "s"}`;
+}
+
 // ---- When a panel may open ---------------------------------------------
 
 // The lock is what protects a sheet, not the fact that it was once emailed.

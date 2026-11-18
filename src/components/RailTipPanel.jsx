@@ -55,6 +55,7 @@ export default function RailTipPanel(p) {
   const {
     open, onToggle, dateLabel, readOnly, readOnlyWhy, saveLabel, conflictMsg, onDismissConflict,
     slots, getTimes, onTimeTap, denoms, denomLabel, openingCounts, closingCounts, onCashTap,
+    bankSel, bankWheel,
     openingTotal, closingTotal, money,
     fields, payouts, onAddPayout, onPayout, onRemovePayout,
     warnings, onOpenTipSheet,
@@ -169,20 +170,25 @@ export default function RailTipPanel(p) {
 
         <div className="rtp-col">
           <div className="rtp-section">Opening bank / closing count <span className="rtp-hint">dollar amounts, not bill counts</span></div>
+          {/* The count wheel (App's BankWheel) sits beside the table on wide
+              screens; on narrow ones App opens it as a bottom sheet instead. */}
+          <div className={`bank-wrap${bankWheel ? " has-wheel" : ""}`}>
           <div className="rtp-cash">
             <div className="rtp-cash-row rtp-cash-head"><span /> <span>Opening</span><span>Closing</span></div>
             {denoms.map((d) => (
-              <div className="rtp-cash-row" key={d}>
+              <div className={`rtp-cash-row${bankSel?.denom === d ? " bank-row-sel" : ""}`} key={d}>
                 <span className="rtp-denom">{denomLabel(d)}</span>
                 {["open", "close"].map((which) => {
                   const v = (which === "open" ? openingCounts : closingCounts)[d];
+                  const sel = bankSel?.denom === d && bankSel.which === which;
                   return (
                     <div
                       key={which}
                       role="button"
                       tabIndex={readOnly ? -1 : 0}
                       aria-disabled={readOnly}
-                      className={`rtp-cell ${v ? "" : "rtp-cell-empty"}`}
+                      aria-pressed={sel}
+                      className={`rtp-cell ${v ? "" : "rtp-cell-empty"}${sel ? " bank-cell-sel" : ""}`}
                       onClick={(e) => !readOnly && onCashTap(e, which, d)}
                       onKeyDown={(e) => !readOnly && key(e, (ev) => onCashTap(ev, which, d))}
                     >
@@ -193,6 +199,8 @@ export default function RailTipPanel(p) {
               </div>
             ))}
             <div className="rtp-cash-row rtp-cash-total"><span>Total</span><span>${money(openingTotal)}</span><span>${money(closingTotal)}</span></div>
+          </div>
+          {bankWheel && <div className="bank-wheel-col">{bankWheel}</div>}
           </div>
         </div>
       </div>

@@ -1,4 +1,6 @@
-// Tip Sheet tap panels: TIME IN / TIME OUT and the cash rows. Screen only.
+// Tip Sheet tap panels: TIME IN / TIME OUT, and the bank count wheel (which
+// sits beside the bank table, or in this panel as a bottom sheet on narrow
+// screens). Screen only.
 //
 // The panel is portalled into .hub itself — never inside the sheet card and
 // never inside .hub-main — and fixed-positioned from the tapped cell's rect.
@@ -19,13 +21,14 @@
 //   once so the row being entered stays in sight.
 // Choices live in lib/tipPickers.js, which is tested against what the sheet pays.
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal, flushSync } from "react-dom";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { formatTime, parsePickerTime } from "../lib/tipTimes.js";
 import {
-  cashCheck, cashChips, cashPageFor, paidMinute, parseCents, centsToStored,
+  cashCheck, paidMinute, parseCents, centsToStored,
   scheduleDelta, timeChips, timeLadderCenter,
+  wheelCaption, wheelIndexFor, wheelRows,
 } from "../lib/tipPickers.js";
 
 const GAP = 6;
@@ -54,7 +57,11 @@ export function PickerPanel({ anchor, onClose, label, children }) {
     const onChange = () => setSheet(mq.matches);
     if (mq.addEventListener) mq.addEventListener("change", onChange);
     else mq.addListener(onChange); // older iPad Safari
-    return () => { if (mq.removeEventListener) mq.removeEventListener("change", onChange); else mq.removeListener(onChange); };
+    window.addEventListener("resize", onChange); // belt and braces for rotation
+    return () => {
+      if (mq.removeEventListener) mq.removeEventListener("change", onChange); else mq.removeListener(onChange);
+      window.removeEventListener("resize", onChange);
+    };
   }, []);
 
   useLayoutEffect(() => {
@@ -216,55 +223,257 @@ export function TimePickerBody({ field, value, scheduled, personName, onSet }) {
   );
 }
 
-export function CashPickerBody({ denom, denomLabel, columnLabel, value, onSet }) {
-  const [page, setPage] = useState(() => cashPageFor(denom, value));
-  const [typed, setTyped] = useState("");
-  const current = parseCents(value);
-  // Says so, never blocks or corrects: what's being typed, else what's stored.
-  const check = cashCheck(denom, typed.trim() ? typed : value, denomLabel);
+// ---- Bank count wheel (replaced the cash chips popover, 2026-11-18) -----
+//
+// Screen only. Tapping a bank cell selects it (App's bankSel); this wheel
+// steps through that denomination, 0 to 100 of the bill or coin (rows from
+// lib wheelRows). Native scrolling with scroll-snap, so it spins with
+// momentum on iPad Safari; tapping a row jumps to it.
+//
+// Saving happens only when all of these hold: a person moved the wheel, it has
+// stopped (no scroll for WHEEL_SETTLE_MS and no finger on it), and it stopped
+// on a different row from the stored one. It goes through `onSet`, which App
+// points at setCount: the same handler the old popover's Set button called,
+// with the same stored text. Opening the wheel, or the stored value changing
+// from elsewhere, re-centres it without saving. A stored amount that isn't a
+// whole multiple has a row of its own and stays as it is unless the wheel is
+// moved off it.
+//
+// flushRef: App calls it before the selection moves, the wheel closes or a PDF
+// is drawn, so a spin that hasn't settled yet still counts. Unmounting any
+// other way (tab or date change, lock) drops it: never written into another
+// sheet.
+const WHEEL_SETTLE_MS = 400;
 
-  // A non-multiple is set as typed (only named above); text that isn't an
-  // amount at all can't be set — the old number cell never allowed it either.
-  const typedCents = parseCents(typed);
-  function applyTyped() {
-    if (typedCents != null) onSet(centsToStored(typedCents));
+export function BankWheel({ denom, denomLabel, columnLabel, value, onSet, flushRef, onDone, reveal = false }) {
+  const uid = useId();
+  const rootRef = useRef(null);
+  const stored = value == null ? "" : String(value);
+  const rows = useMemo(() => wheelRows(denom, stored), [denom, stored]);
+  const baseIdx = wheelIndexFor(rows, stored);
+  const scrollRef = useRef(null);
+  const inputRef = useRef(null);
+  const onSetRef = useRef(onSet);
+  onSetRef.current = onSet;
+  // touched: a person moved it since the last centring; holding: a finger is
+  // on it; idx: the row under the band; base: the stored value's row.
+  const s = useRef({ touched: false, holding: false, timer: 0, idx: baseIdx, base: baseIdx, rowH: 44, rows });
+  s.current.rows = rows;
+  const [center, setCenter] = useState(baseIdx);
+  const [typing, setTyping] = useState(false);
+  const [typed, setTyped] = useState("");
+
+  function rowHeight(el) {
+    return el.querySelector(".bw-item")?.offsetHeight || s.current.rowH;
+  }
+  function cancelSpin() {
+    const st = s.current;
+    clearTimeout(st.timer);
+    st.timer = 0;
+    st.touched = false;
+  }
+  function commitNow() {
+    const st = s.current;
+    clearTimeout(st.timer);
+    st.timer = 0;
+    if (!st.touched) return;
+    st.touched = false;
+    const row = st.rows[st.idx];
+    if (!row || st.idx === st.base) return;
+    st.base = st.idx;
+    onSetRef.current(row.value);
+  }
+  function settleLater() {
+    const st = s.current;
+    clearTimeout(st.timer);
+    st.timer = setTimeout(() => {
+      st.timer = 0;
+      if (!st.holding) commitNow(); // finger still down: touchend asks again
+    }, WHEEL_SETTLE_MS);
   }
 
+  // Centre the stored row — on open, and when the stored value changes from
+  // elsewhere (a save, the typed amount, another device). Never mid-spin.
+  useLayoutEffect(() => {
+    const st = s.current;
+    if (st.timer || st.holding) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    st.rowH = rowHeight(el);
+    st.base = baseIdx;
+    st.idx = baseIdx;
+    st.touched = false;
+    el.scrollTop = baseIdx * st.rowH;
+    setCenter(baseIdx);
+  }, [rows, baseIdx]);
+
+  useEffect(() => () => clearTimeout(s.current.timer), []);
+
+  // Beside the table (reveal): a cell low in the table can be tapped with the
+  // table's top — where the wheel sits — scrolled off screen. Bring the whole
+  // wheel into view once, as little as needed. (The bottom sheet is placed by
+  // PickerPanel instead.)
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!reveal || !el) return;
+    const r = el.getBoundingClientRect();
+    const vv = window.visualViewport;
+    const top = vv ? vv.offsetTop : 0;
+    const bottom = top + (vv ? vv.height : window.innerHeight);
+    if (r.top < top || r.bottom > bottom) el.scrollIntoView({ block: "nearest" });
+  }, [reveal]);
+
+  useEffect(() => {
+    if (!flushRef) return undefined;
+    const flush = () => commitNow();
+    flushRef.current = flush;
+    return () => { if (flushRef.current === flush) flushRef.current = null; };
+  });
+
+  function onScroll(e) {
+    const st = s.current;
+    const el = e.currentTarget;
+    st.rowH = rowHeight(el);
+    const i = Math.max(0, Math.min(st.rows.length - 1, Math.round(el.scrollTop / st.rowH)));
+    st.idx = i;
+    setCenter(i);
+    if (st.touched) settleLater();
+  }
+  function grab() {
+    const st = s.current;
+    st.touched = true;
+    st.holding = true;
+    clearTimeout(st.timer);
+    st.timer = 0;
+  }
+  function release() {
+    const st = s.current;
+    if (!st.holding) return;
+    st.holding = false;
+    settleLater(); // momentum keeps scrolling, and each scroll waits again
+  }
+  function jump(i) {
+    const st = s.current;
+    const el = scrollRef.current;
+    if (!el || i < 0 || i >= st.rows.length) return;
+    st.touched = true;
+    st.idx = i;
+    setCenter(i);
+    el.scrollTop = i * st.rowH;
+    settleLater();
+  }
+  function onKeyDown(e) {
+    const last = s.current.rows.length - 1;
+    const step = { ArrowDown: 1, ArrowUp: -1, PageDown: 5, PageUp: -5 }[e.key];
+    let to = null;
+    if (step) to = Math.max(0, Math.min(last, s.current.idx + step));
+    else if (e.key === "Home") to = 0;
+    else if (e.key === "End") to = last;
+    if (to == null) return;
+    e.preventDefault();
+    jump(to);
+  }
+
+  // Type amount: the old popover's typed field, same rules. A non-multiple is
+  // set as typed (only named); text that isn't an amount can't be set.
+  const typedCents = parseCents(typed);
+  const check = typing ? cashCheck(denom, typed.trim() ? typed : stored, denomLabel) : null;
+  function openTyping() {
+    // flushSync so the field exists inside this tap: iPad Safari only brings
+    // the keyboard up for a focus() made during the tap itself.
+    flushSync(() => setTyping(true));
+    inputRef.current?.focus();
+  }
+  function closeTyping() {
+    setTyping(false);
+    setTyped("");
+  }
+  function applyTyped() {
+    if (typedCents == null) return;
+    cancelSpin(); // the typed figure wins over a spin that hasn't settled
+    onSetRef.current(centsToStored(typedCents));
+    closeTyping();
+  }
+  function clearValue() {
+    cancelSpin();
+    onSetRef.current("");
+    closeTyping();
+  }
+
+  const caption = stored.trim() === "" && center === baseIdx
+    ? "Not entered yet"
+    : wheelCaption(denom, rows[center], denomLabel);
+
   return (
-    <>
-      <div className="tp-head">
-        <span className="tp-title">{denomLabel} · {columnLabel}</span>
-        {value !== "" && value != null && <span className="tp-delta">now ${current != null ? (current / 100).toFixed(2) : value}</span>}
+    <div ref={rootRef} className="bw" role="group" aria-label={`${denomLabel} ${columnLabel} count`}>
+      <div className="bw-head">
+        <span className="bw-title">{denomLabel} · {columnLabel}</span>
+        {onDone && <button type="button" className="bw-done" onClick={onDone}>Done</button>}
       </div>
-      <Arrows what="amounts" prevDisabled={page === 0} onPrev={() => setPage((p) => Math.max(0, p - 1))} onNext={() => setPage((p) => p + 1)}>
-        {cashChips(denom, page).map((c) => (
-          <button
-            key={c.cents}
-            type="button"
-            className={`tp-chip${c.cents === current ? " on" : ""}`}
-            aria-pressed={c.cents === current}
-            onClick={() => onSet(c.value)}
-          >{c.label}</button>
-        ))}
-      </Arrows>
-      <div className="tp-row tp-type">
-        <input
-          type="text"
-          inputMode="decimal"
-          autoComplete="off"
-          autoFocus={finePointer()}
-          placeholder="Type an amount, e.g. 420"
-          aria-label={`Type the ${denomLabel} ${columnLabel.toLowerCase()} amount`}
-          value={typed}
-          onChange={(e) => setTyped(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter") applyTyped(); }}
-        />
-        <button type="button" className="tp-btn tp-btn-main" disabled={typedCents == null} onClick={applyTyped}>Set</button>
+      <div className="bw-wheel">
+        <div className="bw-band" aria-hidden="true" />
+        <div
+          ref={scrollRef}
+          className="bw-scroll"
+          tabIndex={0}
+          role="listbox"
+          aria-label={`${denomLabel} ${columnLabel.toLowerCase()} amount`}
+          aria-activedescendant={`${uid}-${center}`}
+          onScroll={onScroll}
+          onTouchStart={grab}
+          onTouchEnd={release}
+          onTouchCancel={release}
+          onWheel={() => { s.current.touched = true; }}
+          onKeyDown={onKeyDown}
+        >
+          <div className="bw-pad" aria-hidden="true" />
+          {rows.map((r, i) => (
+            <div
+              key={r.asIs ? "as-is" : r.cents}
+              id={`${uid}-${i}`}
+              role="option"
+              aria-selected={i === center}
+              className={`bw-item${i === center ? " on" : ""}${r.asIs ? " bw-asis" : ""}`}
+              onClick={() => jump(i)}
+            >{r.label}</div>
+          ))}
+          <div className="bw-pad" aria-hidden="true" />
+        </div>
       </div>
-      {check && <div className="tp-note tp-warn" role="status">{check.message}</div>}
-      <div className="tp-row tp-foot">
-        <button type="button" className="tp-btn tp-btn-quiet" disabled={!value} onClick={() => onSet("")}>Clear</button>
-      </div>
-    </>
+      <div className="bw-count">{caption}</div>
+      {!typing ? (
+        <button type="button" className="bw-link" onClick={openTyping}>Type amount</button>
+      ) : (
+        <>
+          <div className="bw-type">
+            <input
+              ref={inputRef}
+              type="text"
+              inputMode="decimal"
+              autoComplete="off"
+              placeholder="e.g. 420"
+              aria-label={`Type the ${denomLabel} ${columnLabel.toLowerCase()} amount`}
+              value={typed}
+              onChange={(e) => setTyped(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") applyTyped(); if (e.key === "Escape") { e.stopPropagation(); closeTyping(); } }}
+            />
+            <button type="button" className="bw-set" disabled={typedCents == null} onClick={applyTyped}>Set</button>
+            <button type="button" className="bw-clear" disabled={!stored} onClick={clearValue}>Clear</button>
+          </div>
+          {check && <div className="bw-note" role="status">{check.message}</div>}
+        </>
+      )}
+    </div>
+  );
+}
+
+// Beside the table before any cell is chosen, so the table never jumps
+// sideways when the first cell is tapped.
+export function BankWheelIdle() {
+  return (
+    <div className="bw bw-idle">
+      <div className="bw-head"><span className="bw-title">Count</span></div>
+      <div className="bw-idle-text">Tap a bank cell to count it with the wheel.</div>
+    </div>
   );
 }

@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef } from "react";
+import { flushSync } from "react-dom";
 import { Check, X, AlertTriangle, Users, Package, Clock, ChevronLeft, ChevronRight, ChevronDown, Printer, FileDown, Calendar, CalendarDays, CalendarPlus, StickyNote, Receipt, Lock, Unlock, FolderOpen, UserPlus } from "lucide-react";
 import Sidebar, { NAV_ITEMS } from "./components/Sidebar.jsx";
 import {
@@ -100,7 +101,7 @@ import { calcTips, sheetCalcVersion } from "./lib/tipMath.js";
 import { ackEntry, tipSheetProblems, zeroesAllAcked } from "./lib/tipGuard.js";
 import { pickerMayOpen, scheduledStartMins } from "./lib/tipPickers.js";
 import { planApply, undoConflicts, SECTION_GROUPS } from "./lib/scheduleTemplates.js";
-import { CashPickerBody, PickerPanel, TimePickerBody } from "./components/TipPickers.jsx";
+import { BankWheel, BankWheelIdle, PickerPanel, TimePickerBody } from "./components/TipPickers.jsx";
 import RailTipPanel, { PanelBoundary } from "./components/RailTipPanel.jsx";
 import UpdateBanner from "./components/UpdateBanner.jsx";
 import QRCode from "qrcode";
@@ -1562,9 +1563,32 @@ export default function SchedulingHub({ session, onSignOut }) {
   const [zeroTipAcks, setZeroTipAcks] = useState([]);
   // The Lock / Send stop: { action: "lock" | "send", blocks, zeroes, ticked }.
   const [tipGuard, setTipGuard] = useState(null);
-  // The one open tap panel: { kind: "time", slotId, field, name, scheduled,
-  // anchor } or { kind: "cash", which, denom, anchor }. null = none.
+  // The open time panel: { kind: "time", slotId, field, name, scheduled,
+  // anchor }. null = none. (Bank counts use the wheel below, not a panel.)
   const [tipPicker, setTipPicker] = useState(null);
+  // The bank cell the count wheel is on (iPad fixes, 2026-11-18):
+  // { which: "open" | "close", denom, anchor, dateIso }. null = none. Screen
+  // only — the row is highlighted and the wheel sits beside the table (or, on
+  // narrow screens, opens as a bottom sheet). bankFlushRef saves a spin that
+  // hasn't settled yet; see BankWheel in components/TipPickers.jsx.
+  const [bankSel, setBankSel] = useState(null);
+  const bankFlushRef = useRef(null);
+  // True while the Tip Sheet PDF is being drawn: no wheel column then.
+  const [tipPdfBusy, setTipPdfBusy] = useState(false);
+  const [bankNarrow, setBankNarrow] = useState(() => typeof window !== "undefined" && window.matchMedia("(max-width: 899px)").matches);
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 899px)");
+    // Both: the media-query change and a plain resize (turning the iPad), so
+    // the wheel can never be left beside a table that's now too narrow.
+    const onChange = () => setBankNarrow(mq.matches);
+    if (mq.addEventListener) mq.addEventListener("change", onChange);
+    else mq.addListener(onChange); // older iPad Safari
+    window.addEventListener("resize", onChange);
+    return () => {
+      if (mq.removeEventListener) mq.removeEventListener("change", onChange); else mq.removeListener(onChange);
+      window.removeEventListener("resize", onChange);
+    };
+  }, []);
   // Ticks given on the way into the Send screen, written when the send lands.
   const [tipSendAcks, setTipSendAcks] = useState([]);
   const [tipSent, setTipSent] = useState(false);
@@ -2551,7 +2575,16 @@ export default function SchedulingHub({ session, onSignOut }) {
   }
   function openCashPicker(e, which, denom) {
     if (!tipPickerAllowed) return;
-    setTipPicker({ kind: "cash", which, denom, anchor: e.currentTarget });
+    bankFlushRef.current?.(); // an unsettled spin on the previous cell still counts
+    setTipPicker(null);
+    // Re-read the width at the tap too: beside the table or a bottom sheet is
+    // decided now, even if a rotation's resize event was missed.
+    setBankNarrow(window.matchMedia("(max-width: 899px)").matches);
+    setBankSel({ which, denom, anchor: e.currentTarget, dateIso: tipDateIso });
+  }
+  function closeBankWheel() {
+    bankFlushRef.current?.();
+    setBankSel(null);
   }
   // Enter / Space on a focused cell opens it too (keyboard on desktop).
   function pickerKey(e, open) {
@@ -2743,9 +2776,40 @@ export default function SchedulingHub({ session, onSignOut }) {
     : tipSent ? "Sent" : tipLocked ? "Locked" : tipFinalized ? "Finalized" : "";
   // Opening it points the Tip Sheet at that day — one sheet in memory, so the
   // Tip Sheet tab shows the same date and the same unsaved edits.
+  // The count wheel for the selected bank cell, or the idle note when none is
+  // selected. It saves only through setCount, and only into the sheet it was
+  // opened on (the date check is belt and braces: changing date or tab clears
+  // the selection, which drops an unsettled spin instead of saving it).
+  const tipDateRef = useRef(tipDateIso);
+  tipDateRef.current = tipDateIso;
+  useEffect(() => { setBankSel(null); }, [tab, tipDateIso]);
+  // The Tip Sheet's own lock rule; on the Rail, its stricter read-only rule.
+  const bankWheelAllowed = tipPickerAllowed && !(tab === "rail" && railTipReadOnlyWhy);
+  // Tip Sheet tab: the wheel column beside the Cash table (wide screens, sheet
+  // editable, and not while the PDF is being drawn).
+  const tipWheelBeside = !bankNarrow && tipPickerAllowed && !tipPdfBusy;
+  function bankWheelFor(sheet) {
+    if (!bankSel) return <BankWheelIdle />;
+    const { which, denom, dateIso } = bankSel;
+    const counts = which === "open" ? openingCounts : closingCounts;
+    return (
+      <BankWheel
+        key={`${dateIso}-${which}-${denom}`}
+        denom={denom}
+        denomLabel={denomLabel(denom)}
+        columnLabel={which === "open" ? "Opening" : "Closing"}
+        value={String(counts[denom] ?? "")}
+        onSet={(text) => { if (dateIso === tipDateRef.current) setCount(which, denom, text); }}
+        flushRef={bankFlushRef}
+        onDone={sheet ? closeBankWheel : undefined}
+        reveal={!sheet}
+      />
+    );
+  }
   function toggleRailTip() {
     if (!railTipOpen) setTipDateIso(railTipIso);
     setTipPicker(null);
+    closeBankWheel();
     setRailTipOpen((o) => !o);
   }
   useEffect(() => {
@@ -3920,6 +3984,15 @@ export default function SchedulingHub({ session, onSignOut }) {
   const tipSheetPdfFilename = `Haenyeo-TipSheet-${tipDateIso}.pdf`;
   async function renderTipSheetPdf() {
     setTipPicker(null); // never in the capture (it sits outside the card anyway)
+    // The bank count wheel sits INSIDE the card. Close it synchronously, saving
+    // an unsettled spin first, so no wheel, no typed-amount field and no copper
+    // highlight is in the DOM when the capture starts. (The capture pairs live
+    // inputs with the clone's by position after stripping .screen-only, so an
+    // input inside the wheel would shift every value after it.)
+    // tipPdfBusy also takes the wheel column and its screen-only widths out
+    // for the capture, so the card is laid out exactly as it was before the
+    // wheel existed.
+    flushSync(() => { bankFlushRef.current?.(); setBankSel(null); setTipPdfBusy(true); });
     const card = tipCardRef.current;
     if (!card) throw new Error("the Tip Sheet isn't on screen");
     const origW = card.style.width;
@@ -3966,6 +4039,7 @@ export default function SchedulingHub({ session, onSignOut }) {
       card.classList.remove("tip-pdf-mode");
       card.style.width = origW;
       card.style.maxWidth = origMax;
+      setTipPdfBusy(false); // the wheel column comes back
     }
   }
   async function exportTipSheetPdf() {
@@ -7103,6 +7177,8 @@ export default function SchedulingHub({ session, onSignOut }) {
           --cl-bg: rgba(217,160,122,0.24); --cl-text: #f1c7a3; --cl-line: rgba(217,160,122,0.6);
           /* round 3: outline-glass buttons glow on hover */
           --ok-glow: rgba(127,179,146,0.35); --danger-glow: rgba(231,146,137,0.35);
+          /* bank count wheel window (iPad fixes) */
+          --wheel-bg: rgba(10,9,8,0.42);
         }
         [data-theme="light"] {
           color-scheme: light;
@@ -7129,6 +7205,7 @@ export default function SchedulingHub({ session, onSignOut }) {
           --primary-glass: rgba(63,107,70,0.85); --primary-glass-edge: rgba(255,255,255,0.45);
           --cl-bg: rgba(154,91,46,0.18); --cl-text: #6e3d17; --cl-line: rgba(154,91,46,0.5);
           --ok-glow: rgba(63,107,70,0.3); --danger-glow: rgba(178,58,47,0.3);
+          --wheel-bg: rgba(255,255,255,0.55);
         }
         /* The old "dim label" role (section labels, log times, placeholders)
            needs a little more ink than --dim gives on glass over the colour
@@ -7394,6 +7471,90 @@ export default function SchedulingHub({ session, onSignOut }) {
         .rtp-cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 400px); gap: 4px 28px; align-items: start; }
         .rtp-col { min-width: 0; }
         @media (max-width: 900px) { .rtp-cols { grid-template-columns: 1fr; } }
+
+        /* ---- bank count wheel (iPad fixes, 2026-11-18) ----
+           Rail panel and Tip Sheet tab. Everything here is screen only: on
+           paper the wrapper is a plain block (the flex rule is @media screen)
+           and the wheel column is .screen-only; the PDF capture closes the
+           wheel first and the .tip-pdf-mode lines below are a second guard. */
+        @media screen and (min-width: 900px) {
+          .bank-wrap.has-wheel { display: flex; align-items: flex-start; gap: 12px; }
+          .bank-wrap.has-wheel > .rtp-cash, .bank-wrap.has-wheel > .denom-table { flex: 1 1 auto; min-width: 0; }
+          .bank-wheel-col { flex: 0 0 136px; min-width: 0; }
+          /* Room for the wheel in the Tip Sheet's Cash box, on screen only.
+             The column grows just 6px (at 1024px the people table has about
+             11px to spare); the rest comes from slimmer side padding and label
+             column inside the box. Paper never sees .with-wheel's sizes
+             (@media print pins the column at 340px), and the PDF capture
+             drops the class (tipPdfBusy). */
+          .tip-left-col.with-wheel { width: 306px; }
+          .tip-left-col.with-wheel .cash-recon { padding-left: 10px; padding-right: 10px; }
+          .tip-left-col.with-wheel .denom-row, .tip-left-col.with-wheel .denom-header { grid-template-columns: 36px 1fr 1fr; column-gap: 4px; }
+          .tip-left-col.with-wheel .bank-wrap.has-wheel { gap: 8px; }
+          .cash-recon .bank-wheel-col { flex-basis: 100px; }
+        }
+        @media (max-width: 899px) { .bank-wheel-col { display: none; } } /* narrow: the bottom sheet instead */
+        .tip-pdf-mode .bank-wrap { display: block !important; }
+        .tip-pdf-mode .denom-row.bank-row-sel { background: none !important; box-shadow: none !important; }
+        .tip-pdf-mode .denom-row .bank-cell-sel { box-shadow: none !important; }
+        /* The selected cell's row, in copper. */
+        @media screen {
+          .rtp-cash-row.bank-row-sel { background: var(--accent-soft); box-shadow: 0 0 0 4px var(--accent-soft); border-radius: 8px; }
+          .rtp-cash-row.bank-row-sel .rtp-denom { color: var(--accent); }
+          .rtp-cash .rtp-cell.bank-cell-sel { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+          .denom-row.bank-row-sel { background: var(--accent-soft); box-shadow: 0 0 0 3px var(--accent-soft); border-radius: 4px; }
+          .denom-row.bank-row-sel .denom-label { color: var(--accent); }
+          .denom-row input.bank-cell-sel { box-shadow: 0 0 0 1.5px var(--accent); }
+        }
+
+        .bw { --row: 44px; display: flex; flex-direction: column; gap: 8px; box-sizing: border-box; padding: 10px; border-radius: 14px;
+          background: var(--glass-modal); border: 1px solid var(--glass-border); box-shadow: var(--glass-shadow); color: var(--txt); font-family: 'Manrope', sans-serif; }
+        .bw-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 22px; }
+        .bw-title { font-family: 'Space Mono', monospace; font-weight: 700; font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--accent); line-height: 1.3; }
+        .bw-wheel { position: relative; border-radius: 12px; background: var(--wheel-bg); border: 1px solid var(--glass-inner-border); overflow: hidden; }
+        /* Centre row: copper-outlined band behind the numbers. */
+        .bw-band { position: absolute; left: 5px; right: 5px; top: calc(50% - var(--row) / 2); height: var(--row); box-sizing: border-box;
+          border: 1.5px solid var(--accent); border-radius: 10px; background: var(--accent-soft); pointer-events: none; z-index: 0; }
+        .bw-scroll { position: relative; z-index: 1; height: calc(var(--row) * 5); overflow-y: auto; overflow-x: hidden;
+          scroll-snap-type: y mandatory; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; scrollbar-width: none; outline: none;
+          -webkit-mask-image: linear-gradient(to bottom, transparent 0%, rgba(0,0,0,0.3) 12%, #000 40%, #000 60%, rgba(0,0,0,0.3) 88%, transparent 100%);
+          mask-image: linear-gradient(to bottom, transparent 0%, rgba(0,0,0,0.3) 12%, #000 40%, #000 60%, rgba(0,0,0,0.3) 88%, transparent 100%); }
+        .bw-scroll::-webkit-scrollbar { display: none; }
+        .bw-wheel:focus-within .bw-band { border-width: 2px; }
+        .bw-pad { height: calc(var(--row) * 2); }
+        .bw-item { height: var(--row); display: flex; align-items: center; justify-content: center; scroll-snap-align: center;
+          font-family: 'Space Mono', monospace; font-size: 15px; color: var(--muted); white-space: nowrap; cursor: pointer; user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent; }
+        .bw-item.on { color: var(--txt); font-weight: 700; font-size: 17px; }
+        .bw-item.bw-asis { font-style: italic; }
+        .bw-count { font-size: 12px; color: var(--txt2); text-align: center; line-height: 1.35; min-height: 32px; display: flex; align-items: center; justify-content: center; }
+        .bw-link { align-self: center; min-height: 32px; padding: 4px 6px; background: none; border: 0; font-family: inherit; font-size: 12px; font-weight: 700;
+          color: var(--accent); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+        .bw-type { display: flex; flex-wrap: wrap; gap: 6px; }
+        .bw-type input { flex: 1 1 100%; min-width: 0; height: 40px; box-sizing: border-box; padding: 0 10px; border-radius: 8px; border: 1px solid var(--control-border); font-family: inherit; font-size: 16px; }
+        .bw-type button { flex: 1 1 0; min-height: 36px; border-radius: 8px; font-family: inherit; font-size: 12.5px; font-weight: 700; cursor: pointer; }
+        .bw-set { background: var(--ok-bg); color: var(--ok-text); border: 1px solid var(--ok); }
+        .bw-clear { background: transparent; color: var(--txt2); border: 1px solid var(--control-border); }
+        .bw-type button:disabled { opacity: 0.4; cursor: default; }
+        .bw-note { font-size: 11.5px; line-height: 1.35; color: var(--warn-text); }
+        /* Done: sage outline, like the app's other primary buttons. */
+        .bw-done { min-height: 36px; padding: 0 18px; border-radius: 10px; background: var(--ok-bg); color: var(--ok-text); border: 1px solid var(--ok);
+          font-family: inherit; font-size: 13px; font-weight: 700; cursor: pointer; box-shadow: inset 0 1px 0 rgba(255,255,255,0.08); }
+        .bw-done:hover { border-color: var(--ok-text); box-shadow: inset 0 1px 0 rgba(255,255,255,0.08), 0 0 0 1px var(--ok-bg), 0 0 14px var(--ok-glow); }
+        .bw-idle-text { font-size: 12px; line-height: 1.45; color: var(--txt2); padding: 4px 2px 6px; }
+        /* Tip Sheet's Cash box is narrow (about 285px): a slimmer wheel. */
+        .cash-recon .bw { --row: 36px; padding: 8px; gap: 6px; border-radius: 12px; }
+        .cash-recon .bw-title { font-size: 10px; letter-spacing: 0; }
+        .cash-recon .bw-item { font-size: 13px; }
+        .cash-recon .bw-item.on { font-size: 14.5px; }
+        .cash-recon .bw-count { font-size: 11px; }
+        /* In the bottom sheet the panel is already glass: no second pane. */
+        .tip-picker .bw { background: none; border: 0; box-shadow: none; padding: 0; gap: 10px; }
+        .tip-picker .bw-title { font-size: 12px; }
+        .tip-picker .bw-wheel { width: 100%; max-width: 340px; align-self: center; }
+        .tip-picker .bw-type { width: 100%; max-width: 340px; align-self: center; }
+        /* Short screens (a phone on its side): smaller rows so the sheet fits. */
+        @media (max-height: 560px) { .bw { --row: 34px; } .tip-picker .bw { gap: 6px; } }
+        .tip-picker.tp-sheet { max-height: calc(100vh - 16px); overflow-y: auto; }
 
         /* ---- round 3: Set Schedule toolbar menus + status pill (item 7) ---- */
         .tb-menu-wrap { position: relative; display: inline-flex; }
@@ -7672,6 +7833,8 @@ export default function SchedulingHub({ session, onSignOut }) {
                 openingCounts={openingCounts}
                 closingCounts={closingCounts}
                 onCashTap={(e, which, d) => openCashPicker(e, which, d)}
+                bankSel={bankSel}
+                bankWheel={!bankNarrow && bankWheelAllowed ? bankWheelFor(false) : null}
                 openingTotal={openingBankTotal}
                 closingTotal={closingBankTotal}
                 money={money}
@@ -9075,7 +9238,7 @@ export default function SchedulingHub({ session, onSignOut }) {
               </div>
             )}
             <div className={`tip-page-split ${tipFinalized || tipLocked ? "tip-locked" : ""}`}>
-              <div className="tip-left-col">
+              <div className={`tip-left-col${tipWheelBeside ? " with-wheel" : ""}`}>
                 <div className="tip-logo-space">
                   <img src={HAENYEO_LOGO} alt="Haenyeo" className="tip-logo-img" />
                 </div>
@@ -9085,13 +9248,18 @@ export default function SchedulingHub({ session, onSignOut }) {
                 <div className="cash-recon">
                   <div className="recon-title">Cash</div>
 
+                  {/* .bank-wrap puts the count wheel beside the table on
+                      screen (900px and up). On paper and in the PDF it's a
+                      plain block and the wheel column (.screen-only) is gone,
+                      so the table lays out exactly as before. */}
+                  <div className={`bank-wrap${tipWheelBeside ? " has-wheel" : ""}`}>
                   <div className="denom-table">
                     <div className="denom-header"><span>$ amt</span><span>Opening</span><span>Closing</span></div>
                     {DENOMS.map((d) => (
-                      <div className="denom-row" key={d}>
+                      <div className={`denom-row${bankSel?.denom === d ? " bank-row-sel" : ""}`} key={d}>
                         <span className="denom-label">{denomLabel(d)}</span>
-                        <input type="number" value={openingCounts[d] || ""} readOnly inputMode="none" onClick={(e) => openCashPicker(e, "open", d)} onKeyDown={(e) => pickerKey(e, () => openCashPicker(e, "open", d))} placeholder="0.00" />
-                        <input type="number" value={closingCounts[d] || ""} readOnly inputMode="none" onClick={(e) => openCashPicker(e, "close", d)} onKeyDown={(e) => pickerKey(e, () => openCashPicker(e, "close", d))} placeholder="0.00" />
+                        <input type="number" className={bankSel?.denom === d && bankSel.which === "open" ? "bank-cell-sel" : undefined} value={openingCounts[d] || ""} readOnly inputMode="none" onClick={(e) => openCashPicker(e, "open", d)} onKeyDown={(e) => pickerKey(e, () => openCashPicker(e, "open", d))} placeholder="0.00" />
+                        <input type="number" className={bankSel?.denom === d && bankSel.which === "close" ? "bank-cell-sel" : undefined} value={closingCounts[d] || ""} readOnly inputMode="none" onClick={(e) => openCashPicker(e, "close", d)} onKeyDown={(e) => pickerKey(e, () => openCashPicker(e, "close", d))} placeholder="0.00" />
                       </div>
                     ))}
                     <div className="denom-row totals">
@@ -9099,6 +9267,8 @@ export default function SchedulingHub({ session, onSignOut }) {
                       <span>${money(openingBankTotal)}</span>
                       <span>${money(closingBankTotal)}</span>
                     </div>
+                  </div>
+                  {tipWheelBeside && <div className="bank-wheel-col screen-only">{bankWheelFor(false)}</div>}
                   </div>
 
                   {/* Fills from the Closing total until something is typed;
@@ -10285,29 +10455,26 @@ export default function SchedulingHub({ session, onSignOut }) {
           PDF never captures it; .screen-only keeps it off paper. Gone if the
           cell left the screen (another tab) or the sheet was locked. */}
       {tipPicker && tipPicker.anchor.isConnected && tipPickerAllowed && (
-        tipPicker.kind === "time" ? (
-          <PickerPanel anchor={tipPicker.anchor} onClose={() => setTipPicker(null)} label={`${tipPicker.name} ${tipPicker.field === "in" ? "time in" : "time out"}`}>
-            <TimePickerBody
-              key={`${tipPicker.slotId}-${tipPicker.field}`}
-              field={tipPicker.field}
-              value={getTimes(tipPicker.slotId)[tipPicker.field]}
-              scheduled={tipPicker.scheduled}
-              personName={tipPicker.name}
-              onSet={(text) => { setSlotTime(tipPicker.slotId, tipPicker.field, text); setTipPicker(null); }}
-            />
-          </PickerPanel>
-        ) : (
-          <PickerPanel anchor={tipPicker.anchor} onClose={() => setTipPicker(null)} label={`${denomLabel(tipPicker.denom)} ${tipPicker.which === "open" ? "opening" : "closing"}`}>
-            <CashPickerBody
-              key={`${tipPicker.which}-${tipPicker.denom}`}
-              denom={tipPicker.denom}
-              denomLabel={denomLabel(tipPicker.denom)}
-              columnLabel={tipPicker.which === "open" ? "Opening" : "Closing"}
-              value={String((tipPicker.which === "open" ? openingCounts : closingCounts)[tipPicker.denom] ?? "")}
-              onSet={(text) => { setCount(tipPicker.which, tipPicker.denom, text); setTipPicker(null); }}
-            />
-          </PickerPanel>
-        )
+        <PickerPanel anchor={tipPicker.anchor} onClose={() => setTipPicker(null)} label={`${tipPicker.name} ${tipPicker.field === "in" ? "time in" : "time out"}`}>
+          <TimePickerBody
+            key={`${tipPicker.slotId}-${tipPicker.field}`}
+            field={tipPicker.field}
+            value={getTimes(tipPicker.slotId)[tipPicker.field]}
+            scheduled={tipPicker.scheduled}
+            personName={tipPicker.name}
+            onSet={(text) => { setSlotTime(tipPicker.slotId, tipPicker.field, text); setTipPicker(null); }}
+          />
+        </PickerPanel>
+      )}
+
+      {/* Narrow screens (under 900px, iPad portrait): the bank count wheel is
+          a bottom sheet with Done instead of a column beside the table. Same
+          wheel, same save; PickerPanel keeps it on screen and above the
+          keyboard, and scrolls the highlighted row clear of it. */}
+      {bankSel && bankNarrow && bankWheelAllowed && bankSel.anchor?.isConnected && (
+        <PickerPanel anchor={bankSel.anchor} onClose={closeBankWheel} label={`${denomLabel(bankSel.denom)} ${bankSel.which === "open" ? "opening" : "closing"} count`}>
+          {bankWheelFor(true)}
+        </PickerPanel>
       )}
 
       {/* Lock / Send stop (lib/tipGuard.js). Blocks have no way past — fix the
