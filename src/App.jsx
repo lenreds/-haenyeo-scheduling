@@ -101,6 +101,11 @@ import { hoursBetween } from "./lib/tipTimes.js";
 import { calcTips, sheetCalcVersion } from "./lib/tipMath.js";
 import { ackEntry, tipSheetProblems, zeroesAllAcked } from "./lib/tipGuard.js";
 import { pickerMayOpen, scheduledStartMins } from "./lib/tipPickers.js";
+import { roleFromCode, normalizeShiftCode } from "./lib/shiftCodes.js";
+import {
+  GLANCE_ADD_ROLES, dayOfEntries, dayTypeFor, needsAck, planGlanceChange, replacementShift,
+  shiftChoices, staffChoices, staffWarnings, tipSheetGuard, withEntries,
+} from "./lib/glanceStaff.js";
 import { planApply, undoConflicts, SECTION_GROUPS } from "./lib/scheduleTemplates.js";
 import { BankWheel, BankWheelIdle, ClockWheel, PickerPanel, useWheelDismiss } from "./components/TipPickers.jsx";
 import RailTipPanel, { PanelBoundary } from "./components/RailTipPanel.jsx";
@@ -889,34 +894,7 @@ const QR_PRINT_CARDS = [
   { key: "update", title: "Update My Info", color: SHEET.purple, text: "New email or phone? Fill in what changed" },
 ];
 
-// which role a stored shift code belongs to (null for OFF/GAP)
-function roleFromCode(code) {
-  if (!code) return null;
-  if (code.startsWith("SV_")) return "Servers";
-  if (code.startsWith("BR_")) return "Busser/Runner";
-  if (code.startsWith("HOST")) return "Host";
-  if (code.startsWith("EXPO")) return "Expo";
-  if (code.startsWith("BAR_")) return "Bar";
-  if (code.startsWith("TRAIN")) return "Training";
-  return null;
-}
-
-// pre-redesign codes still in the DB (or the seed constants) — mapped to the
-// new vocabulary using the person's primary role where the old code was generic
-const LEGACY_BY_ROLE = {
-  Bar: { OPENER: "BAR_4FC", SWING: "BAR_5CL", CLOSER: "BAR_6CL", FIVE_CLOSE: "BAR_5CL" },
-  Host: { OPENER: "HOST_4", SWING: "HOST_4", CLOSER: "HOST_4" },
-  Servers: { OPENER: "SV_4FC", SWING: "SV_5SC", CLOSER: "SV_6CL", FIVE_CLOSE: "SV_5CL" },
-  "Busser/Runner": { OPENER: "BR_4FC", SWING: "BR_5CL", CLOSER: "BR_6CL" },
-};
-const LEGACY_ANY_ROLE = { BUSRUN4: "BR_4FC", BUSRUN6: "BR_6CL", EXPO: "EXPO_5", BAR4: "BAR_4FC", BAR6: "BAR_6CL", HOST: "HOST_4" };
-function normalizeShiftCode(code, primaryRole) {
-  if (!code) return "OFF";
-  if (LEGACY_ANY_ROLE[code]) return LEGACY_ANY_ROLE[code];
-  const roleMap = LEGACY_BY_ROLE[primaryRole];
-  if (roleMap && roleMap[code]) return roleMap[code];
-  return code;
-}
+// roleFromCode / normalizeShiftCode: lib/shiftCodes.js (imported above).
 function normalizePatterns(patterns, roleByName) {
   const out = {};
   Object.entries(patterns).forEach(([name, week]) => {
@@ -1496,10 +1474,20 @@ export default function SchedulingHub({ session, onSignOut }) {
     setStaffSectionsOpen(next);
     try { localStorage.setItem(STAFF_SECTIONS_KEY, JSON.stringify(next)); } catch { /* not remembered */ }
   }
-  const [swapModal, setSwapModal] = useState(null); // { name, role, code, dateIso } | null
+  // The Today at a Glance dialog (glance-staff, 2026-11-25):
+  //   { mode: "replace", name, role, code, dateIso } — a row's ⇄ (Replace /
+  //     Remove only);
+  //   { mode: "add", dateIso } — "Add to tonight".
+  const [swapModal, setSwapModal] = useState(null);
   // removeOnly: take the person off with no replacement (brief item 3).
-  const [swapForm, setSwapForm] = useState({ withName: "", shift: "", note: "", removeOnly: false });
+  // role / shift: only picked when there's no shift to take over (Add, a
+  // coverage gap). ack: "Add anyway" past a warning (lib/glanceStaff.js).
+  const GLANCE_FORM_EMPTY = { withName: "", role: "", shift: "", note: "", removeOnly: false, ack: false };
+  const [swapForm, setSwapForm] = useState(GLANCE_FORM_EMPTY);
   const [swapBusy, setSwapBusy] = useState(false);
+  // That date's Tip Sheet, read when the dialog opens: { dateIso, state:
+  // "checking" | "open" | "pinned" | "refuse" | "error", how } (tipSheetGuard).
+  const [glanceTip, setGlanceTip] = useState(null);
   // Tip Sheet day-of add / remove (see applyDayOfChange). The modal IS the
   // confirmation: it names the person and the date before anything is written.
   const [dayOfModal, setDayOfModal] = useState(null); // { mode: "add" | "remove", dateIso, name? } | null
@@ -2023,8 +2011,8 @@ export default function SchedulingHub({ session, onSignOut }) {
       if (seen.has(name)) return;
       seen.add(name);
       const ov = overrides[`${name}|${dateIso}`];
-      let type = ov?.type || baseType;
-      if (!ov?.type && railOff?.has(name)) type = "OFF";
+      // Dated row, else approved Request Off, else the planned cell (lib/glanceStaff.js, tested).
+      const type = dayTypeFor({ override: ov, railOff: !!railOff?.has(name), planned: baseType });
       if (isOffCell(type)) off.push(name);
       else if (type === "GAP") gaps.push({ name, role, code: "GAP" });
       else working.push({ name, role, code: type, swapped: !!ov?.swap });
@@ -2079,18 +2067,55 @@ export default function SchedulingHub({ session, onSignOut }) {
     ? "Today at a Glance"
     : new Date(`${glanceIso}T00:00:00`).toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
 
-  // Primary role for a staff member, used to pick their shift dropdown.
-  function primaryRoleOf(name) {
-    const fromMap = (staffRolesMap[name] || [])[0];
-    if (fromMap) return fromMap;
-    return staffList.find((s) => s.name === name)?.role || "Servers";
-  }
-
   // The swap acts on whichever day the glance box is showing, so the modal
   // carries that date rather than assuming today (brief item 7).
+  // (Replace used to list the shifts of the replacement's own first role —
+  // primaryRoleOf, removed — which is how Akira went on as Busser/Runner for
+  // Daniel's Server shift. Now the replaced shift is taken over exactly.)
   function openSwap(entry) {
-    setSwapModal({ ...entry, dateIso: glanceIso });
-    setSwapForm({ withName: "", shift: "", note: "", removeOnly: false });
+    setSwapModal({ mode: "replace", ...entry, dateIso: glanceIso });
+    setSwapForm(GLANCE_FORM_EMPTY);
+    checkGlanceTip(glanceIso);
+  }
+  // "Add to tonight": person, role and shift all picked by hand.
+  function openGlanceAdd() {
+    setSwapModal({ mode: "add", dateIso: glanceIso });
+    setSwapForm(GLANCE_FORM_EMPTY);
+    checkGlanceTip(glanceIso);
+  }
+  // A sent / locked / finalized Tip Sheet never changes (tipSheetGuard): read
+  // that date's sheet so the dialog can say so, or refuse an old one that
+  // would still follow the schedule. Checked again, fresh, on save.
+  function checkGlanceTip(dateIso) {
+    setGlanceTip({ dateIso, state: "checking" });
+    fetchTipSheet(dateIso)
+      .then((row) => setGlanceTip((g) => (g?.dateIso === dateIso ? { dateIso, ...tipSheetGuard(row) } : g)))
+      .catch((e) => {
+        console.error("Tip sheet check failed:", e);
+        setGlanceTip((g) => (g?.dateIso === dateIso ? { dateIso, state: "error" } : g));
+      });
+  }
+  // The role the Glance dialog is working in: Replace -> the replaced shift's
+  // role (or a coverage gap's own role); otherwise the role picked by hand.
+  // Never guessed from the person being put on.
+  function glanceDialogRole() {
+    if (!swapModal) return "";
+    if (swapModal.mode !== "add") {
+      const takes = replacementShift(swapModal);
+      if (takes) return takes.role;
+      if (swapModal.code === "GAP" && GLANCE_ADD_ROLES.includes(swapModal.role)) return swapModal.role;
+    }
+    return swapForm.role;
+  }
+  // What to warn about for the person picked (lib/glanceStaff.js staffWarnings).
+  function glanceWarningsFor(name, dateIso) {
+    if (!name) return [];
+    return staffWarnings({
+      name,
+      working: staffWorkingOn(dateIso).working,
+      override: overrides[`${name}|${dateIso}`],
+      railOff: !!railOffByDate[dateIso]?.has(name),
+    });
   }
 
   // ---- Day-of changes -----------------------------------------------------
@@ -2117,15 +2142,17 @@ export default function SchedulingHub({ session, onSignOut }) {
     // Tip times are stored per slot, and a removal shifts people between
     // slots — carry each person's typed times to wherever they land.
     if (isTipDate) tipTimesRemapRef.current = tipTimesByName();
+    // The rows to write (lib/glanceStaff.js dayOfEntries, tested): the added
+    // person's row replaces whatever dated row they had — a Remove only "off"
+    // included, so someone removed earlier comes back on — and keeps a Rail
+    // link if it had one (the database keeps it anyway; now the screen agrees).
+    const entries = dayOfEntries({ dateIso, removeName, addName, addCode, prev: prevOverrides });
+    const idOf = { [removeName]: removeId, [addName]: addId };
     const written = [];
     try {
-      if (removeName) {
-        await upsertScheduleOverride({ staffId: removeId, dateIso, overrideType: "OFF", isSwap: false, railRequestId: null });
-        written.push([removeName, removeId]);
-      }
-      if (addName) {
-        await upsertScheduleOverride({ staffId: addId, dateIso, overrideType: addCode, isSwap: !!removeName, railRequestId: null });
-        written.push([addName, addId]);
+      for (const e of entries) {
+        await upsertScheduleOverride({ staffId: idOf[e.name], dateIso, overrideType: e.type, isSwap: e.swap, railRequestId: e.railId });
+        written.push([e.name, idOf[e.name]]);
       }
     } catch (e) {
       // A null type falls through to the planned pattern, so this restores
@@ -2139,11 +2166,7 @@ export default function SchedulingHub({ session, onSignOut }) {
       if (isTipDate) tipTimesRemapRef.current = null;
       throw e;
     }
-    setOverrides((o) => ({
-      ...o,
-      ...(removeName ? { [`${removeName}|${dateIso}`]: { type: "OFF", swap: false, railId: null } } : {}),
-      ...(addName ? { [`${addName}|${dateIso}`]: { type: addCode, swap: !!removeName, railId: null } } : {}),
-    }));
+    setOverrides((o) => withEntries(o, entries));
     const note = dayOfNoteText({ dateIso, removeName, addName, addCode, reason });
     await writeDayOfNotes(dateIso, note, addId || removeId);
     addLog(note, "good");
@@ -2192,28 +2215,61 @@ export default function SchedulingHub({ session, onSignOut }) {
     }
   }
 
-  // Today at a Glance: replace the person, or with "Remove only" take them off
-  // with no replacement (brief item 3). Same override + note path as the Tip
-  // Sheet.
+  // Today at a Glance: replace the person, with "Remove only" take them off
+  // with no replacement (brief item 3), or "Add to tonight" (glance-staff).
+  // All three are day-of changes through applyDayOfChange — the same dated
+  // rows and notes as the Tip Sheet's add / remove — so the Tip Sheet, Glance
+  // and the Calendar read them exactly as they read a Set Schedule edit.
   async function confirmSwap() {
     if (!swapModal || swapBusy) return;
-    const outName = swapModal.name;
-    const removeOnly = !!swapForm.removeOnly;
-    const inName = removeOnly ? null : swapForm.withName;
-    const code = removeOnly ? null : swapForm.shift;
-    if (!removeOnly && (!inName || !code)) return;
-
+    const mode = swapModal.mode || "replace";
+    const removeOnly = mode === "replace" && !!swapForm.removeOnly;
+    const outName = mode === "replace" ? swapModal.name : null;
     // Older modals (opened before this field existed) fall back to today.
     const dateIso = swapModal.dateIso || TODAY_ISO;
     const dateLabel = new Date(`${dateIso}T00:00:00`).toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
+
+    // Who goes on, and exactly which role and shift (lib/glanceStaff.js):
+    // Replace takes the replaced person's own shift; Add uses the picks.
+    let plan = null;
+    if (!removeOnly) {
+      plan = planGlanceChange({
+        mode, entry: mode === "replace" ? swapModal : null,
+        name: swapForm.withName, role: glanceDialogRole(), shift: swapForm.shift, roleOptions,
+      });
+      if (!plan.ok) return;
+      if (needsAck(glanceWarningsFor(plan.name, dateIso)) && !swapForm.ack) return;
+    }
+
+    // That date's Tip Sheet, read fresh: a sent / locked / finalized sheet is
+    // never changed. Can't tell -> nothing is written.
+    let guard;
+    try {
+      guard = tipSheetGuard(await fetchTipSheet(dateIso));
+    } catch (e) {
+      console.error("Tip sheet check failed:", e);
+      window.alert(`Couldn't check the Tip Sheet for ${dateLabel}, so nothing was changed. Check the connection and try again.`);
+      return;
+    }
+    setGlanceTip({ dateIso, ...guard });
+    if (guard.state === "refuse") {
+      window.alert(`The Tip Sheet for ${dateLabel} was ${guard.how} before sheets kept their own list of names, so this change would alter it. Nothing was changed.`);
+      return;
+    }
+    const tipLine = guard.state === "pinned"
+      ? `The Tip Sheet for that date is ${guard.how} and keeps the names it has; Today at a Glance and the Calendar update.`
+      : "This updates the Tip Sheet, Today at a Glance and the Calendar for that date.";
+    const what = plan ? roleShiftText(plan.role, plan.code) : "";
     const ok = window.confirm(removeOnly
-      ? `Remove ${outName} from ${dateLabel}? They come off the Tip Sheet, Today at a Glance and the Calendar for that date. The planned schedule is unchanged.`
-      : `Replace ${outName} with ${inName} (${shiftLabelForType(code)}) on ${dateLabel}? This updates the Tip Sheet, Today at a Glance and the Calendar for that date. The planned schedule is unchanged.`);
+      ? `Remove ${outName} from ${dateLabel}? ${tipLine} The planned schedule is unchanged.`
+      : mode === "replace"
+        ? `Replace ${outName} with ${plan.name} as ${what} on ${dateLabel}? ${tipLine} The planned schedule is unchanged.`
+        : `Add ${plan.name} as ${what} on ${dateLabel}? ${tipLine} The planned schedule is unchanged.`);
     if (!ok) return;
 
     setSwapBusy(true);
     try {
-      await applyDayOfChange({ dateIso, removeName: outName, addName: inName, addCode: code, reason: swapForm.note });
+      await applyDayOfChange({ dateIso, removeName: outName, addName: plan?.name ?? null, addCode: plan?.code ?? null, reason: swapForm.note });
       setSwapModal(null);
     } catch (e) {
       console.error("Swap failed:", e);
@@ -7146,6 +7202,19 @@ export default function SchedulingHub({ session, onSignOut }) {
 
         /* ---- Today at a Glance swap (item 5) ---- */
         .swap-icon-btn { background: none; border: none; cursor: pointer; color: var(--muted); font-size: 13px; line-height: 1; padding: 0 0 0 8px; }
+        /* ---- Today at a Glance: Add to tonight + the dialog's lines (glance-staff) ---- */
+        .nr-label .glance-add-btn { margin-left: auto; display: inline-flex; align-items: center; gap: 5px; padding: 6px 10px; min-height: 32px; font-size: 9.5px; text-transform: uppercase; }
+        .nr-label .rs-clear + .glance-add-btn { margin-left: 10px; }
+        .glance-hint { font-size: 11.5px; color: var(--txt2); margin: -4px 0 8px; }
+        .glance-summary { font-size: 13px; line-height: 1.45; color: var(--txt); background: var(--accent-soft); border: 1px solid var(--accent); border-radius: 7px; padding: 8px 11px; margin: 10px 0 4px; }
+        .glance-summary b { color: var(--accent); }
+        .glance-warns { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 4px; }
+        .glance-warn { font-size: 12.5px; line-height: 1.45; color: var(--warn-text); background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 7px; padding: 8px 11px; }
+        .glance-warn svg { vertical-align: -1px; }
+        .glance-info { font-size: 12.5px; line-height: 1.45; color: var(--txt2); background: var(--glass-inner); border: 1px solid var(--glass-inner-border); border-radius: 7px; padding: 8px 11px; margin: 10px 0 4px; }
+        .glance-warns .glance-info { margin: 0; }
+        .glance-ack { display: flex; align-items: center; gap: 8px; min-height: 44px; font-size: 13px; font-weight: 700; color: var(--txt); cursor: pointer; }
+        .glance-ack input { width: 20px; height: 20px; accent-color: var(--accent); }
         .swap-icon-btn:hover { color: var(--accent); }
         .manual-field:disabled { opacity: 0.75; cursor: default; }
 
@@ -8015,6 +8084,15 @@ export default function SchedulingHub({ session, onSignOut }) {
                   {!glanceIsToday && (
                     <button className="rs-clear" onClick={() => setGlanceIso(TODAY_ISO)} title="Back to today">Today</button>
                   )}
+                  {/* Add someone for the day shown (glance-staff): a day-of
+                      change, the same save as Replace and the Tip Sheet's add. */}
+                  <button
+                    className="add-staff-btn glance-add-btn"
+                    onClick={openGlanceAdd}
+                    title={`Add someone to ${glanceIsToday ? "tonight" : shortDate(glanceIso)} — picks the role and shift`}
+                  >
+                    <UserPlus size={12} /> {glanceIsToday ? "Add to tonight" : `Add to ${shortDate(glanceIso)}`}
+                  </button>
                 </div>
                 <div className="nr-panel">
                   {glanceView.count === 0 && (
@@ -10392,75 +10470,201 @@ export default function SchedulingHub({ session, onSignOut }) {
         </DialogLayer>
       )}
 
-      {/* Today at a Glance swap dialog (brief item 5). Writes schedule_overrides
-          for today, which the Calendar and Tip Sheet both read, so the change
-          shows up in each immediately. */}
+      {/* Today at a Glance dialog: Replace / Remove only (a row's ⇄) and Add to
+          tonight (glance-staff, 2026-11-25). Writes dated schedule_overrides
+          through applyDayOfChange, which the Calendar and Tip Sheet both read,
+          so the change shows up in each immediately.
+          - Replace takes over the replaced person's exact role and shift
+            (shown before saving); only a coverage gap asks for the shift.
+          - Add: person, role and shift, all picked; no default role.
+          - Pickers list active Front of House only, people marked for the
+            role on the Staff tab first.
+          - Already working / approved time off: a warning and "Add anyway".
+          - A sent / locked / finalized Tip Sheet is never changed. */}
       {swapModal && (() => {
-        const replRole = swapForm.withName ? primaryRoleOf(swapForm.withName) : null;
-        const shiftOpts = (replRole ? roleOptions[replRole] || [] : []).filter((o) => !isOffCell(o.code) && !o.retired); // no "Counts as off" option as a replacement; nothing retired
-        // The date the glance box was showing when the swap was opened, not
+        const mode = swapModal.mode || "replace";
+        const isAdd = mode === "add";
+        const removeOnly = !isAdd && swapForm.removeOnly;
+        const dateIso = swapModal.dateIso || TODAY_ISO;
+        // The date the glance box was showing when the dialog was opened, not
         // necessarily today (brief item 7).
-        const dateLabel = new Date(`${swapModal.dateIso || TODAY_ISO}T00:00:00`)
+        const dateLabel = new Date(`${dateIso}T00:00:00`)
           .toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" });
+        const takes = isAdd ? null : replacementShift(swapModal);
+        const role = glanceDialogRole();
+        const rolePicked = !takes && !(!isAdd && swapModal.code === "GAP" && GLANCE_ADD_ROLES.includes(swapModal.role));
+        const roleWord = (r) => (r === "Servers" ? "Server" : r);
+        const shiftOpts = shiftChoices(roleOptions, role);
+        const pick = staffChoices({ staff: staffList, rolesByName: staffRolesMap, role: role || null, exclude: isAdd ? [] : [swapModal.name] });
+        const plan = removeOnly ? null : planGlanceChange({
+          mode, entry: isAdd ? null : swapModal, name: swapForm.withName, role, shift: swapForm.shift, roleOptions,
+        });
+        const warns = removeOnly ? [] : glanceWarningsFor(swapForm.withName, dateIso);
+        const ackNeeded = needsAck(warns);
+        const tip = glanceTip?.dateIso === dateIso ? glanceTip : null;
+        const tipRefused = tip?.state === "refuse";
+        const canSave = !swapBusy && !tipRefused && (removeOnly || (plan?.ok && (!ackNeeded || swapForm.ack)));
+        const who = swapForm.withName;
+        const warnText = (w) => {
+          if (w.kind === "working") {
+            const now = roleShiftText(roleFromCode(w.code), w.code);
+            if (plan?.ok && plan.code === w.code) return `${who} is already on ${dateLabel} as ${now} — the same shift.`;
+            return plan?.ok
+              ? `${who} is already on ${dateLabel} as ${now}. Saving moves ${who} to ${roleShiftText(plan.role, plan.code)} and leaves ${now} uncovered.`
+              : `${who} is already on ${dateLabel} as ${now}.`;
+          }
+          if (w.kind === "timeoff") {
+            return w.source === "rail"
+              ? `${who} has approved time off on ${dateLabel} (approved on the Rail).`
+              : `${who} has an approved Request Off for ${dateLabel}.`;
+          }
+          return `${who} was taken off ${dateLabel} earlier with Remove only. Adding ${who} back clears that.`;
+        };
+        const personField = (
+          <>
+            <label className="manual-field-label" htmlFor="swap-with">{isAdd ? "Person" : "Replacing with"}</label>
+            <select
+              id="swap-with"
+              className="manual-field"
+              value={swapForm.withName}
+              disabled={swapBusy}
+              onChange={(e) => setSwapForm((f) => ({ ...f, withName: e.target.value, ack: false }))}
+            >
+              <option value="">Select staff…</option>
+              {role && pick.marked.length > 0 ? (
+                <>
+                  <optgroup label={`Marked ${roleWord(role)} on the Staff tab`}>
+                    {pick.marked.map((n) => <option key={n} value={n}>{n}</option>)}
+                  </optgroup>
+                  {pick.others.length > 0 && (
+                    <optgroup label="Other front of house">
+                      {pick.others.map((n) => <option key={n} value={n}>{n}</option>)}
+                    </optgroup>
+                  )}
+                </>
+              ) : (
+                pick.others.map((n) => <option key={n} value={n}>{n}</option>)
+              )}
+            </select>
+            {isAdd && who && (
+              <div className="glance-hint">
+                On the Staff tab: {(staffRolesMap[who] || [staffList.find((s) => s.name === who)?.role]).filter(Boolean).map(roleWord).join(", ") || "no role marked"}
+              </div>
+            )}
+
+          </>
+        );
         return (
           <DialogLayer className="day-popup-backdrop" onClick={() => !swapBusy && setSwapModal(null)}>
             <div className="delete-modal" onClick={(e) => e.stopPropagation()}>
-              <div className="delete-modal-title">{swapForm.removeOnly ? "Remove from shift" : "Swap shift"}</div>
+              <div className="delete-modal-title">
+                {isAdd ? (dateIso === TODAY_ISO ? "Add to tonight" : `Add to ${shortDate(dateIso)}`) : removeOnly ? "Remove from shift" : "Swap shift"}
+              </div>
 
               {/* Replace with someone, or take them off with no replacement
                   (brief item 3). Both write dated overrides + a note. */}
-              <div className="dayof-mode" role="group" aria-label="Change type">
-                <button
-                  className={`subtab-btn ${!swapForm.removeOnly ? "active" : ""}`}
-                  disabled={swapBusy}
-                  onClick={() => setSwapForm((f) => ({ ...f, removeOnly: false }))}
-                >Replace</button>
-                <button
-                  className={`subtab-btn ${swapForm.removeOnly ? "active" : ""}`}
-                  disabled={swapBusy}
-                  onClick={() => setSwapForm((f) => ({ ...f, removeOnly: true, withName: "", shift: "" }))}
-                >Remove only</button>
-              </div>
+              {!isAdd && (
+                <div className="dayof-mode" role="group" aria-label="Change type">
+                  <button
+                    className={`subtab-btn ${!swapForm.removeOnly ? "active" : ""}`}
+                    disabled={swapBusy}
+                    onClick={() => setSwapForm((f) => ({ ...f, removeOnly: false }))}
+                  >Replace</button>
+                  <button
+                    className={`subtab-btn ${swapForm.removeOnly ? "active" : ""}`}
+                    disabled={swapBusy}
+                    onClick={() => setSwapForm((f) => ({ ...f, removeOnly: true, withName: "", role: "", shift: "", ack: false }))}
+                  >Remove only</button>
+                </div>
+              )}
 
               <label className="manual-field-label">Date</label>
               <input className="manual-field" type="text" value={dateLabel} readOnly disabled />
 
-              <label className="manual-field-label">Removing</label>
-              <input
-                className="manual-field"
-                type="text"
-                readOnly
-                disabled
-                value={`${swapModal.name} — ${swapModal.code === "GAP" ? "Coverage gap" : shiftLabelForType(swapModal.code)}`}
-              />
-
-              {!swapForm.removeOnly && (
+              {!isAdd && (
                 <>
-                  <label className="manual-field-label" htmlFor="swap-with">Replacing with</label>
-                  <select
-                    id="swap-with"
+                  <label className="manual-field-label">Removing</label>
+                  <input
                     className="manual-field"
-                    value={swapForm.withName}
-                    disabled={swapBusy}
-                    onChange={(e) => setSwapForm((f) => ({ ...f, withName: e.target.value, shift: "" }))}
-                  >
-                    <option value="">Select staff…</option>
-                    {staffList
-                      .filter((s) => s.active !== false && s.name !== swapModal.name)
-                      .map((s) => <option key={s.id || s.name} value={s.name}>{s.name}</option>)}
-                  </select>
+                    type="text"
+                    readOnly
+                    disabled
+                    value={`${swapModal.name} — ${swapModal.code === "GAP" ? `Coverage gap${GLANCE_ADD_ROLES.includes(swapModal.role) ? ` (${roleWord(swapModal.role)})` : ""}` : roleShiftText(roleFromCode(normalizeShiftCode(swapModal.code, swapModal.role)), normalizeShiftCode(swapModal.code, swapModal.role))}`}
+                  />
+                </>
+              )}
 
-                  <label className="manual-field-label" htmlFor="swap-shift">New shift</label>
-                  <select
-                    id="swap-shift"
-                    className="manual-field"
-                    value={swapForm.shift}
-                    disabled={swapBusy || !swapForm.withName}
-                    onChange={(e) => setSwapForm((f) => ({ ...f, shift: e.target.value }))}
-                  >
-                    <option value="">{swapForm.withName ? `Select shift (${replRole})…` : "Pick a replacement first…"}</option>
-                    {shiftOpts.map((o) => <option key={o.code} value={o.code}>{o.label}</option>)}
-                  </select>
+              {!removeOnly && (
+                <>
+                  {isAdd && personField}
+
+                  {/* What the person goes on as. Replace: the replaced shift,
+                      exactly — not a choice. Otherwise picked by hand. */}
+                  {takes ? (
+                    <>
+                      <label className="manual-field-label">Takes over</label>
+                      <input className="manual-field glance-takes" type="text" readOnly disabled value={`${roleWord(takes.role)} · ${shiftLabelForType(takes.code)}`} />
+                    </>
+                  ) : rolePicked ? (
+                    <>
+                      <label className="manual-field-label" htmlFor="glance-role">Role</label>
+                      <select
+                        id="glance-role"
+                        className="manual-field"
+                        value={swapForm.role}
+                        disabled={swapBusy}
+                        onChange={(e) => setSwapForm((f) => ({ ...f, role: e.target.value, shift: "" }))}
+                      >
+                        <option value="">Select role…</option>
+                        {GLANCE_ADD_ROLES.map((r) => <option key={r} value={r}>{roleWord(r)}</option>)}
+                      </select>
+                    </>
+                  ) : null}
+
+                  {!takes && (
+                    <>
+                      <label className="manual-field-label" htmlFor="glance-shift">Shift</label>
+                      <select
+                        id="glance-shift"
+                        className="manual-field"
+                        value={swapForm.shift}
+                        disabled={swapBusy || !role}
+                        onChange={(e) => setSwapForm((f) => ({ ...f, shift: e.target.value }))}
+                      >
+                        <option value="">{role ? `Select ${roleWord(role)} shift…` : "Pick the role first…"}</option>
+                        {shiftOpts.map((o) => <option key={o.code} value={o.code}>{o.label}</option>)}
+                      </select>
+                    </>
+                  )}
+
+                  {!isAdd && personField}
+
+                  {plan?.ok && (
+                    <div className="glance-summary" role="status">
+                      {isAdd ? "Adding" : "Putting on"} <b>{plan.name}</b> as <b>{roleShiftText(plan.role, plan.code)}</b> on {dateLabel}.
+                    </div>
+                  )}
+
+                  {warns.length > 0 && (
+                    <div className="glance-warns" role="alert">
+                      {warns.map((w) => (
+                        <div key={w.kind} className={w.kind === "removed" ? "glance-info" : "glance-warn"}>
+                          {w.kind !== "removed" && <AlertTriangle size={12} />} {warnText(w)}
+                        </div>
+                      ))}
+                      {ackNeeded && (
+                        <label className="glance-ack">
+                          <input
+                            type="checkbox"
+                            checked={!!swapForm.ack}
+                            disabled={swapBusy}
+                            onChange={(e) => setSwapForm((f) => ({ ...f, ack: e.target.checked }))}
+                          />
+                          {isAdd ? "Add anyway" : "Replace anyway"}
+                        </label>
+                      )}
+                    </div>
+                  )}
                 </>
               )}
 
@@ -10475,21 +10679,27 @@ export default function SchedulingHub({ session, onSignOut }) {
                 onChange={(e) => setSwapForm((f) => ({ ...f, note: e.target.value }))}
               />
 
+              {/* That date's Tip Sheet: a sent / locked / finalized one never changes. */}
+              {tip && tip.state !== "open" && (
+                <div className={tipRefused || tip.state === "error" ? "glance-warn" : "glance-info"}>
+                  {tip.state === "checking" && "Checking the Tip Sheet for this date…"}
+                  {tip.state === "pinned" && `The Tip Sheet for ${dateLabel} is ${tip.how}: it keeps the names it has and won't change.`}
+                  {tipRefused && `The Tip Sheet for ${dateLabel} was ${tip.how} before sheets kept their own list of names, so this change would alter it. It can't be made here.`}
+                  {tip.state === "error" && "Couldn't check the Tip Sheet for this date — it's checked again when you save."}
+                </div>
+              )}
+
               <div className="delete-modal-warn">
-                {swapForm.removeOnly
-                  ? `${swapModal.name} comes off the Tip Sheet, Today at a Glance and the Calendar for ${dateLabel}, with no replacement.`
-                  : `This updates the Tip Sheet, Today at a Glance and the Calendar for ${dateLabel}.`}
+                {removeOnly
+                  ? `${swapModal.name} comes off ${tip?.state === "pinned" ? "" : "the Tip Sheet, "}Today at a Glance and the Calendar for ${dateLabel}, with no replacement.`
+                  : `This updates ${tip?.state === "pinned" ? "" : "the Tip Sheet, "}Today at a Glance and the Calendar for ${dateLabel}.`}
                 {" "}The planned schedule on Set Schedule is left as built, with a marker on the day. It can't be automatically undone.
               </div>
 
               <div className="delete-modal-actions">
                 <button className="nr-btn nr-btn-deny" disabled={swapBusy} onClick={() => setSwapModal(null)}>Cancel</button>
-                <button
-                  className="delete-confirm-btn"
-                  disabled={swapBusy || (!swapForm.removeOnly && (!swapForm.withName || !swapForm.shift))}
-                  onClick={confirmSwap}
-                >
-                  {swapBusy ? "Saving…" : swapForm.removeOnly ? `Remove ${swapModal.name}` : "Confirm Change"}
+                <button className="delete-confirm-btn" disabled={!canSave} onClick={confirmSwap}>
+                  {swapBusy ? "Saving…" : removeOnly ? `Remove ${swapModal.name}` : isAdd ? (plan?.ok ? `Add ${plan.name}` : "Add") : "Confirm Change"}
                 </button>
               </div>
             </div>
