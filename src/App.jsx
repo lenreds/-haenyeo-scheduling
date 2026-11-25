@@ -2739,8 +2739,8 @@ export default function SchedulingHub({ session, onSignOut }) {
   // Custom Schedule types names by hand, and a locked / sent sheet is
   // read-only, so neither offers add / remove.
   const tipDayOfAllowed = !customMode && !tipFinalized && !tipLocked;
-  // Roles with a tip slot (Training isn't tipped).
-  const TIP_ADD_ROLES = ["Servers", "Busser/Runner", "Expo", "Host", "Bar"];
+  // Roles it offers: the ones with a tip slot (Training isn't tipped) — the
+  // same list as Today at a Glance's Add (GLANCE_ADD_ROLES).
   const slotRoleFor = (role) => (role === "Expo" ? "Expo (Fri–Sun)" : role);
 
   function openDayOfRemove(name) {
@@ -2753,10 +2753,11 @@ export default function SchedulingHub({ session, onSignOut }) {
     setDayOfForm({ name: "", role: "", shift: "", reason: "" });
     setDayOfModal({ mode: "add", dateIso: tipDateIso });
   }
-  // Default the role to the first tipped role the person already works.
+  // Picking the person leaves the role alone: it's always picked by hand,
+  // never guessed from the person's roles (owner, 2026-11-25 — the same rule
+  // as Today at a Glance's Add). It used to default to their first tipped role.
   function pickDayOfStaff(name) {
-    const role = (staffRolesMap[name] || []).find((r) => TIP_ADD_ROLES.includes(r)) || "Servers";
-    setDayOfForm((f) => ({ ...f, name, role, shift: "" }));
+    setDayOfForm((f) => ({ ...f, name }));
   }
   // Adding into a role whose slots are all taken would leave the person off
   // the sheet (slot order is by start time), so say so instead.
@@ -10718,11 +10719,19 @@ export default function SchedulingHub({ session, onSignOut }) {
           .filter((s) => s.active !== false && s.name && !tipWorkingNames.has(s.name))
           .sort((a, b) => a.name.localeCompare(b.name));
         const role = dayOfForm.role;
-        const shiftOpts = role ? (roleOptions[role] || []).filter((o) => !isOffCell(o.code) && !o.retired) : []; // adding someone as "off" would be a no-op; nothing retired
+        // The role's current shifts — not "Counts as off" (adding someone as
+        // off would be a no-op), not retired (lib/glanceStaff.js, tested).
+        const shiftOpts = shiftChoices(roleOptions, role);
         const full = isAdd && role ? dayOfSlotsFull(role) : false;
         const roleLabel = role === "Servers" ? "Server" : role;
         const shiftLabel = dayOfForm.shift ? roleShiftText(role, dayOfForm.shift) : "";
-        const ready = isAdd ? !!(dayOfForm.name && role && dayOfForm.shift && !full) : true;
+        // Person, role and shift all picked, the shift one of that role's
+        // (planGlanceChange, the same check as Glance's Add).
+        const ready = isAdd
+          ? planGlanceChange({ mode: "add", name: dayOfForm.name, role, shift: dayOfForm.shift, roleOptions }).ok && !full
+          : true;
+        const staffRolesText = (n) => (staffRolesMap[n] || [staffList.find((s) => s.name === n)?.role])
+          .filter(Boolean).map((r) => (r === "Servers" ? "Server" : r)).join(", ");
         return (
           <DialogLayer className="day-popup-backdrop" onClick={() => !dayOfBusy && setDayOfModal(null)}>
             <div className="delete-modal" onClick={(e) => e.stopPropagation()}>
@@ -10744,6 +10753,9 @@ export default function SchedulingHub({ session, onSignOut }) {
                     <option value="">Select staff…</option>
                     {candidates.map((s) => <option key={s.id || s.name} value={s.name}>{s.name}</option>)}
                   </select>
+                  {dayOfForm.name && (
+                    <div className="glance-hint">On the Staff tab: {staffRolesText(dayOfForm.name) || "no role marked"}</div>
+                  )}
 
                   <label className="manual-field-label" htmlFor="dayof-role">Role</label>
                   <select
@@ -10753,8 +10765,8 @@ export default function SchedulingHub({ session, onSignOut }) {
                     disabled={dayOfBusy || !dayOfForm.name}
                     onChange={(e) => setDayOfForm((f) => ({ ...f, role: e.target.value, shift: "" }))}
                   >
-                    {!dayOfForm.name && <option value="">Pick a staff member first…</option>}
-                    {TIP_ADD_ROLES.map((r) => <option key={r} value={r}>{r === "Servers" ? "Server" : r}</option>)}
+                    <option value="">{dayOfForm.name ? "Select role…" : "Pick a staff member first…"}</option>
+                    {GLANCE_ADD_ROLES.map((r) => <option key={r} value={r}>{r === "Servers" ? "Server" : r}</option>)}
                   </select>
 
                   <label className="manual-field-label" htmlFor="dayof-shift">Shift</label>
