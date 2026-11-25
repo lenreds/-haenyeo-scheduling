@@ -25,6 +25,9 @@
 // Open, the body is two columns on wide screens — times, tips and payouts on
 // the left, the bank counts on the right — and one column on narrow screens.
 // This component is the Rail's only; the Tip Sheet tab has its own markup.
+// data-wheel-cell marks the time and cash cells, and data-wheel-zone the
+// wheel column: a tap on either doesn't close an open wheel the way a tap
+// anywhere else does (App's useWheelDismiss).
 import React from "react";
 import { Receipt } from "lucide-react";
 
@@ -126,6 +129,7 @@ export default function RailTipPanel(p) {
                       tabIndex={readOnly ? -1 : 0}
                       aria-disabled={readOnly}
                       aria-pressed={sel === f}
+                      data-wheel-cell={readOnly ? undefined : ""}
                       className={`rtp-cell ${t[f] ? "" : "rtp-cell-empty"}${sel === f ? " time-cell-sel" : ""}`}
                       onClick={(e) => !readOnly && onTimeTap(e, s, f)}
                       onKeyDown={(e) => !readOnly && key(e, (ev) => onTimeTap(ev, s, f))}
@@ -191,6 +195,7 @@ export default function RailTipPanel(p) {
                       tabIndex={readOnly ? -1 : 0}
                       aria-disabled={readOnly}
                       aria-pressed={sel}
+                      data-wheel-cell={readOnly ? undefined : ""}
                       className={`rtp-cell ${v ? "" : "rtp-cell-empty"}${sel ? " bank-cell-sel" : ""}`}
                       onClick={(e) => !readOnly && onCashTap(e, which, d)}
                       onKeyDown={(e) => !readOnly && key(e, (ev) => onCashTap(ev, which, d))}
@@ -203,7 +208,7 @@ export default function RailTipPanel(p) {
             ))}
             <div className="rtp-cash-row rtp-cash-total"><span>Total</span><span>${money(openingTotal)}</span><span>${money(closingTotal)}</span></div>
           </div>
-          {bankWheel && <div className="bank-wheel-col">{bankWheel}</div>}
+          {bankWheel && <div className="bank-wheel-col" data-wheel-zone="">{bankWheel}</div>}
           </div>
         </div>
       </div>

@@ -102,7 +102,7 @@ import { calcTips, sheetCalcVersion } from "./lib/tipMath.js";
 import { ackEntry, tipSheetProblems, zeroesAllAcked } from "./lib/tipGuard.js";
 import { pickerMayOpen, scheduledStartMins } from "./lib/tipPickers.js";
 import { planApply, undoConflicts, SECTION_GROUPS } from "./lib/scheduleTemplates.js";
-import { BankWheel, BankWheelIdle, ClockWheel, PickerPanel } from "./components/TipPickers.jsx";
+import { BankWheel, BankWheelIdle, ClockWheel, PickerPanel, useWheelDismiss } from "./components/TipPickers.jsx";
 import RailTipPanel, { PanelBoundary } from "./components/RailTipPanel.jsx";
 import UpdateBanner from "./components/UpdateBanner.jsx";
 import QRCode from "qrcode";
@@ -2573,6 +2573,10 @@ export default function SchedulingHub({ session, onSignOut }) {
   // by the .tip-locked style — and on an empty slot. A sent sheet that has
   // been unlocked opens normally, so it can be corrected and re-sent.
   const tipPickerAllowed = pickerMayOpen({ locked: tipLocked, finalized: tipFinalized });
+  // Tapping another time box or bank cell while a wheel is open lands here
+  // directly (useWheelDismiss lets wheel cells through): the open wheel's
+  // spin is saved, then the wheel moves to the new cell — one tap, and the
+  // panel stays up while it moves.
   function openTimePicker(e, p, field) {
     if (!pickerMayOpen({ locked: tipLocked, finalized: tipFinalized, hasPerson: !!p.name })) return;
     const cell = e.currentTarget;
@@ -2805,6 +2809,12 @@ export default function SchedulingHub({ session, onSignOut }) {
   // The Tip Sheet's own lock rule; on the Rail, its stricter read-only rule.
   const bankWheelAllowed = tipPickerAllowed && !(tab === "rail" && railTipReadOnlyWhy);
   const clockWheelAllowed = bankWheelAllowed;
+  // Both wheels close like a dropdown (2026-11-25): a tap outside the wheel
+  // and its cells, or Escape, closes whichever is open, saving a spin first
+  // (the same as Done), and that tap goes no further. A tap on another time
+  // box or bank cell isn't outside: its own handler moves the wheel there.
+  // See useWheelDismiss in components/TipPickers.jsx.
+  useWheelDismiss(() => { closeClockWheel(); closeBankWheel(); });
   // Tip Sheet tab: the wheel column beside the Cash table (wide screens, sheet
   // editable, and not while the PDF is being drawn).
   const tipWheelBeside = !bankNarrow && tipPickerAllowed && !tipPdfBusy;
@@ -2821,7 +2831,7 @@ export default function SchedulingHub({ session, onSignOut }) {
         value={String(counts[denom] ?? "")}
         onSet={(text) => { if (dateIso === tipDateRef.current) setCount(which, denom, text); }}
         flushRef={bankFlushRef}
-        onDone={sheet ? closeBankWheel : undefined}
+        onDone={closeBankWheel}
         reveal={!sheet}
       />
     );
@@ -7654,6 +7664,40 @@ export default function SchedulingHub({ session, onSignOut }) {
         .tip-pdf-mode .week-table tr.time-row-sel > td { background: none !important; color: inherit !important; }
         .tip-pdf-mode .week-table .tip-time-input.time-cell-sel { box-shadow: none !important; }
 
+        /* Done on the bank wheel beside the table too (2026-11-25). The
+           column is narrow, so Done gets its own full-width row under the
+           title. */
+        .bank-wheel-col .bw-head { flex-wrap: wrap; row-gap: 6px; }
+        .bank-wheel-col .bw-done { flex: 1 1 100%; }
+        /* In the Tip Sheet's Cash box that row is paid for with a four-row
+           drum (the band still in the middle) and a one-line "Type amount",
+           so the open wheel is no taller than the bank table and nothing
+           under the table moves when it opens or closes. */
+        .cash-recon .bank-wheel-col .bw-scroll { height: calc(var(--row) * 4); }
+        .cash-recon .bank-wheel-col .bw-pad { height: calc(var(--row) * 1.5); }
+        .cash-recon .bank-wheel-col .bw-link { padding-left: 0; padding-right: 0; white-space: nowrap; }
+
+        /* ---- Tip Sheet people table fits without sideways scrolling
+           (2026-11-25) ----
+           At 1024x768 it needed about 690px (four-figure amounts) in a 513px
+           column. On screen up to 1279px wide (iPads either way round) it
+           gets tighter padding, 58px time boxes (44px tall, the tap target),
+           12px figures, a 13px name and a position that may wrap: about
+           505px. Nothing is added, removed or reordered. .tip-fit is on the
+           split only while no PDF is being drawn (tipPdfBusy), and every rule
+           here is @media screen, so the PDF and the printout are laid out
+           exactly as before. */
+        @media screen and (max-width: 1279px) {
+          .tip-fit .week-table th { padding: 6px 2px; }
+          .tip-fit .week-table td.shift-cell { padding: 0 2px; font-size: 12px; }
+          .tip-fit .week-table td.tip-position { padding: 0 3px 0 2px; white-space: normal; font-size: 10.5px; }
+          .tip-fit .week-table .tip-name-display { font-size: 13px; gap: 4px; }
+          .tip-fit .week-table .tip-time-input { width: 58px; height: 44px; padding: 0 1px; }
+        }
+        @media screen and (min-width: 861px) and (max-width: 1279px) {
+          .tip-page-split.tip-fit { gap: 16px; }
+        }
+
         /* ---- round 3: Set Schedule toolbar menus + status pill (item 7) ---- */
         .tb-menu-wrap { position: relative; display: inline-flex; }
         .tb-icon-btn { display: inline-flex; align-items: center; gap: 3px; padding: 7px 9px; }
@@ -9336,7 +9380,9 @@ export default function SchedulingHub({ session, onSignOut }) {
                 <button className="nr-btn" style={{ marginLeft: 10 }} onClick={() => setTipConflictMsg("")}>OK</button>
               </div>
             )}
-            <div className={`tip-page-split ${tipFinalized || tipLocked ? "tip-locked" : ""}`}>
+            {/* tip-fit: the screen's tighter people table (CSS above); never
+                while the PDF is drawn, so the capture sees the old class list. */}
+            <div className={`tip-page-split ${tipFinalized || tipLocked ? "tip-locked" : ""}${tipPdfBusy ? "" : " tip-fit"}`}>
               <div className={`tip-left-col${tipWheelBeside ? " with-wheel" : ""}`}>
                 <div className="tip-logo-space">
                   <img src={HAENYEO_LOGO} alt="Haenyeo" className="tip-logo-img" />
@@ -9357,8 +9403,8 @@ export default function SchedulingHub({ session, onSignOut }) {
                     {DENOMS.map((d) => (
                       <div className={`denom-row${bankSel?.denom === d ? " bank-row-sel" : ""}`} key={d}>
                         <span className="denom-label">{denomLabel(d)}</span>
-                        <input type="number" className={bankSel?.denom === d && bankSel.which === "open" ? "bank-cell-sel" : undefined} value={openingCounts[d] || ""} readOnly inputMode="none" onClick={(e) => openCashPicker(e, "open", d)} onKeyDown={(e) => pickerKey(e, () => openCashPicker(e, "open", d))} placeholder="0.00" />
-                        <input type="number" className={bankSel?.denom === d && bankSel.which === "close" ? "bank-cell-sel" : undefined} value={closingCounts[d] || ""} readOnly inputMode="none" onClick={(e) => openCashPicker(e, "close", d)} onKeyDown={(e) => pickerKey(e, () => openCashPicker(e, "close", d))} placeholder="0.00" />
+                        <input type="number" className={bankSel?.denom === d && bankSel.which === "open" ? "bank-cell-sel" : undefined} data-wheel-cell="" value={openingCounts[d] || ""} readOnly inputMode="none" onClick={(e) => openCashPicker(e, "open", d)} onKeyDown={(e) => pickerKey(e, () => openCashPicker(e, "open", d))} placeholder="0.00" />
+                        <input type="number" className={bankSel?.denom === d && bankSel.which === "close" ? "bank-cell-sel" : undefined} data-wheel-cell="" value={closingCounts[d] || ""} readOnly inputMode="none" onClick={(e) => openCashPicker(e, "close", d)} onKeyDown={(e) => pickerKey(e, () => openCashPicker(e, "close", d))} placeholder="0.00" />
                       </div>
                     ))}
                     <div className="denom-row totals">
@@ -9367,7 +9413,7 @@ export default function SchedulingHub({ session, onSignOut }) {
                       <span>${money(closingBankTotal)}</span>
                     </div>
                   </div>
-                  {tipWheelBeside && <div className="bank-wheel-col screen-only">{bankWheelFor(false)}</div>}
+                  {tipWheelBeside && <div className="bank-wheel-col screen-only" data-wheel-zone="">{bankWheelFor(false)}</div>}
                   </div>
 
                   {/* Fills from the Closing total until something is typed;
@@ -9603,8 +9649,8 @@ export default function SchedulingHub({ session, onSignOut }) {
                                 </span>
                               )}
                             </td>
-                            <td className="shift-cell"><input type="text" className={`tip-time-input${sel === "in" ? " time-cell-sel" : ""}`} placeholder="4:00 PM" value={t.in} readOnly inputMode="none" onClick={(e) => openTimePicker(e, p, "in")} onKeyDown={(e) => pickerKey(e, () => openTimePicker(e, p, "in"))} disabled={!p.name} /></td>
-                            <td className="shift-cell"><input type="text" className={`tip-time-input${sel === "out" ? " time-cell-sel" : ""}`} placeholder="9:00 PM" value={t.out} readOnly inputMode="none" onClick={(e) => openTimePicker(e, p, "out")} onKeyDown={(e) => pickerKey(e, () => openTimePicker(e, p, "out"))} disabled={!p.name} /></td>
+                            <td className="shift-cell"><input type="text" className={`tip-time-input${sel === "in" ? " time-cell-sel" : ""}`} data-wheel-cell={p.name ? "" : undefined} placeholder="4:00 PM" value={t.in} readOnly inputMode="none" onClick={(e) => openTimePicker(e, p, "in")} onKeyDown={(e) => pickerKey(e, () => openTimePicker(e, p, "in"))} disabled={!p.name} /></td>
+                            <td className="shift-cell"><input type="text" className={`tip-time-input${sel === "out" ? " time-cell-sel" : ""}`} data-wheel-cell={p.name ? "" : undefined} placeholder="9:00 PM" value={t.out} readOnly inputMode="none" onClick={(e) => openTimePicker(e, p, "out")} onKeyDown={(e) => pickerKey(e, () => openTimePicker(e, p, "out"))} disabled={!p.name} /></td>
                             <td className="shift-cell">{p.name ? p.hours.toFixed(2) : ""}</td>
                             <td className="shift-cell">
                               {!p.name ? (
@@ -10563,7 +10609,6 @@ export default function SchedulingHub({ session, onSignOut }) {
           anchor={tipPicker.anchor}
           beside={tipPicker.beside}
           sheetQuery="(max-width: 899px)"
-          onClose={closeClockWheel}
           label={`${tipPicker.name} ${tipPicker.field === "in" ? "time in" : "time out"}`}
         >
           <ClockWheel
@@ -10585,7 +10630,7 @@ export default function SchedulingHub({ session, onSignOut }) {
           wheel, same save; PickerPanel keeps it on screen and above the
           keyboard, and scrolls the highlighted row clear of it. */}
       {bankSel && bankNarrow && bankWheelAllowed && bankSel.anchor?.isConnected && (
-        <PickerPanel anchor={bankSel.anchor} onClose={closeBankWheel} label={`${denomLabel(bankSel.denom)} ${bankSel.which === "open" ? "opening" : "closing"} count`}>
+        <PickerPanel anchor={bankSel.anchor} label={`${denomLabel(bankSel.denom)} ${bankSel.which === "open" ? "opening" : "closing"} count`}>
           {bankWheelFor(true)}
         </PickerPanel>
       )}

@@ -22,6 +22,8 @@
 // - Wide, without: a popover under (or over) the tapped cell.
 // Every placement is clamped to the visible screen, and the panel is never
 // taller than it (it scrolls inside instead).
+// Closing on a tap outside, or on Escape, is useWheelDismiss below (App runs
+// it for both wheels), not the panel's own job.
 // Choices live in lib/tipPickers.js, which is tested against what the sheet pays.
 
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -41,10 +43,8 @@ const SHEET_QUERY = "(max-width: 1099px)";
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(v, hi));
 const matches = (q) => typeof window !== "undefined" && !!window.matchMedia?.(q).matches;
 
-export function PickerPanel({ anchor, onClose, label, children, beside = null, sheetQuery = SHEET_QUERY }) {
+export function PickerPanel({ anchor, label, children, beside = null, sheetQuery = SHEET_QUERY }) {
   const ref = useRef(null);
-  const closeRef = useRef(onClose);
-  closeRef.current = onClose;
   const [pos, setPos] = useState(null);
   const [sheet, setSheet] = useState(() => matches(sheetQuery));
   const revealedFor = useRef(null); // the cell already scrolled clear of the sheet
@@ -143,36 +143,27 @@ export function PickerPanel({ anchor, onClose, label, children, beside = null, s
       window.removeEventListener("scroll", place, true);
       window.visualViewport?.removeEventListener("resize", place);
       window.visualViewport?.removeEventListener("scroll", place);
-      // The room added below the page goes when the sheet does.
-      if (roomRef.current) {
-        document.body.style.removeProperty("--tp-room");
-        roomRef.current = null;
-        revealedFor.current = null;
-      }
     };
   }, [anchor, sheet, beside]);
 
-  // Tapping outside closes (tapping another cell closes this, then opens that
-  // one — one panel at a time). Escape closes.
-  useEffect(() => {
-    function down(e) {
-      if (ref.current?.contains(e.target) || anchor?.contains(e.target)) return;
-      closeRef.current();
-    }
-    function key(e) { if (e.key === "Escape") closeRef.current(); }
-    document.addEventListener("pointerdown", down, true);
-    document.addEventListener("keydown", key);
-    return () => {
-      document.removeEventListener("pointerdown", down, true);
-      document.removeEventListener("keydown", key);
-    };
-  }, [anchor]);
+  // The room added below the page goes when the panel does, or when it stops
+  // being a bottom sheet (the iPad turned) — not when it moves to another
+  // cell (that would make the page jump between cells).
+  function dropRoom() {
+    if (!roomRef.current) return;
+    document.body.style.removeProperty("--tp-room");
+    roomRef.current = null;
+    revealedFor.current = null;
+  }
+  useEffect(() => { if (!sheet) dropRoom(); }, [sheet]);
+  useEffect(() => dropRoom, []);
 
   const placement = sheet ? " tp-sheet" : beside ? " tp-side" : "";
   const panel = (
     <div
       ref={ref}
       className={`tip-picker screen-only${placement}`}
+      data-wheel-zone=""
       role="dialog"
       aria-label={label}
       style={{ left: pos?.left ?? 0, top: pos?.top ?? 0, maxHeight: pos?.maxH, visibility: pos ? "visible" : "hidden" }}
@@ -182,6 +173,119 @@ export function PickerPanel({ anchor, onClose, label, children, beside = null, s
   );
   const host = anchor?.closest?.(".hub") || document.body;
   return createPortal(panel, host);
+}
+
+// ---- Closing a wheel like a dropdown (2026-11-25) -----------------------
+//
+// Both wheels, bank count and clock, on the Rail tip panel and the Tip Sheet
+// tab, wherever they sit (beside the table, floating, or as a bottom sheet).
+// While one is open (an element marked data-wheel-live is in the page):
+// - A tap anywhere outside the wheel and outside the wheel cells closes it,
+//   and that tap stops there: whatever is under it doesn't react (no button
+//   press, no link, no field focused, no keyboard). onDismiss is App's close,
+//   which saves a spin first, settled or not, exactly as Done does.
+// - A tap on a wheel cell (data-wheel-cell: a time box or a bank cell) is
+//   left alone, so the cell's own handler moves the wheel there in one tap.
+// - Escape closes it. (A typed field inside the wheel takes Escape for itself
+//   first: it stops the key, so this never sees it.)
+// - Scrolling, a pinch, or a drag that starts outside is not a tap: the
+//   wheel stays open.
+// Inside the wheel (data-wheel-zone) nothing changes.
+//
+// How a tap is stopped: on a touch screen the browser makes the click (and
+// focuses a field) only after the finger lifts, unless touchend is cancelled.
+// So a touch that began outside and didn't move is cancelled at touchend and
+// closes the wheel there; a mouse press is cancelled at mousedown (no focus)
+// and its click is swallowed. Clicks made by code (element.click(), the
+// keyboard) are never touched.
+//
+// The listeners stay on for the app's life and only act while a wheel is in
+// the page, so they can never block taps once it's gone.
+const TAP_SLOP = 10;
+
+export function useWheelDismiss(onDismiss) {
+  const dismissRef = useRef(onDismiss);
+  dismissRef.current = onDismiss;
+  useEffect(() => {
+    // start: the press in progress, if it began outside an open wheel.
+    // ghost: where a touch closed the wheel, in case a browser still sends
+    // that tap's click (it shouldn't once touchend is cancelled).
+    let start = null;
+    let ghost = null;
+    const isOpen = () => !!document.querySelector("[data-wheel-live]");
+    const isOutside = (target) => {
+      const el = target instanceof Element ? target : target?.parentElement;
+      return !!el && !el.closest("[data-wheel-zone], [data-wheel-cell]");
+    };
+    const stop = (e) => { e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); };
+    const dismiss = () => dismissRef.current?.();
+
+    function pointerDown(e) {
+      ghost = null;
+      start = null;
+      if (!e.isPrimary || !isOpen() || !isOutside(e.target)) return;
+      start = { id: e.pointerId, type: e.pointerType, x: e.clientX, y: e.clientY, moved: false };
+    }
+    function pointerMove(e) {
+      if (start && e.pointerId === start.id && Math.hypot(e.clientX - start.x, e.clientY - start.y) > TAP_SLOP) start.moved = true;
+    }
+    function pointerCancel(e) {
+      if (start && e.pointerId === start.id) start = null; // the browser took it for a scroll or zoom
+    }
+    function touchStart(e) {
+      if (e.touches.length > 1) start = null; // a second finger: a pinch, not a tap
+    }
+    function touchEnd(e) {
+      if (!start || start.type === "mouse" || start.moved || e.touches.length || !e.cancelable) return;
+      const t = e.changedTouches[0];
+      e.preventDefault(); // no click, no focus, no keyboard
+      start = null;
+      ghost = t ? { x: t.clientX, y: t.clientY, until: Date.now() + 800 } : null;
+      dismiss();
+    }
+    function mouseDown(e) {
+      // No focus and no text selection from a press outside an open wheel.
+      if (start && start.type !== "touch" && e.button === 0) e.preventDefault();
+    }
+    function click(e) {
+      if (ghost && Date.now() < ghost.until && Math.hypot(e.clientX - ghost.x, e.clientY - ghost.y) <= 30) {
+        ghost = null;
+        stop(e);
+        return;
+      }
+      ghost = null;
+      if (e.detail === 0) return; // made by code or the keyboard, not a tap
+      const began = start;
+      start = null;
+      if (!began || began.moved || !isOpen() || !isOutside(e.target)) return;
+      stop(e);
+      dismiss();
+    }
+    function keyDown(e) {
+      if (e.key === "Escape" && isOpen()) dismiss();
+    }
+
+    const cap = { capture: true };
+    const capActive = { capture: true, passive: false };
+    window.addEventListener("pointerdown", pointerDown, cap);
+    window.addEventListener("pointermove", pointerMove, cap);
+    window.addEventListener("pointercancel", pointerCancel, cap);
+    window.addEventListener("touchstart", touchStart, { capture: true, passive: true });
+    window.addEventListener("touchend", touchEnd, capActive);
+    window.addEventListener("mousedown", mouseDown, capActive);
+    window.addEventListener("click", click, capActive);
+    document.addEventListener("keydown", keyDown);
+    return () => {
+      window.removeEventListener("pointerdown", pointerDown, cap);
+      window.removeEventListener("pointermove", pointerMove, cap);
+      window.removeEventListener("pointercancel", pointerCancel, cap);
+      window.removeEventListener("touchstart", touchStart, cap);
+      window.removeEventListener("touchend", touchEnd, cap);
+      window.removeEventListener("mousedown", mouseDown, cap);
+      window.removeEventListener("click", click, cap);
+      document.removeEventListener("keydown", keyDown);
+    };
+  }, []);
 }
 
 // ---- The wheel itself (shared by the bank count and the clock) ----------
@@ -362,6 +466,8 @@ function Drum({ uid, rows, center, jump, scrollProps, label, rowClass }) {
 // Screen only. Tapping a bank cell selects it (App's bankSel); this wheel
 // steps through that denomination, 0 to 100 of the bill or coin (rows from
 // lib wheelRows). Saves through setCount, the old popover's Set handler.
+// Done (2026-11-25: beside the table too, not only in the bottom sheet)
+// closes it the way a tap outside does, saving a spin first.
 export function BankWheel({ denom, denomLabel, columnLabel, value, onSet, flushRef, onDone, reveal = false }) {
   const uid = useId();
   const rootRef = useRef(null);
@@ -420,7 +526,7 @@ export function BankWheel({ denom, denomLabel, columnLabel, value, onSet, flushR
     : wheelCaption(denom, rows[center], denomLabel);
 
   return (
-    <div ref={rootRef} className="bw" role="group" aria-label={`${denomLabel} ${columnLabel} count`}>
+    <div ref={rootRef} className="bw" data-wheel-live="" data-wheel-zone="" role="group" aria-label={`${denomLabel} ${columnLabel} count`}>
       <div className="bw-head">
         <span className="bw-title">{denomLabel} · {columnLabel}</span>
         {onDone && <button type="button" className="bw-done" onClick={onDone}>Done</button>}
@@ -532,7 +638,7 @@ export function ClockWheel({ field, personName, value, scheduled = null, inText 
     : clockCaption({ field, row: rows[center], scheduled: sched, inText });
 
   return (
-    <div className="bw bw-clock" role="group" aria-label={`${personName} ${what.toLowerCase()}`}>
+    <div className="bw bw-clock" data-wheel-live="" data-wheel-zone="" role="group" aria-label={`${personName} ${what.toLowerCase()}`}>
       <div className="bw-head">
         <span className="bw-title">{personName} · {what}</span>
         {onDone && <button type="button" className="bw-done" onClick={onDone}>Done</button>}
